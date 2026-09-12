@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HexShard</string>
+    <string name="saved_messages">Избранное</string>
+    <string name="coming_soon">Скоро появится</string>
+    <string name="ok">ОК</string>
+    <string name="select_language">Выберите язык</string>
+    <string name="english">English</string>
+    <string name="russian">Русский</string>
+    <string name="cancel">Отмена</string>
+    <string name="edit_profile">Изменить профиль</string>
+    <string name="name">Имя</string>
+    <string name="username">Имя пользователя</string>
+    <string name="save">Сохранить</string>
+    <string name="settings">Настройки</string>
+    <string name="account">Аккаунт</string>
+    <string name="profile">Профиль</string>
+    <string name="privacy_security">Конфиденциальность</string>
+    <string name="notifications">Уведомления</string>
+    <string name="app">Приложение</string>
+    <string name="appearance">Оформление</string>
+    <string name="language">Язык</string>
+    <string name="storage_data">Данные и память</string>
+    <string name="support">Поддержка</string>
+    <string name="help_center">Помощь / FAQ</string>
+    <string name="report_problem">Сообщить о проблеме</string>
+    <string name="contact_support">Связаться с поддержкой</string>
+    <string name="about">О приложении</string>
+    <string name="privacy_policy">Политика конфиденциальности</string>
+    <string name="terms_service">Условия использования</string>
+</resources>

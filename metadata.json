@@ -1,0 +1,6 @@
+{
+  "name": "HexShard",
+  "description": "A fast, private, minimalist messenger styled with a premium dark Spotify-like green theme.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
