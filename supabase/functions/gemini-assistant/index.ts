@@ -202,7 +202,18 @@ serve(async (req: Request) => {
       );
     }
 
-    const rawPersona = String(payload?.persona_id || "ventaxis").toLowerCase().trim();
+    const rawPersona = payload?.persona_id ? String(payload.persona_id).toLowerCase().trim() : "";
+    if (!rawPersona) {
+      return new Response(
+        JSON.stringify({
+          error: "persona_id is required",
+          code: "AI_INVALID_REQUEST",
+          message: "persona_id is required. Allowed personas: ventaxis, hexagon"
+        }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     let canonicalPersona: "ventaxis" | "hexagon";
     let modelId: string;
     let systemPrompt: string;
@@ -210,12 +221,12 @@ serve(async (req: Request) => {
 
     if (rawPersona === "ventaxis") {
       canonicalPersona = "ventaxis";
-      modelId = "gemini-3.5-flash";
+      modelId = "gemini-3.6-flash";
       systemPrompt = VENTAXIS_SYSTEM_PROMPT;
       temperature = 0.7;
     } else if (rawPersona === "hexagon") {
       canonicalPersona = "hexagon";
-      modelId = "gemini-2.5-flash";
+      modelId = "gemini-3.5-flash-lite";
       systemPrompt = HEXAGON_SYSTEM_PROMPT;
       temperature = 0.3;
     } else {

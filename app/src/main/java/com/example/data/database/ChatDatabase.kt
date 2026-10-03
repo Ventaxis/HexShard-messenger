@@ -158,16 +158,16 @@ interface ChatDao {
     @Query("SELECT * FROM chats WHERE (conversationType = 'SAVED_MESSAGES' OR conversationId LIKE 'self_%' OR recipientId = 'self' OR name = 'Saved Messages' OR name = 'Избранное') AND accountId = :accountId ORDER BY id ASC")
     suspend fun getAllSavedMessagesChats(accountId: String): List<ChatEntity>
 
-    @Query("SELECT * FROM chats WHERE (conversationType = 'AI_ASSISTANT' OR conversationId = 'ai_' || :accountId OR recipientId = 'ai_assistant') AND accountId = :accountId LIMIT 1")
+    @Query("SELECT * FROM chats WHERE (conversationType = 'AI_ASSISTANT' OR conversationId = 'ai_' || :accountId OR recipientId = 'ai_assistant' OR recipientId = 'ai_' || :accountId) AND accountId = :accountId LIMIT 1")
     suspend fun getAiAssistantChat(accountId: String): ChatEntity?
 
-    @Query("SELECT * FROM chats WHERE (conversationId = 'ai_ventaxis_' || :accountId OR recipientId = 'ai_ventaxis' OR (conversationType = 'AI_ASSISTANT' AND name LIKE '%Ventaxis%') OR conversationId = 'ai_' || :accountId OR recipientId = 'ai_assistant') AND accountId = :accountId LIMIT 1")
+    @Query("SELECT * FROM chats WHERE (conversationType = 'AI_ASSISTANT' OR conversationId = 'ai_' || :accountId OR recipientId = 'ai_assistant' OR recipientId = 'ai_' || :accountId) AND accountId = :accountId LIMIT 1")
     suspend fun getVentaxisChat(accountId: String): ChatEntity?
 
-    @Query("SELECT * FROM chats WHERE (conversationId = 'ai_hexagon_' || :accountId OR recipientId = 'ai_hexagon' OR (conversationType = 'AI_ASSISTANT' AND name LIKE '%Hexagon%')) AND accountId = :accountId LIMIT 1")
+    @Query("SELECT * FROM chats WHERE (conversationType = 'AI_ASSISTANT' OR conversationId = 'ai_' || :accountId OR recipientId = 'ai_assistant' OR recipientId = 'ai_' || :accountId) AND accountId = :accountId LIMIT 1")
     suspend fun getHexagonChat(accountId: String): ChatEntity?
 
-    @Query("SELECT * FROM chats WHERE (conversationType = 'AI_ASSISTANT' OR conversationId LIKE 'ai_%' OR recipientId LIKE 'ai_%' OR name LIKE '%Hexagon%' OR name LIKE '%Ventaxis%') AND accountId = :accountId ORDER BY id ASC")
+    @Query("SELECT * FROM chats WHERE (conversationType = 'AI_ASSISTANT' OR conversationId LIKE 'ai_%' OR recipientId LIKE 'ai_%' OR recipientId = 'ai_assistant') AND accountId = :accountId ORDER BY id ASC")
     suspend fun getAllAiChats(accountId: String): List<ChatEntity>
 
     @Query("SELECT * FROM chats WHERE accountId = :accountId ORDER BY isPinned DESC, timestamp DESC")
@@ -185,11 +185,20 @@ interface ChatDao {
     @Query("SELECT * FROM chats WHERE conversationType = :conversationType AND accountId = :accountId LIMIT 1")
     suspend fun getChatByConversationType(conversationType: String, accountId: String): ChatEntity?
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun insertChat(chat: ChatEntity): Long
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun insertChats(chats: List<ChatEntity>)
+
+    @Update
+    suspend fun updateChat(chat: ChatEntity)
+
+    @Upsert
+    suspend fun upsertChat(chat: ChatEntity): Long
+
+    @Upsert
+    suspend fun upsertChats(chats: List<ChatEntity>)
 
     @Query("DELETE FROM chats WHERE id = :id AND accountId = :accountId")
     suspend fun deleteChatById(id: Int, accountId: String)

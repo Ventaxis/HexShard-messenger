@@ -340,11 +340,36 @@ class MessageRepository(
             var rpcResp = httpClient.newCall(rpcReq).execute()
             var isSuccess = rpcResp.isSuccessful
             var errorBody = if (!isSuccess) rpcResp.body?.string() ?: "" else ""
+            val initialCode = rpcResp.code
             rpcResp.close()
 
+            // If unauthorized 401, attempt single-flight token refresh and retry
+            if (!isSuccess && initialCode == 401 && context != null) {
+                val refresh = SecurePrefsManager.getSupabaseRefreshToken(context)
+                if (refresh.isNotBlank()) {
+                    Timber.i("send_message_idempotent received 401; attempting token refresh...")
+                    val refreshed = com.example.network.supabase.SessionManager.refreshSession(context, refresh)
+                    if (refreshed == com.example.network.supabase.AuthState.AUTHENTICATED) {
+                        val newAccess = SecurePrefsManager.getSupabaseAccessToken(context)
+                        if (newAccess.isNotBlank()) {
+                            val retryReq = rpcReq.newBuilder()
+                                .header("Authorization", "Bearer $newAccess")
+                                .build()
+                            val retryResp = httpClient.newCall(retryReq).execute()
+                            isSuccess = retryResp.isSuccessful
+                            if (!isSuccess) {
+                                errorBody = retryResp.body?.string() ?: ""
+                            }
+                            retryResp.close()
+                        }
+                    }
+                }
+            }
+
             // If schema cache mismatch, try non-prefixed parameter names
-            if (!isSuccess && (rpcResp.code == 404 || errorBody.contains("schema cache") || errorBody.contains("Could not find the function") || errorBody.contains("PGRST202"))) {
+            if (!isSuccess && (initialCode == 404 || errorBody.contains("schema cache") || errorBody.contains("Could not find the function") || errorBody.contains("PGRST202"))) {
                 Timber.w("send_message_idempotent schema mismatch, trying fallback payload without p_ prefix")
+                val activeToken = (if (context != null) SecurePrefsManager.getSupabaseAccessToken(context) else "").ifBlank { accessToken }
                 val fallbackPayload = JSONObject().apply {
                     put("conversation_id", conversationId)
                     put("client_message_id", idempotencyKey)
@@ -364,7 +389,7 @@ class MessageRepository(
                 val fallbackReq = Request.Builder()
                     .url("$baseUrl/rest/v1/rpc/send_message_idempotent")
                     .header("apikey", anonKey)
-                    .header("Authorization", "Bearer $accessToken")
+                    .header("Authorization", "Bearer $activeToken")
                     .header("Content-Type", "application/json")
                     .post(fallbackPayload.toString().toRequestBody(JSON_MEDIA))
                     .build()
@@ -377,7 +402,7 @@ class MessageRepository(
                 }
                 rpcResp.close()
             } else if (!isSuccess) {
-                Timber.w("send_message_idempotent RPC failed with HTTP ${rpcResp.code}: $errorBody")
+                Timber.w("send_message_idempotent RPC failed: $errorBody")
             }
 
             isSuccess

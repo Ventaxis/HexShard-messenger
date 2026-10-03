@@ -164,10 +164,13 @@ class ConversationRepository(
         }
         
         defaultChatsMutex.withLock {
-            // 1. Backfill any legacy records with empty accountId to targetAccountId
-            chatDao.backfillLegacyChatsAccountId(targetAccountId)
-            chatDao.backfillLegacyMessagesAccountId(targetAccountId)
-            chatDao.backfillLegacyOutboxAccountId(targetAccountId)
+            // 1. One-time deterministic reconciliation of legacy records with empty accountId
+            if (context != null && !SecurePrefsManager.isLegacyMigrationDone(context)) {
+                chatDao.backfillLegacyChatsAccountId(targetAccountId)
+                chatDao.backfillLegacyMessagesAccountId(targetAccountId)
+                chatDao.backfillLegacyOutboxAccountId(targetAccountId)
+                SecurePrefsManager.setLegacyMigrationDone(context, true)
+            }
 
             val isRussian = LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN
             val savedName = if (isRussian) "Избранное" else "Saved Messages"
@@ -241,7 +244,7 @@ class ConversationRepository(
                     conversationId = selfConvId,
                     isPinned = true
                 )
-                chatDao.insertChat(updated)
+                chatDao.updateChat(updated)
                 val msgs = chatDao.getMessagesForChatForAccount(masterSaved.id, targetAccountId).first()
                 if (msgs.isEmpty()) {
                     chatDao.insertMessage(
@@ -334,7 +337,7 @@ class ConversationRepository(
                     conversationType = com.example.data.ConversationType.AI_ASSISTANT.name,
                     accountId = targetAccountId
                 )
-                chatDao.insertChat(updated)
+                chatDao.updateChat(updated)
                 val msgs = chatDao.getMessagesForChatForAccount(primaryAi.id, targetAccountId).first()
                 if (msgs.none { it.personaId == "hexagon" }) {
                     chatDao.insertMessage(

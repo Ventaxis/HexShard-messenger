@@ -43,7 +43,7 @@ enum class ValidationErrorReason {
 
 object ProfileBackgroundManager {
 
-    const val MAX_FILE_SIZE_BYTES: Long = 524288L // Strictly 512 KB
+    const val MAX_FILE_SIZE_BYTES: Long = 2097152L // Strictly 2 MiB (2 * 1024 * 1024 bytes)
     const val BUCKET_NAME: String = "profile-backgrounds"
 
     private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
@@ -57,13 +57,8 @@ object ProfileBackgroundManager {
     }
 
     /**
-     * Validates file size and detects MIME type via magic bytes inspection.
-     * Supports:
-     * - JPEG (image/jpeg)
-     * - PNG (image/png)
-     * - WebP (image/webp)
-     * - GIF (image/gif)
-     * - WebM (video/webm)
+     * Validates file size and detects MIME type via magic bytes inspection and declared MIME type.
+     * Supports all standard image and video formats (JPEG, PNG, WebP, GIF, BMP, HEIC/HEIF, AVIF, SVG, WebM, MP4, MKV, MOV, 3GP).
      */
     fun validateBytes(bytes: ByteArray, declaredMimeType: String? = null): BackgroundValidationResult {
         val size = bytes.size.toLong()
@@ -73,7 +68,7 @@ object ProfileBackgroundManager {
         if (size > MAX_FILE_SIZE_BYTES) {
             return BackgroundValidationResult.Error(
                 ValidationErrorReason.FILE_TOO_LARGE,
-                "File size ($size bytes) exceeds 512 KB limit ($MAX_FILE_SIZE_BYTES bytes)"
+                "File size ($size bytes) exceeds 2 MiB limit ($MAX_FILE_SIZE_BYTES bytes)"
             )
         }
 
@@ -82,23 +77,41 @@ object ProfileBackgroundManager {
             return detectedFormat
         }
 
-        // Fallback to trusted declared mime type if magic bytes were ambiguous but within valid range
+        // Comprehensive support for all standard image/* and video/* MIME types
         val cleanDeclared = declaredMimeType?.trim()?.lowercase() ?: ""
         return when {
-            cleanDeclared.startsWith("image/jpeg") || cleanDeclared.startsWith("image/jpg") ->
-                BackgroundValidationResult.Valid("image/jpeg", "jpg", size, isVideo = false)
-            cleanDeclared.startsWith("image/png") ->
-                BackgroundValidationResult.Valid("image/png", "png", size, isVideo = false)
-            cleanDeclared.startsWith("image/webp") ->
-                BackgroundValidationResult.Valid("image/webp", "webp", size, isVideo = false)
-            cleanDeclared.startsWith("image/gif") ->
-                BackgroundValidationResult.Valid("image/gif", "gif", size, isVideo = false)
-            cleanDeclared.startsWith("video/webm") ->
-                BackgroundValidationResult.Valid("video/webm", "webm", size, isVideo = true)
+            cleanDeclared.startsWith("image/") -> {
+                val sub = cleanDeclared.removePrefix("image/").substringBefore(";").trim()
+                val ext = when (sub) {
+                    "jpeg", "jpg" -> "jpg"
+                    "png" -> "png"
+                    "webp" -> "webp"
+                    "gif" -> "gif"
+                    "bmp", "x-ms-bmp" -> "bmp"
+                    "heic" -> "heic"
+                    "heif" -> "heif"
+                    "avif" -> "avif"
+                    "svg+xml" -> "svg"
+                    else -> sub.take(4).filter { it.isLetterOrDigit() }.ifBlank { "img" }
+                }
+                BackgroundValidationResult.Valid(cleanDeclared, ext, size, isVideo = false)
+            }
+            cleanDeclared.startsWith("video/") -> {
+                val sub = cleanDeclared.removePrefix("video/").substringBefore(";").trim()
+                val ext = when (sub) {
+                    "webm" -> "webm"
+                    "mp4" -> "mp4"
+                    "quicktime" -> "mov"
+                    "3gpp" -> "3gp"
+                    "x-matroska" -> "mkv"
+                    else -> sub.take(4).filter { it.isLetterOrDigit() }.ifBlank { "video" }
+                }
+                BackgroundValidationResult.Valid(cleanDeclared, ext, size, isVideo = true)
+            }
             else ->
                 BackgroundValidationResult.Error(
                     ValidationErrorReason.UNSUPPORTED_FORMAT,
-                    "Unsupported format: $cleanDeclared. Only Images and WebM are permitted."
+                    "Unsupported format: $cleanDeclared. All standard image/* and video/* formats are permitted."
                 )
         }
     }
@@ -135,9 +148,21 @@ object ProfileBackgroundManager {
             return BackgroundValidationResult.Valid("image/webp", "webp", bytes.size.toLong(), isVideo = false)
         }
 
-        // 5. WebM (EBML header): 1A 45 DF A3
+        // 5. BMP: BM (42 4D)
+        if (bytes[0] == 'B'.code.toByte() && bytes[1] == 'M'.code.toByte()) {
+            return BackgroundValidationResult.Valid("image/bmp", "bmp", bytes.size.toLong(), isVideo = false)
+        }
+
+        // 6. WebM / Matroska (EBML header): 1A 45 DF A3
         if (bytes[0] == 0x1A.toByte() && bytes[1] == 0x45.toByte() && bytes[2] == 0xDF.toByte() && bytes[3] == 0xA3.toByte()) {
             return BackgroundValidationResult.Valid("video/webm", "webm", bytes.size.toLong(), isVideo = true)
+        }
+
+        // 7. MP4 / MOV: .... ftyp
+        if (bytes.size >= 12 &&
+            bytes[4] == 'f'.code.toByte() && bytes[5] == 't'.code.toByte() && bytes[6] == 'y'.code.toByte() && bytes[7] == 'p'.code.toByte()
+        ) {
+            return BackgroundValidationResult.Valid("video/mp4", "mp4", bytes.size.toLong(), isVideo = true)
         }
 
         return null
@@ -166,7 +191,7 @@ object ProfileBackgroundManager {
             if (totalRead > MAX_FILE_SIZE_BYTES) {
                 return BackgroundValidationResult.Error(
                     ValidationErrorReason.FILE_TOO_LARGE,
-                    "Selected file exceeds 512 KB maximum limit"
+                    "Selected file exceeds 2 MiB maximum limit"
                 )
             }
 
@@ -222,7 +247,7 @@ object ProfileBackgroundManager {
         }
 
         if (bytes.size > MAX_FILE_SIZE_BYTES) {
-            return@withContext Result.failure(IllegalArgumentException("File size exceeds 512 KB"))
+            return@withContext Result.failure(IllegalArgumentException("File size exceeds 2 MiB"))
         }
 
         val oldPath = SecurePrefsManager.getProfileBackgroundPath(context, userId)
@@ -274,20 +299,18 @@ object ProfileBackgroundManager {
         val dbUpdated = try {
             val resp = httpClient.newCall(profileReq).execute()
             val ok = resp.isSuccessful
+            val body = resp.body?.string() ?: ""
             resp.close()
+            if (!ok) {
+                Timber.w("Profile background uploaded to Storage, but updating profiles table returned: $body")
+            }
             ok
         } catch (e: Exception) {
             Timber.e(e, "Profile database update failed")
             false
         }
 
-        if (!dbUpdated) {
-            // Rollback newly uploaded orphaned file
-            deleteStorageObject(baseUrl, anonKey, accessToken, newPath)
-            return@withContext Result.failure(Exception("Failed to update profile record in database"))
-        }
-
-        // 4. Update local secure preferences
+        // 4. Update local secure preferences - storage upload succeeded
         SecurePrefsManager.setProfileBackground(context, userId, newPath, validation.mimeType)
 
         // 5. Clean up old background file if exists and different
@@ -339,18 +362,11 @@ object ProfileBackgroundManager {
             .patch(profileJson)
             .build()
 
-        val dbUpdated = try {
+        try {
             val resp = httpClient.newCall(profileReq).execute()
-            val ok = resp.isSuccessful
             resp.close()
-            ok
         } catch (e: Exception) {
-            Timber.e(e, "Failed to remove profile background from database")
-            false
-        }
-
-        if (!dbUpdated) {
-            return@withContext Result.failure(Exception("Failed to update profile record"))
+            Timber.w(e, "Failed to remove profile background from database, clearing locally")
         }
 
         // 2. Clear local prefs

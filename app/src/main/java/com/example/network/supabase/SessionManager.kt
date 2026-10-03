@@ -8,6 +8,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -16,8 +18,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import timber.log.Timber
 import java.util.concurrent.TimeUnit
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicLong
 
 enum class AuthState {
     UNKNOWN,
@@ -26,26 +27,32 @@ enum class AuthState {
     AUTHENTICATED_OFFLINE_CACHED,
     TOKEN_EXPIRED,
     UNAUTHENTICATED,
-    REFRESHING
+    REFRESHING,
+    CONFIGURATION_ERROR
 }
 
-data class SessionData(
+data class SessionRecord(
     val userId: String,
     val username: String,
     val accessToken: String,
     val refreshToken: String,
-    val isTelegramVerified: Boolean,
-    val virtualNumber: String
+    val expiresAt: Long = 0L,
+    val generation: Long = 0L,
+    val isTelegramVerified: Boolean = false,
+    val virtualNumber: String = ""
 )
+
+typealias SessionData = SessionRecord
 
 object SessionManager {
 
     private val _authState = MutableStateFlow(AuthState.UNKNOWN)
     val authState: StateFlow<AuthState> = _authState.asStateFlow()
 
-    private val _currentSession = MutableStateFlow<SessionData?>(null)
-    val currentSession: StateFlow<SessionData?> = _currentSession.asStateFlow()
+    private val _currentSession = MutableStateFlow<SessionRecord?>(null)
+    val currentSession: StateFlow<SessionRecord?> = _currentSession.asStateFlow()
 
+    private val sessionGeneration = AtomicLong(1L)
     private val refreshMutex = Mutex()
 
     private val httpClient: OkHttpClient by lazy {
@@ -55,6 +62,12 @@ object SessionManager {
             .build()
     }
     private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
+
+    fun getCurrentGeneration(): Long = sessionGeneration.get()
+
+    fun isGenerationActive(generation: Long): Boolean = sessionGeneration.get() == generation
+
+    fun nextGeneration(): Long = sessionGeneration.incrementAndGet()
 
     suspend fun checkSession(context: Context): AuthState = withContext(Dispatchers.IO) {
         _authState.value = AuthState.CHECKING
@@ -74,21 +87,24 @@ object SessionManager {
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(context)
         if (anonKey.isBlank()) {
-            Timber.w("Supabase anon key not configured; falling back to offline cached session")
+            Timber.w("Supabase anon key not configured; reporting CONFIGURATION_ERROR")
             val vNum = SecurePrefsManager.getPrivateVirtualNumber(context, userId)
             val isTg = SecurePrefsManager.isTelegramVerified(context)
-            val session = SessionData(
+            val session = SessionRecord(
                 userId = userId,
                 username = username,
                 accessToken = accessToken,
                 refreshToken = refreshToken,
+                generation = sessionGeneration.get(),
                 isTelegramVerified = isTg,
                 virtualNumber = vNum
             )
             _currentSession.value = session
-            _authState.value = AuthState.AUTHENTICATED_OFFLINE_CACHED
-            return@withContext AuthState.AUTHENTICATED_OFFLINE_CACHED
+            _authState.value = AuthState.CONFIGURATION_ERROR
+            return@withContext AuthState.CONFIGURATION_ERROR
         }
+
+        val currentGen = sessionGeneration.get()
 
         try {
             val req = Request.Builder()
@@ -104,13 +120,31 @@ object SessionManager {
 
             when {
                 resp.isSuccessful -> {
+                    if (!isGenerationActive(currentGen)) {
+                        Timber.w("Stale checkSession response discarded due to generation mismatch")
+                        return@withContext _authState.value
+                    }
+
+                    // Verify server user identity
+                    val serverUid = try {
+                        JSONObject(body).optString("id")
+                    } catch (_: Exception) { "" }
+
+                    if (serverUid.isNotBlank() && serverUid != userId) {
+                        Timber.e("Server user ID mismatch ($serverUid != $userId). Invalidate session.")
+                        clearSessionSoft(context)
+                        _authState.value = AuthState.UNAUTHENTICATED
+                        return@withContext AuthState.UNAUTHENTICATED
+                    }
+
                     val vNum = SecurePrefsManager.getPrivateVirtualNumber(context, userId)
                     val isTg = SecurePrefsManager.isTelegramVerified(context)
-                    val session = SessionData(
+                    val session = SessionRecord(
                         userId = userId,
                         username = username,
                         accessToken = accessToken,
                         refreshToken = refreshToken,
+                        generation = currentGen,
                         isTelegramVerified = isTg,
                         virtualNumber = vNum
                     )
@@ -119,11 +153,30 @@ object SessionManager {
                     return@withContext AuthState.AUTHENTICATED
                 }
                 code == 401 -> {
+                    val errLower = body.lowercase()
+                    if (errLower.contains("invalid api key") || errLower.contains("invalid apikey")) {
+                        Timber.w("Supabase public API key rejected by server (401: $body). Preserving user session as CONFIGURATION_ERROR.")
+                        val vNum = SecurePrefsManager.getPrivateVirtualNumber(context, userId)
+                        val isTg = SecurePrefsManager.isTelegramVerified(context)
+                        val session = SessionRecord(
+                            userId = userId,
+                            username = username,
+                            accessToken = accessToken,
+                            refreshToken = refreshToken,
+                            generation = currentGen,
+                            isTelegramVerified = isTg,
+                            virtualNumber = vNum
+                        )
+                        _currentSession.value = session
+                        _authState.value = AuthState.CONFIGURATION_ERROR
+                        return@withContext AuthState.CONFIGURATION_ERROR
+                    }
                     // Token expired - attempt single-flight token refresh
                     if (refreshToken.isNotBlank()) {
                         return@withContext refreshSession(context, refreshToken)
                     } else {
                         clearSessionSoft(context)
+                        _authState.value = AuthState.UNAUTHENTICATED
                         return@withContext AuthState.UNAUTHENTICATED
                     }
                 }
@@ -132,11 +185,12 @@ object SessionManager {
                     Timber.w("Supabase returned status $code ($body). Preserving session as AUTHENTICATED_OFFLINE_CACHED.")
                     val vNum = SecurePrefsManager.getPrivateVirtualNumber(context, userId)
                     val isTg = SecurePrefsManager.isTelegramVerified(context)
-                    val session = SessionData(
+                    val session = SessionRecord(
                         userId = userId,
                         username = username,
                         accessToken = accessToken,
                         refreshToken = refreshToken,
+                        generation = currentGen,
                         isTelegramVerified = isTg,
                         virtualNumber = vNum
                     )
@@ -145,7 +199,6 @@ object SessionManager {
                     return@withContext AuthState.AUTHENTICATED_OFFLINE_CACHED
                 }
                 code == 403 -> {
-                    // 403 Forbidden: check if refresh token can recover
                     if (refreshToken.isNotBlank()) {
                         val refState = refreshSession(context, refreshToken)
                         if (refState == AuthState.AUTHENTICATED || refState == AuthState.AUTHENTICATED_OFFLINE_CACHED) {
@@ -171,11 +224,12 @@ object SessionManager {
             Timber.w(e, "Network exception during Supabase session validation. Using AUTHENTICATED_OFFLINE_CACHED.")
             val vNum = SecurePrefsManager.getPrivateVirtualNumber(context, userId)
             val isTg = SecurePrefsManager.isTelegramVerified(context)
-            val session = SessionData(
+            val session = SessionRecord(
                 userId = userId,
                 username = username,
                 accessToken = accessToken,
                 refreshToken = refreshToken,
+                generation = currentGen,
                 isTelegramVerified = isTg,
                 virtualNumber = vNum
             )
@@ -187,6 +241,8 @@ object SessionManager {
 
     suspend fun refreshSession(context: Context, refreshToken: String): AuthState = withContext(Dispatchers.IO) {
         refreshMutex.withLock {
+            val requestGen = sessionGeneration.get()
+
             // Check if another coroutine already refreshed the token
             val currentStoredAccess = SecurePrefsManager.getSupabaseAccessToken(context)
             val currentStoredRefresh = SecurePrefsManager.getSupabaseRefreshToken(context)
@@ -194,11 +250,12 @@ object SessionManager {
                 val uid = SecurePrefsManager.getUserId(context)
                 val vNum = SecurePrefsManager.getPrivateVirtualNumber(context, uid)
                 val isTg = SecurePrefsManager.isTelegramVerified(context)
-                val session = SessionData(
+                val session = SessionRecord(
                     userId = uid,
                     username = SecurePrefsManager.getUsername(context),
                     accessToken = currentStoredAccess,
                     refreshToken = currentStoredRefresh,
+                    generation = requestGen,
                     isTelegramVerified = isTg,
                     virtualNumber = vNum
                 )
@@ -212,18 +269,18 @@ object SessionManager {
             val anonKey = SupabaseConfig.getAnonKey(context)
             if (anonKey.isBlank()) {
                 Timber.w("Cannot refresh token without Supabase anon key")
-                _authState.value = AuthState.AUTHENTICATED_OFFLINE_CACHED
-                return@withLock AuthState.AUTHENTICATED_OFFLINE_CACHED
+                _authState.value = AuthState.CONFIGURATION_ERROR
+                return@withLock AuthState.CONFIGURATION_ERROR
             }
 
             val payload = JSONObject().apply {
                 put("refresh_token", refreshToken)
             }
 
+            // CRITICAL: Refresh request uses ONLY apikey header. NEVER Authorization: Bearer $anonKey!
             val req = Request.Builder()
                 .url("$baseUrl/auth/v1/token?grant_type=refresh_token")
                 .header("apikey", anonKey)
-                .header("Authorization", "Bearer $anonKey")
                 .header("Content-Type", "application/json")
                 .post(payload.toString().toRequestBody(JSON_MEDIA))
                 .build()
@@ -233,22 +290,31 @@ object SessionManager {
                 val code = resp.code
                 val body = resp.body?.string() ?: ""
 
+                // Verify session generation is still active (no account switch occurred during network call)
+                if (!isGenerationActive(requestGen)) {
+                    Timber.w("Refresh response discarded: session generation changed ($requestGen != ${sessionGeneration.get()})")
+                    return@withLock _authState.value
+                }
+
                 if (resp.isSuccessful && body.isNotEmpty()) {
                     val json = JSONObject(body)
                     val newAccess = json.optString("access_token")
-                    val newRefresh = json.optString("refresh_token")
+                    val rawNewRefresh = json.optString("refresh_token")
+                    // If server didn't issue a new refresh token, preserve current valid refresh token!
+                    val finalRefresh = if (rawNewRefresh.isNotBlank()) rawNewRefresh else refreshToken
                     val userObj = json.optJSONObject("user")
                     val uid = userObj?.optString("id") ?: SecurePrefsManager.getUserId(context)
 
                     if (newAccess.isNotBlank()) {
-                        SecurePrefsManager.saveSupabaseTokens(context, newAccess, newRefresh)
+                        SecurePrefsManager.saveSupabaseTokens(context, newAccess, finalRefresh)
                         val vNum = SecurePrefsManager.getPrivateVirtualNumber(context, uid)
                         val isTg = SecurePrefsManager.isTelegramVerified(context)
-                        val session = SessionData(
+                        val session = SessionRecord(
                             userId = uid,
                             username = SecurePrefsManager.getUsername(context),
                             accessToken = newAccess,
-                            refreshToken = newRefresh,
+                            refreshToken = finalRefresh,
+                            generation = requestGen,
                             isTelegramVerified = isTg,
                             virtualNumber = vNum
                         )
@@ -257,18 +323,28 @@ object SessionManager {
                         return@withLock AuthState.AUTHENTICATED
                     }
                 } else if (code == 400 || code == 401) {
-                    Timber.w("Refresh token rejected by server (status $code); clearing tokens only")
-                    clearSessionSoft(context)
-                    _authState.value = AuthState.UNAUTHENTICATED
-                    return@withLock AuthState.UNAUTHENTICATED
+                    val errLower = body.lowercase()
+                    if (errLower.contains("invalid api key") || errLower.contains("invalid apikey")) {
+                        Timber.w("Supabase anon key rejected by server during refresh ($code: $body); preserving session as CONFIGURATION_ERROR")
+                        _authState.value = AuthState.CONFIGURATION_ERROR
+                        return@withLock AuthState.CONFIGURATION_ERROR
+                    } else if (errLower.contains("invalid_grant") || errLower.contains("refresh_token_not_found") || errLower.contains("invalid refresh token")) {
+                        Timber.w("Refresh token rejected by server ($code: $body); invalidating session")
+                        clearSessionSoft(context)
+                        _authState.value = AuthState.UNAUTHENTICATED
+                        return@withLock AuthState.UNAUTHENTICATED
+                    } else {
+                        Timber.w("Token refresh returned $code: $body. Preserving cached session.")
+                        _authState.value = AuthState.AUTHENTICATED_OFFLINE_CACHED
+                        return@withLock AuthState.AUTHENTICATED_OFFLINE_CACHED
+                    }
                 } else {
-                    Timber.w("Token refresh non-terminal error ($code). Keeping cached session.")
+                    Timber.w("Token refresh non-terminal status ($code). Keeping cached session.")
                     _authState.value = AuthState.AUTHENTICATED_OFFLINE_CACHED
                     return@withLock AuthState.AUTHENTICATED_OFFLINE_CACHED
                 }
             } catch (e: Exception) {
                 Timber.e(e, "Token refresh network exception")
-                // On transient network failure, mark offline cached
                 _authState.value = AuthState.AUTHENTICATED_OFFLINE_CACHED
                 return@withLock AuthState.AUTHENTICATED_OFFLINE_CACHED
             }
@@ -292,19 +368,17 @@ object SessionManager {
             return
         }
 
+        val newGen = nextGeneration()
+
         SecurePrefsManager.saveProfile(
             context = context,
             userId = userId,
             username = username,
             phone = "",
-            accountType = AccountType.PHONE // Registered server-backed account
+            accountType = AccountType.PHONE
         )
         SecurePrefsManager.saveSupabaseTokens(context, accessToken, refreshToken)
 
-        // Account-scoped virtual number handling:
-        // 1. If server provides a valid virtualNumber, save it for this userId.
-        // 2. If server provides blank (e.g. transient error during login), check if this exact account
-        //    already holds a valid local cached number. If so, preserve it instead of wiping.
         val finalVirtualNumber = if (virtualNumber.isNotBlank()) {
             SecurePrefsManager.setPrivateVirtualNumber(context, virtualNumber, userId)
             VirtualNumberGenerator.format8Digits(virtualNumber)
@@ -319,11 +393,12 @@ object SessionManager {
 
         SecurePrefsManager.setTelegramVerified(context, isTelegramVerified)
 
-        val session = SessionData(
+        val session = SessionRecord(
             userId = userId,
             username = username,
             accessToken = accessToken,
             refreshToken = refreshToken,
+            generation = newGen,
             isTelegramVerified = isTelegramVerified,
             virtualNumber = finalVirtualNumber
         )
@@ -344,6 +419,7 @@ object SessionManager {
     }
 
     fun clearSessionSoft(context: Context) {
+        nextGeneration()
         SecurePrefsManager.clearTokensOnly(context)
         _currentSession.value = null
         _authState.value = AuthState.UNAUTHENTICATED
@@ -361,6 +437,7 @@ object SessionManager {
         val uid = _currentSession.value?.userId ?: SecurePrefsManager.getUserId(context)
         SecurePrefsManager.clearPrivateVirtualNumber(context, uid)
         SecurePrefsManager.clear(context)
+        nextGeneration()
         _currentSession.value = null
         _authState.value = AuthState.UNAUTHENTICATED
     }

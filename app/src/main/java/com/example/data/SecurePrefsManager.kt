@@ -93,20 +93,71 @@ object SecurePrefsManager {
         return getPrefs(context).getString("phone", "") ?: ""
     }
 
-    fun getBio(context: Context): String {
-        return getPrefs(context).getString("profile_bio", "") ?: ""
+    fun getBio(context: Context, accountId: String? = null): String {
+        val targetId = accountId?.trim()?.ifBlank { null } ?: getUserId(context).trim().ifBlank { null }
+        val prefs = getPrefs(context)
+        if (targetId != null) {
+            return prefs.getString("profile_bio_$targetId", "") ?: ""
+        }
+        return prefs.getString("profile_bio", "") ?: ""
     }
 
-    fun setBio(context: Context, bio: String) {
-        getPrefs(context).edit().putString("profile_bio", bio).apply()
+    fun setBio(context: Context, bio: String, accountId: String? = null) {
+        val targetId = accountId?.trim()?.ifBlank { null } ?: getUserId(context).trim().ifBlank { null }
+        val editor = getPrefs(context).edit()
+        if (targetId != null) {
+            editor.putString("profile_bio_$targetId", bio)
+        }
+        val currentActiveId = getUserId(context).trim().ifBlank { null }
+        if (targetId == null || targetId == currentActiveId) {
+            editor.putString("profile_bio", bio)
+        }
+        editor.apply()
     }
 
-    fun getDateOfBirth(context: Context): String {
-        return getPrefs(context).getString("profile_dob", "") ?: ""
+    fun getDateOfBirth(context: Context, accountId: String? = null): String {
+        val targetId = accountId?.trim()?.ifBlank { null } ?: getUserId(context).trim().ifBlank { null }
+        val prefs = getPrefs(context)
+        if (targetId != null) {
+            return prefs.getString("profile_dob_$targetId", "") ?: ""
+        }
+        return prefs.getString("profile_dob", "") ?: ""
     }
 
-    fun setDateOfBirth(context: Context, dob: String) {
-        getPrefs(context).edit().putString("profile_dob", dob).apply()
+    fun setDateOfBirth(context: Context, dob: String, accountId: String? = null) {
+        val targetId = accountId?.trim()?.ifBlank { null } ?: getUserId(context).trim().ifBlank { null }
+        val editor = getPrefs(context).edit()
+        if (targetId != null) {
+            editor.putString("profile_dob_$targetId", dob)
+        }
+        val currentActiveId = getUserId(context).trim().ifBlank { null }
+        if (targetId == null || targetId == currentActiveId) {
+            editor.putString("profile_dob", dob)
+        }
+        editor.apply()
+    }
+
+    fun getDisplayName(context: Context, accountId: String? = null): String {
+        val targetId = accountId?.trim()?.ifBlank { null } ?: getUserId(context).trim().ifBlank { null }
+        val prefs = getPrefs(context)
+        if (targetId != null) {
+            val accountName = prefs.getString("profile_display_name_$targetId", "") ?: ""
+            if (accountName.isNotBlank()) return accountName
+        }
+        return prefs.getString("profile_display_name", "") ?: ""
+    }
+
+    fun setDisplayName(context: Context, displayName: String, accountId: String? = null) {
+        val targetId = accountId?.trim()?.ifBlank { null } ?: getUserId(context).trim().ifBlank { null }
+        val editor = getPrefs(context).edit()
+        if (targetId != null) {
+            editor.putString("profile_display_name_$targetId", displayName)
+        }
+        val currentActiveId = getUserId(context).trim().ifBlank { null }
+        if (targetId == null || targetId == currentActiveId) {
+            editor.putString("profile_display_name", displayName)
+        }
+        editor.apply()
     }
 
     /**
@@ -195,12 +246,22 @@ object SecurePrefsManager {
         editor.apply()
     }
 
-    fun isTelegramVerified(context: Context): Boolean {
-        return getPrefs(context).getBoolean("telegram_verified", false)
+    fun isTelegramVerified(context: Context, accountId: String? = null): Boolean {
+        val targetId = accountId?.trim()?.ifBlank { null } ?: getUserId(context).trim().ifBlank { null }
+        val prefs = getPrefs(context)
+        if (targetId != null) {
+            return prefs.getBoolean("telegram_verified_$targetId", false)
+        }
+        return prefs.getBoolean("telegram_verified", false)
     }
 
-    fun setTelegramVerified(context: Context, verified: Boolean) {
-        getPrefs(context).edit().putBoolean("telegram_verified", verified).apply()
+    fun setTelegramVerified(context: Context, verified: Boolean, accountId: String? = null) {
+        val targetId = accountId?.trim()?.ifBlank { null } ?: getUserId(context).trim().ifBlank { null }
+        val editor = getPrefs(context).edit()
+        if (targetId != null) {
+            editor.putBoolean("telegram_verified_$targetId", verified)
+        }
+        editor.putBoolean("telegram_verified", verified).apply()
     }
 
     fun saveSupabaseTokens(context: Context, accessToken: String, refreshToken: String) {
@@ -243,6 +304,14 @@ object SecurePrefsManager {
         }
     }
 
+    fun isLegacyMigrationDone(context: Context): Boolean {
+        return getPrefs(context).getBoolean("legacy_migration_reconciliation_done", false)
+    }
+
+    fun setLegacyMigrationDone(context: Context, done: Boolean) {
+        getPrefs(context).edit().putBoolean("legacy_migration_reconciliation_done", done).apply()
+    }
+
     fun clearSession(context: Context) {
         clearTokensOnly(context)
     }
@@ -252,8 +321,13 @@ object SecurePrefsManager {
         return AccountType.fromId(stored)
     }
 
-    fun getAvatarUri(context: Context): String? {
-        return getPrefs(context).getString("avatarUri", null)
+    fun getAvatarUri(context: Context, accountId: String? = null): String? {
+        val targetId = accountId?.trim()?.ifBlank { null } ?: getUserId(context).trim().ifBlank { null }
+        val prefs = getPrefs(context)
+        if (targetId != null) {
+            return prefs.getString("avatarUri_$targetId", null)?.takeIf { it.isNotBlank() }
+        }
+        return prefs.getString("avatarUri", null)?.takeIf { it.isNotBlank() }
     }
 
     fun saveProfile(
@@ -271,12 +345,80 @@ object SecurePrefsManager {
             .putString("accountType", accountType.id)
         if (avatarUri != null) {
             editor.putString("avatarUri", avatarUri)
+            if (userId.isNotBlank()) {
+                editor.putString("avatarUri_$userId", avatarUri)
+            }
+        } else if (userId.isBlank()) {
+            editor.remove("avatarUri")
         }
         editor.commit()
     }
 
-    fun setAvatarUri(context: Context, avatarUri: String) {
-        getPrefs(context).edit().putString("avatarUri", avatarUri).apply()
+    fun setAvatarUri(context: Context, avatarUri: String?, accountId: String? = null) {
+        val targetId = accountId?.trim()?.ifBlank { null } ?: getUserId(context).trim().ifBlank { null }
+        val editor = getPrefs(context).edit()
+        val currentActiveId = getUserId(context).trim().ifBlank { null }
+        if (avatarUri.isNullOrBlank()) {
+            if (targetId != null) {
+                editor.remove("avatarUri_$targetId")
+            }
+            if (targetId == null || targetId == currentActiveId) {
+                editor.remove("avatarUri")
+            }
+        } else {
+            if (targetId != null) {
+                editor.putString("avatarUri_$targetId", avatarUri)
+            }
+            if (targetId == null || targetId == currentActiveId) {
+                editor.putString("avatarUri", avatarUri)
+            }
+        }
+        editor.apply()
+    }
+
+    /**
+     * One-time deterministic reconciliation migration from legacy global profile keys
+     * to account-scoped profile keys. Eliminates cross-account data leakage.
+     */
+    fun reconcileLegacyProfileDataIfNeeded(context: Context, activeAccountId: String) {
+        val cleanId = activeAccountId.trim()
+        if (cleanId.isBlank()) return
+        val prefs = getPrefs(context)
+        val isReconciled = prefs.getBoolean("profile_account_isolation_reconciled_$cleanId", false)
+        if (isReconciled) return
+
+        val editor = prefs.edit()
+        val globalBio = prefs.getString("profile_bio", "") ?: ""
+        val accountBio = prefs.getString("profile_bio_$cleanId", "") ?: ""
+        if (accountBio.isBlank() && globalBio.isNotBlank()) {
+            editor.putString("profile_bio_$cleanId", globalBio)
+        }
+
+        val globalDob = prefs.getString("profile_dob", "") ?: ""
+        val accountDob = prefs.getString("profile_dob_$cleanId", "") ?: ""
+        if (accountDob.isBlank() && globalDob.isNotBlank()) {
+            editor.putString("profile_dob_$cleanId", globalDob)
+        }
+
+        val globalAvatar = prefs.getString("avatarUri", "") ?: ""
+        val accountAvatar = prefs.getString("avatarUri_$cleanId", "") ?: ""
+        if (accountAvatar.isBlank() && globalAvatar.isNotBlank()) {
+            editor.putString("avatarUri_$cleanId", globalAvatar)
+        }
+
+        val legacyName = prefs.getString("name", "") ?: ""
+        val accountName = prefs.getString("profile_display_name_$cleanId", "") ?: ""
+        if (accountName.isBlank() && legacyName.isNotBlank()) {
+            editor.putString("profile_display_name_$cleanId", legacyName)
+        }
+
+        // Clean dangerous legacy global keys
+        editor.remove("profile_bio")
+        editor.remove("profile_dob")
+        editor.remove("avatarUri")
+        editor.remove("name")
+        editor.putBoolean("profile_account_isolation_reconciled_$cleanId", true)
+        editor.apply()
     }
 
     fun getProfileBackgroundPath(context: Context, accountId: String): String? {
@@ -334,6 +476,33 @@ object SecurePrefsManager {
 
     fun setSelectedAiPersona(context: Context, accountId: String, personaId: String) {
         getPrefs(context).edit().putString("ai_persona_${accountId}", personaId).apply()
+    }
+
+    fun getConversationSyncCursor(context: Context, accountId: String, conversationId: String): Long {
+        val cleanAcc = accountId.trim()
+        val cleanConv = conversationId.trim()
+        if (cleanAcc.isBlank() || cleanConv.isBlank()) return 0L
+        return getPrefs(context).getLong("sync_cursor_${cleanAcc}_${cleanConv}", 0L)
+    }
+
+    fun setConversationSyncCursor(context: Context, accountId: String, conversationId: String, cursor: Long) {
+        val cleanAcc = accountId.trim()
+        val cleanConv = conversationId.trim()
+        if (cleanAcc.isBlank() || cleanConv.isBlank()) return
+        getPrefs(context).edit().putLong("sync_cursor_${cleanAcc}_${cleanConv}", cursor).apply()
+    }
+
+    fun isLegacyReconciliationDone(context: Context, accountId: String): Boolean {
+        val cleanId = accountId.trim()
+        if (cleanId.isBlank()) return true
+        return getPrefs(context).getBoolean("legacy_reconciled_$cleanId", false)
+    }
+
+    fun markLegacyReconciliationDone(context: Context, accountId: String) {
+        val cleanId = accountId.trim()
+        if (cleanId.isNotBlank()) {
+            getPrefs(context).edit().putBoolean("legacy_reconciled_$cleanId", true).apply()
+        }
     }
 
     fun getSyncCursor(context: Context, accountId: String): Long {

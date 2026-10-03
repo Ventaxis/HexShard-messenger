@@ -67,7 +67,12 @@ fun ProfileBackgroundHeader(
 ) {
     val strings = LocalStrings.current
     val hasBackground = !backgroundPath.isNullOrBlank()
-    val isWebm = backgroundType?.contains("webm", ignoreCase = true) == true
+    val isVideo = backgroundType?.startsWith("video", ignoreCase = true) == true ||
+            backgroundType?.contains("webm", ignoreCase = true) == true ||
+            backgroundType?.contains("mp4", ignoreCase = true) == true ||
+            backgroundPath?.endsWith(".webm", ignoreCase = true) == true ||
+            backgroundPath?.endsWith(".mp4", ignoreCase = true) == true ||
+            backgroundPath?.endsWith(".mov", ignoreCase = true) == true
 
     Box(
         modifier = modifier
@@ -76,10 +81,10 @@ fun ProfileBackgroundHeader(
             .clip(RoundedCornerShape(bottomStart = 24.dp, bottomEnd = 24.dp))
             .background(HexDarkBg)
     ) {
-        // 1. BACKGROUND LAYER (WebM video, Image, or Default dark cinematic gradient)
+        // 1. BACKGROUND LAYER (Video, Image, or Default dark cinematic gradient)
         if (hasBackground) {
             val bgUrl = ProfileBackgroundManager.getPublicUrl(backgroundPath)
-            if (isWebm) {
+            if (isVideo) {
                 WebmBackgroundPlayer(
                     videoUrl = bgUrl,
                     modifier = Modifier.fillMaxSize()

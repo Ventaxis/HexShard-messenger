@@ -51,7 +51,7 @@ fun WebmBackgroundPlayer(
     var localVideoPath by remember(videoUrl) { mutableStateOf<String?>(null) }
     var isPlayerReady by remember { mutableStateOf(false) }
 
-    // Download/cache tiny WebM file locally (<512 KB) to guarantee smooth looping and zero re-buffering
+    // Download/cache video file locally (<2 MiB) to guarantee smooth looping and zero re-buffering
     LaunchedEffect(videoUrl) {
         val cachedPath = withContext(Dispatchers.IO) {
             try {
@@ -59,14 +59,21 @@ fun WebmBackgroundPlayer(
                     return@withContext videoUrl
                 }
                 val safeHash = videoUrl.hashCode().toString().replace("-", "n")
-                val targetFile = File(context.cacheDir, "bg_webm_${safeHash}.webm")
+                val ext = when {
+                    videoUrl.contains(".mp4", ignoreCase = true) -> ".mp4"
+                    videoUrl.contains(".mov", ignoreCase = true) -> ".mov"
+                    videoUrl.contains(".3gp", ignoreCase = true) -> ".3gp"
+                    videoUrl.contains(".mkv", ignoreCase = true) -> ".mkv"
+                    else -> ".webm"
+                }
+                val targetFile = File(context.cacheDir, "bg_video_${safeHash}$ext")
                 if (targetFile.exists() && targetFile.length() > 0) {
                     return@withContext targetFile.absolutePath
                 }
 
                 val client = OkHttpClient.Builder()
                     .connectTimeout(15, TimeUnit.SECONDS)
-                    .readTimeout(15, TimeUnit.SECONDS)
+                    .readTimeout(20, TimeUnit.SECONDS)
                     .build()
 
                 val req = Request.Builder().url(videoUrl).get().build()
@@ -74,7 +81,7 @@ fun WebmBackgroundPlayer(
                 if (resp.isSuccessful) {
                     val body = resp.body
                     if (body != null) {
-                        val tempFile = File.createTempFile("down_webm_", ".tmp", context.cacheDir)
+                        val tempFile = File.createTempFile("down_vid_", ".tmp", context.cacheDir)
                         FileOutputStream(tempFile).use { out ->
                             body.byteStream().use { input ->
                                 input.copyTo(out)
@@ -90,7 +97,7 @@ fun WebmBackgroundPlayer(
                 resp.close()
                 null
             } catch (e: Exception) {
-                Timber.w(e, "Failed to cache WebM background locally")
+                Timber.w(e, "Failed to cache video background locally")
                 null
             }
         }

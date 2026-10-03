@@ -84,8 +84,14 @@ object SupabaseAuthService {
      * ZERO client-side simulation. Returns server challenge ID and bot deep link.
      */
     suspend fun createTelegramChallenge(accountId: String, context: Context? = null): TelegramChallenge? = withContext(Dispatchers.IO) {
-        val token = context?.let { SecurePrefsManager.getSupabaseAccessToken(it) }?.takeIf { it.isNotBlank() } ?: ""
-        val result = TelegramService.createChallenge(token)
+        val token = SessionManager.currentSession.value?.accessToken?.takeIf { it.isNotBlank() }
+            ?: (context?.let { SecurePrefsManager.getSupabaseAccessToken(it) }?.takeIf { it.isNotBlank() })
+            ?: ""
+        if (token.isBlank()) {
+            Timber.w("Cannot create Telegram challenge: no active access token found")
+            return@withContext null
+        }
+        val result = TelegramService.createChallenge(token, context)
         when (result) {
             is TelegramChallengeResult.Success -> result.challenge
             is TelegramChallengeResult.Error -> {
@@ -171,7 +177,6 @@ object SupabaseAuthService {
         val request = Request.Builder()
             .url("$baseUrl/auth/v1/signup")
             .header("apikey", anonKey)
-            .header("Authorization", "Bearer $anonKey")
             .header("Content-Type", "application/json")
             .post(signupPayload.toString().toRequestBody(JSON_MEDIA))
             .build()
@@ -233,20 +238,31 @@ object SupabaseAuthService {
                 return@withContext SignUpResult.Error(msg, isUsernameTaken = false)
             }
 
-            // Ensure cryptographic keypair is generated in hardware Keystore
+            // Store server-authoritative session via SessionManager IMMEDIATELY so active session is established
+            SessionManager.onLoginSuccess(
+                context = context,
+                userId = accountId,
+                username = cleanUsername,
+                accessToken = accessToken,
+                refreshToken = refreshToken,
+                virtualNumber = "",
+                isTelegramVerified = false
+            )
+
+            // Ensure cryptographic keypair is generated in hardware Keystore scoped to accountId
             try {
-                E2ECryptoManager.generateKeyPairIfNeeded()
+                E2ECryptoManager.generateKeyPairIfNeeded(accountId)
             } catch (e: Exception) {
                 Timber.w(e, "Keystore key generation deferred in signUp: ${e.message}")
             }
             val identityPubKey = try {
-                Base64.getEncoder().encodeToString(E2ECryptoManager.getMyPublicKey().encoded)
+                Base64.getEncoder().encodeToString(E2ECryptoManager.getMyPublicKey(accountId).encoded)
             } catch (_: Exception) { "" }
             val signingPubKey = try {
-                Base64.getEncoder().encodeToString(E2ECryptoManager.getMySigningPublicKey().encoded)
+                Base64.getEncoder().encodeToString(E2ECryptoManager.getMySigningPublicKey(accountId).encoded)
             } catch (_: Exception) { "" }
 
-            val authHeader = if (accessToken.isNotBlank()) "Bearer $accessToken" else "Bearer $anonKey"
+            val authHeader = "Bearer $accessToken"
 
             // 1. Create public profile row in profiles table
             try {
@@ -263,7 +279,11 @@ object SupabaseAuthService {
                     .header("Prefer", "resolution=merge-duplicates")
                     .post(profilePayload.toString().toRequestBody(JSON_MEDIA))
                     .build()
-                httpClient.newCall(profReq).execute().close()
+                val profResp = httpClient.newCall(profReq).execute()
+                if (!profResp.isSuccessful) {
+                    Timber.w("Profile initial sync returned HTTP ${profResp.code}")
+                }
+                profResp.close()
             } catch (e: Exception) {
                 Timber.w(e, "Profile initial sync exception")
             }
@@ -287,21 +307,14 @@ object SupabaseAuthService {
                     .header("Prefer", "resolution=merge-duplicates")
                     .post(devPayload.toString().toRequestBody(JSON_MEDIA))
                     .build()
-                httpClient.newCall(devReq).execute().close()
+                val devResp = httpClient.newCall(devReq).execute()
+                if (!devResp.isSuccessful) {
+                    Timber.w("Device registration returned HTTP ${devResp.code}")
+                }
+                devResp.close()
             } catch (e: Exception) {
                 Timber.d("Device registration deferred: ${e.message}")
             }
-
-            // Store server-authoritative session via SessionManager
-            SessionManager.onLoginSuccess(
-                context = context,
-                userId = accountId,
-                username = cleanUsername,
-                accessToken = accessToken,
-                refreshToken = refreshToken,
-                virtualNumber = "",
-                isTelegramVerified = false
-            )
 
             SignUpResult.Success(
                 accountId = accountId,
@@ -350,7 +363,6 @@ object SupabaseAuthService {
         val request = Request.Builder()
             .url("$baseUrl/auth/v1/token?grant_type=password")
             .header("apikey", anonKey)
-            .header("Authorization", "Bearer $anonKey")
             .header("Content-Type", "application/json")
             .post(loginPayload.toString().toRequestBody(JSON_MEDIA))
             .build()
@@ -646,6 +658,11 @@ object SupabaseAuthService {
             }
         }
 
+        if (!serverDeleted && accountId.isNotBlank()) {
+            Timber.e("Server account deletion failed. Failing closed to allow retry.")
+            return@withContext false
+        }
+
         // 3. Wipe local Room encrypted database
         try {
             val db = AppDatabase.getDatabase(context)
@@ -679,6 +696,6 @@ object SupabaseAuthService {
         SessionManager.clearSession(context)
         SecurePrefsManager.clear(context)
 
-        serverDeleted || accountId.isBlank()
+        true
     }
 }

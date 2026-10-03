@@ -65,21 +65,22 @@ fun SettingsScreen(
     val strings = LocalStrings.current
     val currentLang = LocalAppLanguage.current
     
+    val currentUserId = remember { com.example.data.SecurePrefsManager.getUserId(context) }
     val initialUsername = remember { com.example.data.SecurePrefsManager.getUsername(context) }
     val initialPhone = remember { 
         com.example.data.SecurePrefsManager.getPhone(context)
     }
-    val initialAvatar = remember { com.example.data.SecurePrefsManager.getAvatarUri(context) }
+    val initialAvatar = remember { com.example.data.SecurePrefsManager.getAvatarUri(context, currentUserId) }
 
     var name by remember { 
-        val savedName = com.example.data.SecurePrefsManager.getPrefs(context).getString("name", null)
-        mutableStateOf(if (!savedName.isNullOrBlank()) savedName else initialUsername)
+        val savedName = com.example.data.SecurePrefsManager.getDisplayName(context, currentUserId)
+        mutableStateOf(if (savedName.isNotBlank()) savedName else initialUsername)
     }
     var username by remember { mutableStateOf(initialUsername) }
     var phone by remember { mutableStateOf(initialPhone) }
     var avatarUri by remember { mutableStateOf(initialAvatar) }
-    var bio by remember { mutableStateOf(com.example.data.SecurePrefsManager.getBio(context)) }
-    var dateOfBirth by remember { mutableStateOf(com.example.data.SecurePrefsManager.getDateOfBirth(context)) }
+    var bio by remember { mutableStateOf(com.example.data.SecurePrefsManager.getBio(context, currentUserId)) }
+    var dateOfBirth by remember { mutableStateOf(com.example.data.SecurePrefsManager.getDateOfBirth(context, currentUserId)) }
 
     var showEditProfile by remember { mutableStateOf(false) }
     var showPrivacyDialog by remember { mutableStateOf(false) }
@@ -97,6 +98,13 @@ fun SettingsScreen(
     var qrStatusMessage by remember { mutableStateOf<String?>(null) }
     var showClaimHexShardDialog by remember { mutableStateOf(false) }
     var showDatePickerDialog by remember { mutableStateOf(false) }
+
+    var creditVisualBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var showCreditVisualDialog by remember { mutableStateOf(false) }
+    var leadDevTapCount by remember { mutableIntStateOf(0) }
+    var lastLeadDevTapTime by remember { mutableLongStateOf(0L) }
+    var devTapCount by remember { mutableIntStateOf(0) }
+    var lastDevTapTime by remember { mutableLongStateOf(0L) }
 
     // Privacy & Backup dialog state
     var backupPassphrase by remember { mutableStateOf("") }
@@ -118,7 +126,6 @@ fun SettingsScreen(
     }
 
     val accountId = remember { com.example.data.SecurePrefsManager.getAccountId(context) }
-    val currentUserId = remember { com.example.data.SecurePrefsManager.getUserId(context) }
     val currentSession by com.example.network.supabase.SessionManager.currentSession.collectAsState()
     val activeVirtualNumber = currentSession?.virtualNumber?.takeIf { it.isNotBlank() }
         ?: com.example.data.SecurePrefsManager.getPrivateVirtualNumber(context, currentUserId)
@@ -142,15 +149,24 @@ fun SettingsScreen(
 
     LaunchedEffect(currentUserId) {
         if (currentUserId.isNotBlank()) {
+            com.example.data.SecurePrefsManager.reconcileLegacyProfileDataIfNeeded(context, currentUserId)
+            val token = com.example.data.SecurePrefsManager.getSupabaseAccessToken(context)
+            if (token.isNotBlank()) {
+                val p = com.example.data.repository.ProfileRepository(context).fetchProfileFromServer(currentUserId, token)
+                if (p != null) {
+                    name = p.displayName.ifBlank { p.username }
+                    username = p.username
+                    bio = p.bio
+                    dateOfBirth = p.dateOfBirth
+                    avatarUri = p.avatarUrl.takeIf { it.isNotBlank() }
+                }
+                // Fetch active virtual number from server if available
+                com.example.network.supabase.VirtualNumberService.fetchActiveVirtualNumber(currentUserId, token, context)
+            }
             val bgInfo = com.example.data.repository.ProfileBackgroundManager.syncProfileBackground(context)
             if (bgInfo != null) {
                 profileBgPath = bgInfo.storagePath
                 profileBgType = bgInfo.mimeType
-            }
-            // Fetch active virtual number from server if available
-            val token = com.example.data.SecurePrefsManager.getSupabaseAccessToken(context)
-            if (token.isNotBlank()) {
-                com.example.network.supabase.VirtualNumberService.fetchActiveVirtualNumber(currentUserId, token, context)
             }
         }
     }
@@ -334,10 +350,10 @@ fun SettingsScreen(
             } catch (e: Exception) {
                 // Ignore if not applicable for this content URI
             }
+            val previousAvatar = avatarUri
             avatarUri = uri.toString()
-            com.example.data.SecurePrefsManager.setAvatarUri(context, uri.toString())
 
-            // Upload avatar to Supabase Storage avatars bucket in background
+            // Upload avatar to Supabase Storage avatars bucket
             val token = com.example.data.SecurePrefsManager.getSupabaseAccessToken(context)
             if (currentUserId.isNotBlank() && token.isNotBlank()) {
                 scope.launch {
@@ -353,12 +369,21 @@ fun SettingsScreen(
                             )
                             if (publicUrl != null) {
                                 avatarUri = publicUrl
+                                com.example.data.SecurePrefsManager.setAvatarUri(context, publicUrl, currentUserId)
+                                Toast.makeText(context, if (currentLang == AppLanguage.RUSSIAN) "Аватарка обновлена" else "Avatar updated", Toast.LENGTH_SHORT).show()
+                            } else {
+                                avatarUri = previousAvatar
+                                Toast.makeText(context, if (currentLang == AppLanguage.RUSSIAN) "Не удалось загрузить аватарку на сервер" else "Failed to upload avatar to server", Toast.LENGTH_SHORT).show()
                             }
                         }
                     } catch (e: Exception) {
                         timber.log.Timber.w(e, "Avatar upload error")
+                        avatarUri = previousAvatar
+                        Toast.makeText(context, if (currentLang == AppLanguage.RUSSIAN) "Ошибка загрузки аватарки: ${e.message}" else "Avatar upload error: ${e.message}", Toast.LENGTH_SHORT).show()
                     }
                 }
+            } else {
+                com.example.data.SecurePrefsManager.setAvatarUri(context, uri.toString(), currentUserId)
             }
         }
     }
@@ -744,6 +769,8 @@ fun SettingsScreen(
         var editUsername by remember { mutableStateOf(username) }
         var editBio by remember { mutableStateOf(bio) }
         var editDob by remember { mutableStateOf(com.example.util.DateOfBirthFormatter.formatForDisplay(dateOfBirth, isRussian)) }
+        var isSavingProfile by remember { mutableStateOf(false) }
+        var profileSaveError by remember { mutableStateOf<String?>(null) }
 
         if (showDatePickerDialog) {
             BirthDateWheelPickerDialog(
@@ -758,10 +785,24 @@ fun SettingsScreen(
         }
 
         AlertDialog(
-            onDismissRequest = { showEditProfile = false },
+            onDismissRequest = { if (!isSavingProfile) showEditProfile = false },
             title = { Text(strings.editProfile) },
             text = {
                 Column {
+                    if (profileSaveError != null) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                        ) {
+                            Text(
+                                text = profileSaveError!!,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(8.dp)
+                            )
+                        }
+                    }
                     Box(
                         modifier = Modifier
                             .size(90.dp)
@@ -915,38 +956,75 @@ fun SettingsScreen(
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
-                    name = editName
-                    username = editUsername
-                    bio = editBio
-                    val finalDob = com.example.util.DateOfBirthFormatter.formatForDisplay(editDob, isRussian)
-                    dateOfBirth = finalDob
-                    com.example.data.SecurePrefsManager.getPrefs(context).edit()
-                        .putString("name", name)
-                        .putString("username", username)
-                        .apply()
-                    com.example.data.SecurePrefsManager.setBio(context, editBio)
-                    com.example.data.SecurePrefsManager.setDateOfBirth(context, finalDob)
+                TextButton(
+                    enabled = !isSavingProfile,
+                    onClick = {
+                        val trimmedName = editName.trim()
+                        val trimmedUsername = editUsername.trim().removePrefix("@")
+                        if (trimmedUsername.length < 3) {
+                            profileSaveError = if (isRussian) "Имя пользователя должно быть не менее 3 символов" else "Username must be at least 3 characters"
+                            return@TextButton
+                        }
+                        isSavingProfile = true
+                        profileSaveError = null
+                        val finalDob = com.example.util.DateOfBirthFormatter.formatForDisplay(editDob, isRussian)
 
-                    // Asynchronously sync profile to Supabase
-                    val token = com.example.data.SecurePrefsManager.getSupabaseAccessToken(context)
-                    if (currentUserId.isNotBlank() && token.isNotBlank()) {
                         scope.launch {
-                            com.example.data.repository.ProfileRepository(context).syncProfileToServer(
-                                userId = currentUserId,
-                                token = token,
-                                bio = editBio,
-                                dob = finalDob,
-                                username = editUsername
-                            )
+                            val token = com.example.data.SecurePrefsManager.getSupabaseAccessToken(context)
+                            if (currentUserId.isNotBlank() && token.isNotBlank()) {
+                                val result = com.example.data.repository.ProfileRepository(context).syncProfileToServer(
+                                    userId = currentUserId,
+                                    token = token,
+                                    displayName = trimmedName,
+                                    bio = editBio.trim(),
+                                    dob = finalDob,
+                                    username = trimmedUsername
+                                )
+                                when {
+                                    result.isSuccess -> {
+                                        val updated = result.getOrNull()
+                                        name = updated?.displayName ?: trimmedName
+                                        username = updated?.username ?: trimmedUsername
+                                        bio = updated?.bio ?: editBio.trim()
+                                        dateOfBirth = updated?.dateOfBirth ?: finalDob
+                                        isSavingProfile = false
+                                        showEditProfile = false
+                                        Toast.makeText(context, if (isRussian) "Профиль сохранён" else "Profile saved", Toast.LENGTH_SHORT).show()
+                                    }
+                                    result.isFailure -> {
+                                        isSavingProfile = false
+                                        profileSaveError = result.exceptionOrNull()?.message ?: "Failed to save profile on server"
+                                    }
+                                }
+                            } else {
+                                // Offline fallback save
+                                name = trimmedName
+                                username = trimmedUsername
+                                bio = editBio.trim()
+                                dateOfBirth = finalDob
+                                com.example.data.SecurePrefsManager.setDisplayName(context, trimmedName, currentUserId)
+                                com.example.data.SecurePrefsManager.setBio(context, editBio.trim(), currentUserId)
+                                com.example.data.SecurePrefsManager.setDateOfBirth(context, finalDob, currentUserId)
+                                com.example.data.SecurePrefsManager.getPrefs(context).edit().putString("username", trimmedUsername).apply()
+                                isSavingProfile = false
+                                showEditProfile = false
+                                Toast.makeText(context, if (isRussian) "Профиль сохранён локально" else "Profile saved locally", Toast.LENGTH_SHORT).show()
+                            }
                         }
                     }
-
-                    showEditProfile = false
-                }) { Text(strings.save) }
+                ) {
+                    if (isSavingProfile) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    } else {
+                        Text(strings.save)
+                    }
+                }
             },
             dismissButton = {
-                TextButton(onClick = { showEditProfile = false }) { Text(strings.cancel) }
+                TextButton(
+                    enabled = !isSavingProfile,
+                    onClick = { showEditProfile = false }
+                ) { Text(strings.cancel) }
             }
         )
     }
@@ -1812,8 +1890,56 @@ fun SettingsScreen(
                 )
                 Spacer(modifier = Modifier.height(14.dp))
                 Text(strings.version, fontSize = 12.sp, color = HexTextTertiary)
-                Text(strings.developer, fontSize = 12.sp, color = HexTextTertiary)
-                Text(strings.leadDeveloper, fontSize = 12.sp, color = HexTextTertiary)
+                Text(
+                    text = strings.developer,
+                    fontSize = 12.sp,
+                    color = HexTextTertiary,
+                    modifier = Modifier.clickable(
+                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                        indication = null
+                    ) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastDevTapTime < 1200) {
+                            devTapCount++
+                        } else {
+                            devTapCount = 1
+                        }
+                        lastDevTapTime = now
+                        if (devTapCount >= 3) {
+                            devTapCount = 0
+                            val bm = loadCreditVisual(context, "Пасхалка_Ventaxis.png")
+                            if (bm != null) {
+                                creditVisualBitmap = bm
+                                showCreditVisualDialog = true
+                            }
+                        }
+                    }
+                )
+                Text(
+                    text = strings.leadDeveloper,
+                    fontSize = 12.sp,
+                    color = HexTextTertiary,
+                    modifier = Modifier.clickable(
+                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                        indication = null
+                    ) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastLeadDevTapTime < 1200) {
+                            leadDevTapCount++
+                        } else {
+                            leadDevTapCount = 1
+                        }
+                        lastLeadDevTapTime = now
+                        if (leadDevTapCount >= 3) {
+                            leadDevTapCount = 0
+                            val bm = loadCreditVisual(context, "Пасхалка_Jenk.jpg")
+                            if (bm != null) {
+                                creditVisualBitmap = bm
+                                showCreditVisualDialog = true
+                            }
+                        }
+                    }
+                )
                 Text(strings.copyright, fontSize = 11.sp, color = HexTextTertiary)
             }
 
@@ -1827,6 +1953,63 @@ fun SettingsScreen(
                     showClaimHexShardDialog = false
                 }
             )
+        }
+
+        if (showCreditVisualDialog && creditVisualBitmap != null) {
+            val bitmap = creditVisualBitmap!!
+            val aspect = if (bitmap.height > 0) bitmap.width.toFloat() / bitmap.height.toFloat() else 1f
+
+            androidx.compose.ui.window.Dialog(
+                onDismissRequest = {
+                    showCreditVisualDialog = false
+                    creditVisualBitmap = null
+                },
+                properties = androidx.compose.ui.window.DialogProperties(
+                    usePlatformDefaultWidth = false
+                )
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.8f))
+                        .clickable(
+                            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                            indication = null
+                        ) {
+                            showCreditVisualDialog = false
+                            creditVisualBitmap = null
+                        }
+                        .padding(28.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .wrapContentSize()
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(Color(0xFF14161A))
+                            .padding(8.dp)
+                            .clickable(
+                                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                                indication = null
+                            ) {
+                                showCreditVisualDialog = false
+                                creditVisualBitmap = null
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        androidx.compose.foundation.Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = null,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .widthIn(min = 140.dp, max = 320.dp)
+                                .heightIn(min = 140.dp, max = 460.dp)
+                                .aspectRatio(aspect)
+                                .clip(RoundedCornerShape(12.dp))
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -1956,6 +2139,34 @@ fun SettingsItem(
             modifier = Modifier.size(13.dp)
         )
     }
+}
+
+private fun loadCreditVisual(context: Context, fileName: String): android.graphics.Bitmap? {
+    val candidates = listOf(
+        fileName,
+        fileName.replace(".jpg", ".png"),
+        fileName.replace(".png", ".jpg"),
+        fileName.replace(".jpg", ".jpeg"),
+        fileName.lowercase()
+    )
+    for (name in candidates) {
+        try {
+            context.assets.open(name).use { stream ->
+                val bm = android.graphics.BitmapFactory.decodeStream(stream)
+                if (bm != null) return bm
+            }
+        } catch (_: Exception) {}
+    }
+    for (name in candidates) {
+        try {
+            val file = java.io.File(context.filesDir, name)
+            if (file.exists()) {
+                val bm = android.graphics.BitmapFactory.decodeFile(file.absolutePath)
+                if (bm != null) return bm
+            }
+        } catch (_: Exception) {}
+    }
+    return null
 }
 
 

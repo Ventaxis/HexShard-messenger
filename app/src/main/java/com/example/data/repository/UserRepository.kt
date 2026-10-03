@@ -65,12 +65,14 @@ class UserRepository(
                 "$baseUrl/rest/v1/profiles?or=(username.ilike.$clean,normalized_username.ilike.${clean.lowercase()})&select=id,username"
             }
 
-            val req = Request.Builder()
+            val token = context?.let { SecurePrefsManager.getSupabaseAccessToken(it) }?.takeIf { it.isNotBlank() }
+            val reqBuilder = Request.Builder()
                 .url(url)
                 .header("apikey", anonKey)
-                .header("Authorization", "Bearer $anonKey")
-                .get()
-                .build()
+            if (token != null) {
+                reqBuilder.header("Authorization", "Bearer $token")
+            }
+            val req = reqBuilder.get().build()
 
             val resp = httpClient.newCall(req).execute()
             val body = resp.body?.string() ?: ""
@@ -120,12 +122,13 @@ class UserRepository(
         try {
             // 1. Authoritative: Query active_device_keys view (ordered by key_version.desc)
             val devUrl = "$baseUrl/rest/v1/active_device_keys?account_id=eq.$cleanId&select=public_key,key_version&order=key_version.desc&limit=1"
-            val devReq = Request.Builder()
+            val devReqBuilder = Request.Builder()
                 .url(devUrl)
                 .header("apikey", anonKey)
-                .header("Authorization", if (token.isNotBlank()) "Bearer $token" else "Bearer $anonKey")
-                .get()
-                .build()
+            if (token.isNotBlank()) {
+                devReqBuilder.header("Authorization", "Bearer $token")
+            }
+            val devReq = devReqBuilder.get().build()
 
             val devResp = httpClient.newCall(devReq).execute()
             val devBody = devResp.body?.string() ?: ""
@@ -145,12 +148,13 @@ class UserRepository(
 
             // 2. Legacy Fallback: Query profiles table
             val profUrl = "$baseUrl/rest/v1/profiles?id=eq.$cleanId&select=public_key"
-            val profReq = Request.Builder()
+            val profReqBuilder = Request.Builder()
                 .url(profUrl)
                 .header("apikey", anonKey)
-                .header("Authorization", "Bearer $anonKey")
-                .get()
-                .build()
+            if (token.isNotBlank()) {
+                profReqBuilder.header("Authorization", "Bearer $token")
+            }
+            val profReq = profReqBuilder.get().build()
 
             val profResp = httpClient.newCall(profReq).execute()
             val profBody = profResp.body?.string() ?: ""
@@ -201,12 +205,13 @@ class UserRepository(
             // 1. If deviceId is provided, query specific device signing key
             if (!deviceId.isNullOrBlank()) {
                 val devSpecificUrl = "$baseUrl/rest/v1/active_device_keys?account_id=eq.$cleanId&device_id=eq.$deviceId&select=signing_key"
-                val devReq = Request.Builder()
+                val devReqBuilder = Request.Builder()
                     .url(devSpecificUrl)
                     .header("apikey", anonKey)
-                    .header("Authorization", if (token.isNotBlank()) "Bearer $token" else "Bearer $anonKey")
-                    .get()
-                    .build()
+                if (token.isNotBlank()) {
+                    devReqBuilder.header("Authorization", "Bearer $token")
+                }
+                val devReq = devReqBuilder.get().build()
 
                 val devResp = httpClient.newCall(devReq).execute()
                 val devBody = devResp.body?.string() ?: ""
@@ -227,12 +232,13 @@ class UserRepository(
 
             // 2. Query active_device_keys view for latest active device signing key
             val devUrl = "$baseUrl/rest/v1/active_device_keys?account_id=eq.$cleanId&select=signing_key,key_version&order=key_version.desc&limit=1"
-            val devReq = Request.Builder()
+            val devReqBuilder = Request.Builder()
                 .url(devUrl)
                 .header("apikey", anonKey)
-                .header("Authorization", if (token.isNotBlank()) "Bearer $token" else "Bearer $anonKey")
-                .get()
-                .build()
+            if (token.isNotBlank()) {
+                devReqBuilder.header("Authorization", "Bearer $token")
+            }
+            val devReq = devReqBuilder.get().build()
 
             val devResp = httpClient.newCall(devReq).execute()
             val devBody = devResp.body?.string() ?: ""
@@ -252,12 +258,13 @@ class UserRepository(
 
             // 3. Fallback to profiles table for legacy single-device signing key
             val profUrl = "$baseUrl/rest/v1/profiles?id=eq.$cleanId&select=signing_key"
-            val profReq = Request.Builder()
+            val profReqBuilder = Request.Builder()
                 .url(profUrl)
                 .header("apikey", anonKey)
-                .header("Authorization", "Bearer $anonKey")
-                .get()
-                .build()
+            if (token.isNotBlank()) {
+                profReqBuilder.header("Authorization", "Bearer $token")
+            }
+            val profReq = profReqBuilder.get().build()
 
             val profResp = httpClient.newCall(profReq).execute()
             val profBody = profResp.body?.string() ?: ""
@@ -383,16 +390,18 @@ class UserRepository(
             JSONObject().apply { put("share_id", shareId.trim()) }
         )
 
+        val token = context?.let { SecurePrefsManager.getSupabaseAccessToken(it) }?.takeIf { it.isNotBlank() }
         for (body in payloads) {
             try {
                 val rpcUrl = "$baseUrl/rest/v1/rpc/resolve_profile_by_share_id"
-                val req = Request.Builder()
+                val reqBuilder = Request.Builder()
                     .url(rpcUrl)
                     .header("apikey", anonKey)
-                    .header("Authorization", "Bearer $anonKey")
                     .header("Content-Type", "application/json")
-                    .post(body.toString().toRequestBody(JSON_MEDIA))
-                    .build()
+                if (token != null) {
+                    reqBuilder.header("Authorization", "Bearer $token")
+                }
+                val req = reqBuilder.post(body.toString().toRequestBody(JSON_MEDIA)).build()
 
                 val resp = httpClient.newCall(req).execute()
                 val respBody = resp.body?.string() ?: ""

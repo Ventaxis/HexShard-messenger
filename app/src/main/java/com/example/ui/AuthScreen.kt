@@ -38,6 +38,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import com.example.network.supabase.AuthState
+import com.example.network.supabase.SessionManager
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -203,12 +205,9 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
-    // Auto-detect existing saved user session
+    // Auto-detect existing validated user session from SessionManager
     LaunchedEffect(Unit) {
-        val uid = SecurePrefsManager.getUserId(context)
-        val uname = SecurePrefsManager.getUsername(context)
-        val token = SecurePrefsManager.getSupabaseAccessToken(context)
-        if (uid.isNotBlank() && uname.isNotBlank() && uname != "user" && token.isNotBlank()) {
+        if (SessionManager.authState.value == AuthState.AUTHENTICATED) {
             onAuthComplete()
         }
     }
@@ -324,9 +323,9 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
 
     // Action: Step 2 -> Verify Telegram challenge code
     fun verifyTelegramChallengeCode() {
-        val challengeToken = activeChallenge?.challengeId ?: assignedAccountId
-        if (challengeToken.isBlank()) {
-            errorMessage = if (isRussian) "Сессия верификации недоступна" else "Challenge session unavailable"
+        val challengeToken = activeChallenge?.challengeId
+        if (challengeToken.isNullOrBlank()) {
+            errorMessage = if (isRussian) "Сессия верификации недоступна. Запросите новый код или продолжите без Telegram." else "Challenge session unavailable. Please request a new code or skip."
             return
         }
         val cleanCode = telegramCodeInput.trim().filter { it.isDigit() }

@@ -19,8 +19,8 @@ class ProfileBackgroundValidationTest {
     }
 
     @Test
-    fun testFileOver512KbRejected() {
-        // 512 KB = 524288 bytes; 524289 bytes must be strictly rejected
+    fun testFileOver2MiBRejected() {
+        // 2 MiB = 2097152 bytes; 2097153 bytes must be strictly rejected
         val oversized = ByteArray((ProfileBackgroundManager.MAX_FILE_SIZE_BYTES + 1).toInt())
         val result = ProfileBackgroundManager.validateBytes(oversized)
         assertTrue(result is BackgroundValidationResult.Error)
@@ -28,20 +28,20 @@ class ProfileBackgroundValidationTest {
     }
 
     @Test
-    fun testFileExactly512KbAcceptedIfFormatValid() {
-        val exact512Kb = ByteArray(ProfileBackgroundManager.MAX_FILE_SIZE_BYTES.toInt())
+    fun testFileExactly2MiBAcceptedIfFormatValid() {
+        val exact2MiB = ByteArray(ProfileBackgroundManager.MAX_FILE_SIZE_BYTES.toInt())
         // JPEG magic bytes: FF D8 FF
-        exact512Kb[0] = 0xFF.toByte()
-        exact512Kb[1] = 0xD8.toByte()
-        exact512Kb[2] = 0xFF.toByte()
+        exact2MiB[0] = 0xFF.toByte()
+        exact2MiB[1] = 0xD8.toByte()
+        exact2MiB[2] = 0xFF.toByte()
 
-        val result = ProfileBackgroundManager.validateBytes(exact512Kb)
+        val result = ProfileBackgroundManager.validateBytes(exact2MiB)
         assertTrue(result is BackgroundValidationResult.Valid)
         val valid = result as BackgroundValidationResult.Valid
         assertEquals("image/jpeg", valid.mimeType)
         assertEquals("jpg", valid.extension)
         assertFalse(valid.isVideo)
-        assertEquals(524288L, valid.size)
+        assertEquals(ProfileBackgroundManager.MAX_FILE_SIZE_BYTES, valid.size)
     }
 
     @Test
@@ -108,6 +108,22 @@ class ProfileBackgroundValidationTest {
         val valid = result as BackgroundValidationResult.Valid
         assertEquals("video/webm", valid.mimeType)
         assertEquals("webm", valid.extension)
+        assertTrue(valid.isVideo)
+    }
+
+    @Test
+    fun testMp4FormatDetectedAndMarkedAsVideo() {
+        // MP4 ftyp header
+        val mp4Bytes = byteArrayOf(
+            0x00, 0x00, 0x00, 0x18,
+            'f'.code.toByte(), 't'.code.toByte(), 'y'.code.toByte(), 'p'.code.toByte(),
+            'm'.code.toByte(), 'p'.code.toByte(), '4'.code.toByte(), '2'.code.toByte()
+        )
+        val result = ProfileBackgroundManager.validateBytes(mp4Bytes)
+        assertTrue(result is BackgroundValidationResult.Valid)
+        val valid = result as BackgroundValidationResult.Valid
+        assertEquals("video/mp4", valid.mimeType)
+        assertEquals("mp4", valid.extension)
         assertTrue(valid.isVideo)
     }
 

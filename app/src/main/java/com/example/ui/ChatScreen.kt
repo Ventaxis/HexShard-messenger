@@ -358,30 +358,32 @@ fun SidebarPanel(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // +999 Virtual number claim button if not yet claimed
+                // +999 Virtual number claim button if not yet claimed (compact header badge)
                 if (virtualNumber.isBlank()) {
-                    IconButton(
+                    Surface(
                         onClick = onClaimHexShardId,
+                        shape = RoundedCornerShape(16.dp),
+                        color = HexShardTealContainer,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, HexShardTeal.copy(alpha = 0.5f)),
                         modifier = Modifier
-                            .height(36.dp)
-                            .clip(RoundedCornerShape(18.dp))
-                            .background(HexShardTealContainer)
-                            .border(1.dp, HexShardTeal.copy(alpha = 0.5f), RoundedCornerShape(18.dp))
-                            .padding(horizontal = 8.dp)
+                            .height(32.dp)
                             .testTag("claim_hexshard_id_header_btn")
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 10.dp)
+                        ) {
                             Icon(
                                 imageVector = Icons.Default.PhoneAndroid,
                                 contentDescription = null,
                                 tint = HexShardTealLight,
-                                modifier = Modifier.size(14.dp)
+                                modifier = Modifier.size(13.dp)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
                                 text = "+999",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
                                 color = HexShardTealLight
                             )
                         }

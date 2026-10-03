@@ -40,6 +40,9 @@ class SupabaseRealtimeManager(
     private var heartbeatJob: Job? = null
     private var reconnectJob: Job? = null
     private val refCounter = AtomicInteger(1)
+    private val connectionGeneration = AtomicInteger(0)
+    @Volatile
+    private var isManualDisconnect = false
     private var activeJoinRef: String? = null
     private var reconnectAttempts = 0
 
@@ -60,7 +63,8 @@ class SupabaseRealtimeManager(
 
     fun connect() {
         val currentUserId = SecurePrefsManager.getUserId(context)
-        if (currentUserId.isBlank()) {
+        val userToken = SecurePrefsManager.getSupabaseAccessToken(context).takeIf { it.isNotBlank() }
+        if (currentUserId.isBlank() || userToken.isNullOrBlank()) {
             setState(RealtimeConnectionState.DISCONNECTED)
             return
         }
@@ -78,6 +82,8 @@ class SupabaseRealtimeManager(
             return
         }
 
+        val currentGen = connectionGeneration.incrementAndGet()
+        isManualDisconnect = false
         setState(RealtimeConnectionState.CONNECTING)
 
         val baseUrl = SupabaseConfig.getBaseUrl()
@@ -90,16 +96,21 @@ class SupabaseRealtimeManager(
 
         webSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
-                Timber.i("Supabase Realtime WebSocket opened, transitioning to JOINING")
+                if (isManualDisconnect || connectionGeneration.get() != currentGen) {
+                    ws.close(1000, "Stale connection")
+                    return
+                }
+                Timber.i("Supabase Realtime WebSocket opened, transitioning to JOINING (gen=$currentGen)")
                 setState(RealtimeConnectionState.JOINING)
                 reconnectAttempts = 0
 
-                startHeartbeat(ws)
-                joinMessagesChannel(ws, currentUserId, anonKey)
+                startHeartbeat(ws, currentGen)
+                joinMessagesChannel(ws, currentUserId, userToken, currentGen)
             }
 
             override fun onMessage(ws: WebSocket, text: String) {
-                handleIncomingEvent(text)
+                if (isManualDisconnect || connectionGeneration.get() != currentGen) return
+                handleIncomingEvent(text, currentGen)
             }
 
             override fun onClosing(ws: WebSocket, code: Int, reason: String) {
@@ -108,21 +119,26 @@ class SupabaseRealtimeManager(
             }
 
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
-                Timber.d("Supabase Realtime WebSocket closed: $code / $reason")
-                handleDisconnect()
+                Timber.d("Supabase Realtime WebSocket closed: $code / $reason (gen=$currentGen)")
+                if (!isManualDisconnect && connectionGeneration.get() == currentGen) {
+                    handleDisconnect(currentGen)
+                }
             }
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                Timber.w("Supabase Realtime WebSocket failure: ${t.message}")
-                handleDisconnect()
+                Timber.w("Supabase Realtime WebSocket failure: ${t.message} (gen=$currentGen)")
+                if (!isManualDisconnect && connectionGeneration.get() == currentGen) {
+                    handleDisconnect(currentGen)
+                }
             }
         })
     }
 
-    private fun startHeartbeat(ws: WebSocket) {
+    private fun startHeartbeat(ws: WebSocket, expectedGen: Int) {
         heartbeatJob?.cancel()
         heartbeatJob = clientScope.launch {
-            while (isActive && (_connectionState.value == RealtimeConnectionState.JOINING || _connectionState.value == RealtimeConnectionState.CONNECTED)) {
+            while (isActive && !isManualDisconnect && connectionGeneration.get() == expectedGen && 
+                   (_connectionState.value == RealtimeConnectionState.JOINING || _connectionState.value == RealtimeConnectionState.CONNECTED)) {
                 delay(25_000)
                 try {
                     val ref = refCounter.incrementAndGet().toString()
@@ -140,11 +156,12 @@ class SupabaseRealtimeManager(
         }
     }
 
-    private fun joinMessagesChannel(ws: WebSocket, currentUserId: String, anonKey: String) {
+    private fun joinMessagesChannel(ws: WebSocket, currentUserId: String, userAccessToken: String, expectedGen: Int) {
         try {
+            if (isManualDisconnect || connectionGeneration.get() != expectedGen) return
+
             val joinRef = refCounter.incrementAndGet().toString()
             activeJoinRef = joinRef
-            val token = SecurePrefsManager.getSupabaseAccessToken(context).takeIf { it.isNotBlank() } ?: anonKey
 
             val payload = JSONObject().apply {
                 val config = JSONObject().apply {
@@ -171,7 +188,8 @@ class SupabaseRealtimeManager(
                     put("postgres_changes", pgChanges)
                 }
                 put("config", config)
-                put("access_token", token)
+                // STRICT: Authenticated Realtime uses ONLY valid user access token. NEVER public API key!
+                put("access_token", userAccessToken)
             }
 
             val joinMsg = JSONObject().apply {
@@ -187,12 +205,16 @@ class SupabaseRealtimeManager(
         } catch (e: Exception) {
             Timber.e(e, "Error sending phx_join to Supabase Realtime")
             setState(RealtimeConnectionState.FAILED)
-            handleDisconnect()
+            if (!isManualDisconnect && connectionGeneration.get() == expectedGen) {
+                handleDisconnect(expectedGen)
+            }
         }
     }
 
-    private fun handleIncomingEvent(text: String) {
+    private fun handleIncomingEvent(text: String, expectedGen: Int) {
         try {
+            if (isManualDisconnect || connectionGeneration.get() != expectedGen) return
+
             val json = JSONObject(text)
             val event = json.optString("event")
             val ref = json.optString("ref")
@@ -201,7 +223,8 @@ class SupabaseRealtimeManager(
                 "phx_reply" -> {
                     val payload = json.optJSONObject("payload")
                     val status = payload?.optString("status")
-                    if (ref == activeJoinRef || json.optString("topic") == "realtime:public:messages") {
+                    // STRICT: Join ACK is accepted ONLY if ref matches activeJoinRef
+                    if (ref == activeJoinRef) {
                         if (status == "ok") {
                             Timber.i("Realtime channel successfully joined! Transitioning to CONNECTED")
                             setState(RealtimeConnectionState.CONNECTED)
@@ -209,13 +232,13 @@ class SupabaseRealtimeManager(
                         } else if (status == "error") {
                             Timber.w("Realtime channel join rejected: ${payload?.opt("response")}")
                             setState(RealtimeConnectionState.FAILED)
-                            handleDisconnect()
+                            handleDisconnect(expectedGen)
                         }
                     }
                 }
                 "phx_error", "phx_close" -> {
                     Timber.w("Realtime channel error/close event received: $event")
-                    handleDisconnect()
+                    handleDisconnect(expectedGen)
                 }
                 "postgres_changes" -> {
                     val payload = json.optJSONObject("payload") ?: return
@@ -231,8 +254,9 @@ class SupabaseRealtimeManager(
         }
     }
 
-    private fun handleDisconnect() {
-        val wasConnected = _connectionState.value == RealtimeConnectionState.CONNECTED
+    private fun handleDisconnect(generation: Int) {
+        if (isManualDisconnect || connectionGeneration.get() != generation) return
+
         heartbeatJob?.cancel()
         setState(RealtimeConnectionState.RECONNECTING)
 
@@ -241,13 +265,17 @@ class SupabaseRealtimeManager(
         reconnectJob = clientScope.launch {
             val backoffMs = (1000L * (1 shl reconnectAttempts.coerceAtMost(5))).coerceAtMost(30_000L)
             reconnectAttempts++
-            Timber.d("Scheduling Realtime reconnect in ${backoffMs}ms (attempt #$reconnectAttempts)")
+            Timber.d("Scheduling Realtime reconnect in ${backoffMs}ms (attempt #$reconnectAttempts, gen=$generation)")
             delay(backoffMs)
-            connect()
+            if (!isManualDisconnect && connectionGeneration.get() == generation) {
+                connect()
+            }
         }
     }
 
     fun disconnect() {
+        isManualDisconnect = true
+        connectionGeneration.incrementAndGet()
         reconnectJob?.cancel()
         heartbeatJob?.cancel()
         setState(RealtimeConnectionState.DISCONNECTED)

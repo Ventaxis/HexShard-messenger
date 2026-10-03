@@ -25,6 +25,9 @@ class FakeChatDao : ChatDao {
     override suspend fun getChatByConversationType(conversationType: String, accountId: String): ChatEntity? = null
     override suspend fun insertChat(chat: ChatEntity): Long = 1L
     override suspend fun insertChats(chats: List<ChatEntity>) {}
+    override suspend fun upsertChat(chat: ChatEntity): Long = 1L
+    override suspend fun upsertChats(chats: List<ChatEntity>) {}
+    override suspend fun updateChat(chat: ChatEntity) {}
     override suspend fun deleteChatById(id: Int, accountId: String) {}
     override suspend fun reassignMessagesChatId(sourceChatId: Int, targetChatId: Int, accountId: String) {}
     override suspend fun insertMessages(messages: List<MessageEntity>) {}

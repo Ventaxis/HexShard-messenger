@@ -193,6 +193,13 @@ open class ChatRepository(
 
     fun refreshAccount() {
         conversationRepository.refreshAccount()
+        val uid = getCurrentUserId()
+        if (uid.isNotBlank()) {
+            syncManager.stopRealtimeSync()
+            syncManager.startRealtimeSync()
+        } else {
+            syncManager.stopRealtimeSync()
+        }
     }
 
     open suspend fun populateInitialDataIfNeeded() =

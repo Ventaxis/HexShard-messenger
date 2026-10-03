@@ -74,18 +74,14 @@ class GeminiService @Inject constructor(
         }
         lastRequestTimestamp.set(now)
 
-        // All AI requests route through server-side gemini-assistant Edge Function if available,
-        // with instant resilient fallback to ensure the chat never hangs or fails.
+        // All AI requests route strictly through server-side gemini-assistant Edge Function.
+        // Fallback between models, automatic rotation, and local fake AI responses are strictly forbidden.
         val userToken = SecurePrefsManager.getSupabaseAccessToken(context)
-        if (userToken.isNotBlank()) {
-            val remoteResult = callSupabaseEdgeFunction(sanitizedPrompt, history, modelOption)
-            if (remoteResult is AiResult.Success) {
-                return@withContext remoteResult
-            }
-            Timber.w("Remote AI assistant edge function returned: $remoteResult, activating resilient fallback")
+        if (userToken.isBlank()) {
+            return@withContext AiResult.Unauthorized
         }
 
-        generateFallbackResult(sanitizedPrompt, history, modelOption)
+        callSupabaseEdgeFunction(sanitizedPrompt, history, modelOption)
     }
 
     /**

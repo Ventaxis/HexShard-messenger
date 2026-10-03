@@ -218,6 +218,20 @@ object VirtualNumberService {
                 if (isSchemaCacheError(body, resp.code)) {
                     Timber.w("RPC reserve_hex_number schema cache miss with payload $rpcPayload (HTTP ${resp.code}: $body), trying next variant...")
                     continue
+                } else if (resp.code == 401 && context != null) {
+                    val refresh = SecurePrefsManager.getSupabaseRefreshToken(context)
+                    if (refresh.isNotBlank()) {
+                        Timber.i("reserve_hex_number received 401; attempting token refresh...")
+                        val refState = SessionManager.refreshSession(context, refresh)
+                        if (refState == AuthState.AUTHENTICATED) {
+                            val newAccess = SecurePrefsManager.getSupabaseAccessToken(context)
+                            if (newAccess.isNotBlank() && newAccess != accessToken) {
+                                return@withContext reserveCandidateNumber(userId, newAccess, preferred, context)
+                            }
+                        }
+                    }
+                    Timber.w("RPC reserve_hex_number failed with HTTP ${resp.code}: $body")
+                    break
                 } else {
                     Timber.w("RPC reserve_hex_number failed with HTTP ${resp.code}: $body")
                     break
@@ -347,6 +361,19 @@ object VirtualNumberService {
                 if (isSchemaCacheError(rpcBody, rpcResp.code)) {
                     Timber.w("RPC confirm_hex_number schema mismatch on payload $rpcPayload, trying next variant...")
                     continue
+                } else if (rpcResp.code == 401) {
+                    val refresh = SecurePrefsManager.getSupabaseRefreshToken(context)
+                    if (refresh.isNotBlank()) {
+                        Timber.i("confirm_hex_number received 401; attempting token refresh...")
+                        val refState = SessionManager.refreshSession(context, refresh)
+                        if (refState == AuthState.AUTHENTICATED) {
+                            val newAccess = SecurePrefsManager.getSupabaseAccessToken(context)
+                            if (newAccess.isNotBlank() && newAccess != accessToken) {
+                                return@withContext confirmVirtualNumberDetailed(userId, newAccess, cleanDigits, context)
+                            }
+                        }
+                    }
+                    break
                 } else {
                     break
                 }
