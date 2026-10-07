@@ -62,6 +62,9 @@ class FakeChatDao : ChatDao {
     override suspend fun backfillLegacyChatsAccountId(targetAccountId: String): Int = 0
     override suspend fun backfillLegacyMessagesAccountId(targetAccountId: String): Int = 0
     override suspend fun backfillLegacyOutboxAccountId(targetAccountId: String): Int = 0
+    override suspend fun resetStaleOnlineStatuses() {}
+    override suspend fun searchMessages(query: String, accountId: String): List<MessageEntity> = emptyList()
+    override suspend fun searchChats(query: String, accountId: String): List<ChatEntity> = emptyList()
 }
 
 class ChatDeduplicationTest {

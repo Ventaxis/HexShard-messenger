@@ -26,18 +26,24 @@ serve(async (req: Request) => {
       // payload is optional
     }
 
-    const preferred = payload?.preferred?.toString().trim();
+    const preferred = payload?.preferred?.toString().trim() || payload?.p_preferred?.toString().trim();
     const userClient = getUserClient(authHeader);
 
-    // Call atomic stored procedure reserve_hex_number
+    // Call atomic canonical stored procedure reserve_hex_number
     const { data, error } = await userClient.rpc("reserve_hex_number", {
       p_preferred: preferred || null,
     });
 
     if (error) {
+      let status = 500;
+      if (error.code === "23505") status = 409; // Conflict: already taken
+      else if (error.code === "22023") status = 400; // Invalid input: not 8 digits
+      else if (error.code === "42501") status = 403; // Unauthorized
+      else if (error.code === "P0002") status = 404; // No available numbers
+
       return new Response(
-        JSON.stringify({ error: error.message || "Failed to reserve virtual number" }),
-        { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        JSON.stringify({ error: error.message || "Failed to reserve virtual number", code: error.code }),
+        { status, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 

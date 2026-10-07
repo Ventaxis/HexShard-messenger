@@ -49,6 +49,8 @@ class MainActivity : ComponentActivity() {
 
             // Enable edge to edge drawing (safe statusBars and navigationBars)
             enableEdgeToEdge()
+            androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
+            window.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
             setContent {
                 val currentLang by LocalizationManager.currentLanguage.collectAsState()

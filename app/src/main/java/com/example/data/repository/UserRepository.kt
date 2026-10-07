@@ -25,6 +25,27 @@ class UserRepository(
 ) {
     data class CachedKey(val key: PublicKey, val fetchedAt: Long)
 
+    data class UserSearchResult(
+        val userId: String,
+        val username: String,
+        val displayName: String,
+        val avatarUrl: String? = null,
+        val virtualNumber: String? = null
+    )
+
+    data class PeerProfileInfo(
+        val id: String,
+        val username: String,
+        val displayName: String,
+        val virtualNumber: String,
+        val avatarUrl: String?,
+        val backgroundPath: String?,
+        val backgroundType: String?,
+        val bio: String,
+        val dateOfBirth: String,
+        val isOnline: Boolean = false
+    )
+
     private val publicKeyCache = ConcurrentHashMap<String, CachedKey>()
     private val signingKeyCache = ConcurrentHashMap<String, CachedKey>()
 
@@ -62,7 +83,7 @@ class UserRepository(
             val url = if (isUuid) {
                 "$baseUrl/rest/v1/profiles?or=(id.eq.$clean,username.ilike.$clean)&select=id,username"
             } else {
-                "$baseUrl/rest/v1/profiles?or=(username.ilike.$clean,normalized_username.ilike.${clean.lowercase()})&select=id,username"
+                "$baseUrl/rest/v1/profiles?username=ilike.$clean&select=id,username"
             }
 
             val token = context?.let { SecurePrefsManager.getSupabaseAccessToken(it) }?.takeIf { it.isNotBlank() }
@@ -90,6 +111,184 @@ class UserRepository(
             }
         } catch (e: Exception) {
             Timber.e(e, "Error resolving user for $clean")
+        }
+        null
+    }
+
+    /**
+     * Searches users by username or display_name in Supabase profiles.
+     */
+    suspend fun searchUsers(query: String): List<UserSearchResult> = withContext(Dispatchers.IO) {
+        val clean = query.trim().removePrefix("@")
+        if (clean.isBlank()) return@withContext emptyList()
+
+        val baseUrl = SupabaseConfig.getBaseUrl()
+        val anonKey = SupabaseConfig.getAnonKey(context)
+        if (anonKey.isBlank()) return@withContext emptyList()
+
+        val currentUid = getCurrentUserId()
+        val token = context?.let { SecurePrefsManager.getSupabaseAccessToken(it) }?.takeIf { it.isNotBlank() }
+
+        val results = mutableListOf<UserSearchResult>()
+
+        try {
+            val url = "$baseUrl/rest/v1/profiles?or=(username.ilike.*$clean*,display_name.ilike.*$clean*)&select=id,username,display_name,avatar_path&limit=15"
+            val reqBuilder = Request.Builder()
+                .url(url)
+                .header("apikey", anonKey)
+            if (token != null) {
+                reqBuilder.header("Authorization", "Bearer $token")
+            }
+            val resp = httpClient.newCall(reqBuilder.get().build()).execute()
+            val body = resp.body?.string() ?: ""
+            if (resp.isSuccessful && body.isNotEmpty()) {
+                val arr = JSONArray(body)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    val uid = obj.optString("id")
+                    if (uid == currentUid || uid.isBlank()) continue
+                    val uname = obj.optString("username", "")
+                    val dname = obj.optString("display_name", uname)
+                    val ava = obj.optString("avatar_path", "")
+                    results.add(
+                        UserSearchResult(
+                            userId = uid,
+                            username = uname,
+                            displayName = if (dname.isNotBlank()) dname else uname,
+                            avatarUrl = ava.ifBlank { null }
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Timber.w(e, "searchUsers failed for $clean")
+        }
+
+        // Also search by +999 virtual number if input contains digits
+        val digitsOnly = clean.filter { it.isDigit() }
+        if (digitsOnly.length >= 4) {
+            try {
+                val hexUrl = "$baseUrl/rest/v1/hex_numbers?number=ilike.*$digitsOnly*&select=number,account_id&limit=10"
+                val hexReq = Request.Builder().url(hexUrl).header("apikey", anonKey)
+                if (token != null) hexReq.header("Authorization", "Bearer $token")
+                val hResp = httpClient.newCall(hexReq.get().build()).execute()
+                val hBody = hResp.body?.string() ?: ""
+                hResp.close()
+                if (hResp.isSuccessful && hBody.isNotBlank()) {
+                    val hArr = JSONArray(hBody)
+                    for (i in 0 until hArr.length()) {
+                        val hObj = hArr.getJSONObject(i)
+                        val accId = hObj.optString("account_id", "")
+                        val num = hObj.optString("number", "")
+                        if (accId.isNotBlank() && accId != currentUid && results.none { it.userId == accId }) {
+                            val pUrl = "$baseUrl/rest/v1/profiles?id=eq.$accId&select=id,username,display_name,avatar_path&limit=1"
+                            val pReq = Request.Builder().url(pUrl).header("apikey", anonKey)
+                            if (token != null) pReq.header("Authorization", "Bearer $token")
+                            val pResp = try { httpClient.newCall(pReq.get().build()).execute() } catch (_: Exception) { null }
+                            val pBody = pResp?.body?.string() ?: ""
+                            pResp?.close()
+                            if (pBody.isNotBlank()) {
+                                val pArr = JSONArray(pBody)
+                                if (pArr.length() > 0) {
+                                    val pObj = pArr.getJSONObject(0)
+                                    val un = pObj.optString("username", "")
+                                    val dn = pObj.optString("display_name", un)
+                                    val av = pObj.optString("avatar_path", "")
+                                    results.add(
+                                        UserSearchResult(
+                                            userId = accId,
+                                            username = un,
+                                            displayName = dn.ifBlank { un },
+                                            avatarUrl = av.ifBlank { null },
+                                            virtualNumber = num
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (hexEx: Exception) {
+                Timber.w(hexEx, "searchUsers hex_numbers lookup error")
+            }
+        }
+
+        results
+    }
+
+    suspend fun fetchPeerProfile(peerIdOrUsername: String): PeerProfileInfo? = withContext(Dispatchers.IO) {
+        val clean = peerIdOrUsername.trim().removePrefix("@")
+        if (clean.isBlank()) return@withContext null
+        val baseUrl = SupabaseConfig.getBaseUrl()
+        val anonKey = SupabaseConfig.getAnonKey(context)
+        if (anonKey.isBlank()) return@withContext null
+        val token = context?.let { SecurePrefsManager.getSupabaseAccessToken(it) }?.takeIf { it.isNotBlank() }
+
+        try {
+            val isUuid = clean.matches(Regex("^[0-9a-fA-F-]{36}$"))
+            val url = if (isUuid) {
+                "$baseUrl/rest/v1/profiles?id=eq.$clean&select=*&limit=1"
+            } else {
+                "$baseUrl/rest/v1/profiles?username=ilike.$clean&select=*&limit=1"
+            }
+            val reqBuilder = Request.Builder()
+                .url(url)
+                .header("apikey", anonKey)
+            if (token != null) {
+                reqBuilder.header("Authorization", "Bearer $token")
+            }
+            val resp = httpClient.newCall(reqBuilder.get().build()).execute()
+            val body = resp.body?.string() ?: ""
+            resp.close()
+
+            if (resp.isSuccessful && body.isNotBlank()) {
+                val arr = JSONArray(body)
+                if (arr.length() > 0) {
+                    val obj = arr.getJSONObject(0)
+                    val uid = obj.optString("id", clean)
+                    val uname = obj.optString("username", clean)
+                    val dname = obj.optString("display_name", uname).ifBlank { uname }
+                    val ava = obj.optString("avatar_url", obj.optString("avatar_path", "")).takeIf { it.isNotBlank() }
+                    val fullAva = if (ava != null && !ava.startsWith("http") && !ava.startsWith("data:")) {
+                        "$baseUrl/storage/v1/object/public/avatars/$ava"
+                    } else ava
+                    val bgPath = obj.optString("profile_background_path", "").takeIf { it.isNotBlank() && it != "null" }
+                    val bgType = obj.optString("profile_background_type", "").takeIf { it.isNotBlank() && it != "null" }
+                    val bio = obj.optString("bio", "")
+                    val dob = obj.optString("date_of_birth", "")
+
+                    // Fetch virtual number
+                    var vNum = ""
+                    try {
+                        val hexUrl = "$baseUrl/rest/v1/hex_numbers?account_id=eq.$uid&select=number&limit=1"
+                        val hexReq = Request.Builder().url(hexUrl).header("apikey", anonKey)
+                        if (token != null) hexReq.header("Authorization", "Bearer $token")
+                        val hResp = httpClient.newCall(hexReq.get().build()).execute()
+                        val hBody = hResp.body?.string() ?: ""
+                        hResp.close()
+                        if (hResp.isSuccessful && hBody.isNotBlank()) {
+                            val hArr = JSONArray(hBody)
+                            if (hArr.length() > 0) {
+                                vNum = hArr.getJSONObject(0).optString("number", "")
+                            }
+                        }
+                    } catch (_: Exception) {}
+
+                    return@withContext PeerProfileInfo(
+                        id = uid,
+                        username = uname,
+                        displayName = dname,
+                        virtualNumber = vNum,
+                        avatarUrl = fullAva,
+                        backgroundPath = bgPath,
+                        backgroundType = bgType,
+                        bio = bio,
+                        dateOfBirth = dob
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Timber.w(e, "Error fetching peer profile for $clean")
         }
         null
     }

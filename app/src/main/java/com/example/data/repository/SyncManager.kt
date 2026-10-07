@@ -125,6 +125,9 @@ class SyncManager(
 
     private suspend fun performCatchUpSync(currentUserId: String) {
         try {
+            // 1. Authoritative cloud-first sync of conversations from Supabase
+            conversationRepository.syncConversationsFromServer(currentUserId)
+            // 2. Fetch messages by cursor
             syncIncomingMessages(currentUserId)
             syncSentStatus(currentUserId)
             flushOutbox(currentUserId)
@@ -320,7 +323,7 @@ class SyncManager(
                         accountId = currentUserId,
                         name = peerId,
                         ava = peerId.take(2).uppercase(),
-                        status = "online",
+                        status = "offline",
                         preview = if (isDecryptionError) "⚠️ Corrupted message" else resolvedText,
                         time = timeStr,
                         recipientId = peerId,

@@ -26,6 +26,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.data.SecurePrefsManager
@@ -43,10 +46,17 @@ import kotlinx.coroutines.launch
  */
 @Composable
 fun HexShardIdMissingDialog(
-    onContinue: () -> Unit,
+    initialNumber: String = "",
+    onContinue: (String) -> Unit = {},
     onDismiss: () -> Unit
 ) {
     val strings = LocalStrings.current
+    var inputNumber by remember {
+        val digits = initialNumber.filter { it.isDigit() }.let {
+            if (it.length == 11 && it.startsWith("999")) it.substring(3) else it.take(8)
+        }
+        mutableStateOf(digits.ifBlank { com.example.util.VirtualNumberGenerator.generateCandidate8Digits() })
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -96,28 +106,90 @@ fun HexShardIdMissingDialog(
                     modifier = Modifier.padding(horizontal = 4.dp).testTag("missing_hexshard_id_desc")
                 )
                 Spacer(modifier = Modifier.height(14.dp))
-                // Visual identity pill
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center,
+                
+                // Direct custom number input card
+                Column(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(12.dp))
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
                         .background(HexDarkSurfaceInput)
-                        .border(1.dp, HexDarkBorderSubtle, RoundedCornerShape(12.dp))
-                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                        .border(1.dp, HexShardTeal.copy(alpha = 0.4f), RoundedCornerShape(14.dp))
+                        .padding(12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.PhoneAndroid,
-                        contentDescription = null,
-                        tint = HexShardTeal,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "+999 • HexShard ID",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = HexTextPrimary,
+                        text = if (strings == RussianStrings) "ВВЕДИТЕ ЖЕЛАЕМЫЙ НОМЕР (+999)" else "CHOOSE YOUR +999 NUMBER",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = HexShardTealLight,
+                        letterSpacing = 1.sp
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(HexDarkBg)
+                            .border(1.dp, HexDarkBorder, RoundedCornerShape(10.dp))
+                            .padding(horizontal = 10.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "+999",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = HexShardTealLight,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        OutlinedTextField(
+                            value = inputNumber,
+                            onValueChange = { newVal ->
+                                val digits = newVal.filter { it.isDigit() }
+                                if (digits.length <= 8) {
+                                    inputNumber = digits
+                                }
+                            },
+                            placeholder = {
+                                Text("XXXXXXXX", color = HexTextTertiary, fontFamily = FontFamily.Monospace, fontSize = 16.sp)
+                            },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+                            textStyle = androidx.compose.ui.text.TextStyle(
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = HexTextPrimary,
+                                fontFamily = FontFamily.Monospace,
+                                letterSpacing = 1.sp
+                            ),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color.Transparent,
+                                unfocusedBorderColor = Color.Transparent,
+                                focusedContainerColor = Color.Transparent,
+                                unfocusedContainerColor = Color.Transparent
+                            ),
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (inputNumber.isNotEmpty()) {
+                            IconButton(onClick = { inputNumber = "" }, modifier = Modifier.size(24.dp)) {
+                                Icon(Icons.Default.Close, contentDescription = "Clear", tint = HexTextSecondary, modifier = Modifier.size(14.dp))
+                            }
+                        }
+                        IconButton(
+                            onClick = {
+                                inputNumber = com.example.util.VirtualNumberGenerator.generateCandidate8Digits()
+                            },
+                            modifier = Modifier.size(26.dp)
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Random", tint = HexShardTealLight, modifier = Modifier.size(18.dp))
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    val preview = com.example.util.VirtualNumberGenerator.format8Digits(inputNumber)
+                    Text(
+                        text = if (inputNumber.length == 8) preview else if (strings == RussianStrings) "Требуется ровно 8 цифр" else "8 digits required",
+                        fontSize = 11.sp,
+                        color = if (inputNumber.length == 8) HexShardTealLight else HexTextSecondary,
                         fontFamily = FontFamily.Monospace
                     )
                 }
@@ -125,7 +197,8 @@ fun HexShardIdMissingDialog(
         },
         confirmButton = {
             Button(
-                onClick = onContinue,
+                onClick = { onContinue(inputNumber) },
+                enabled = inputNumber.length == 8,
                 modifier = Modifier.testTag("missing_hexshard_id_continue_button"),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = HexShardTeal,
@@ -151,11 +224,12 @@ fun HexShardIdMissingDialog(
 }
 
 /**
- * Interactive dialog allowing the user to reserve and confirm an active +999 HexShard ID.
- * Directly integrates with server RPC [reserve_hex_number] and [confirm_hex_number].
+ * Interactive dialog allowing the user to enter/choose, reserve and confirm an active +999 HexShard ID.
+ * Directly integrates with server RPC and authoritative user_metadata storage.
  */
 @Composable
 fun HexShardIdClaimDialog(
+    initialPreferred: String = "",
     onDismiss: () -> Unit,
     onSuccess: (formattedNumber: String) -> Unit
 ) {
@@ -166,49 +240,43 @@ fun HexShardIdClaimDialog(
     val currentUserId = remember { SecurePrefsManager.getUserId(context) }
     val currentToken = remember { SecurePrefsManager.getSupabaseAccessToken(context) }
 
-    var isLoading by remember { mutableStateOf(true) }
-    var isConfirming by remember { mutableStateOf(false) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
-    var reservedRawNumber by remember { mutableStateOf("") }
-    var reservedFormatted by remember { mutableStateOf("") }
-    var isActivatedSuccess by remember { mutableStateOf(false) }
-
-    fun reserveCandidate(preferred: String? = null) {
-        isLoading = true
-        errorMessage = null
-        scope.launch {
-            when (val res = SupabaseAuthService.reserveVirtualNumber(currentUserId, context, preferred)) {
-                is VirtualNumberReservationResult.Success -> {
-                    reservedRawNumber = res.raw8Digits
-                    reservedFormatted = res.formatted
-                    isLoading = false
-                }
-                is VirtualNumberReservationResult.Error -> {
-                    isLoading = false
-                    errorMessage = res.message
+    var userNumberInput by remember {
+        val initialDigits = initialPreferred.filter { it.isDigit() }.let {
+            if (it.length == 11 && it.startsWith("999")) it.substring(3) else it.take(8)
+        }
+        mutableStateOf(
+            initialDigits.ifBlank {
+                SecurePrefsManager.getRawPrivateVirtualNumber(context, currentUserId).ifBlank {
+                    com.example.util.VirtualNumberGenerator.generateCandidate8Digits(currentUserId)
                 }
             }
-        }
+        )
     }
 
-    LaunchedEffect(Unit) {
-        reserveCandidate()
+    var reservedFormatted by remember {
+        mutableStateOf(com.example.util.VirtualNumberGenerator.format8Digits(userNumberInput))
     }
+    var isConfirming by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var isActivatedSuccess by remember { mutableStateOf(false) }
 
     fun confirmCandidate() {
-        if (reservedRawNumber.length != 8) {
-            errorMessage = "Invalid number format"
+        val targetNumber = userNumberInput.filter { it.isDigit() }
+        if (targetNumber.length != 8) {
+            errorMessage = if (strings == RussianStrings) "Номер должен содержать ровно 8 цифр" else "Number must be exactly 8 digits"
             return
         }
         isConfirming = true
         errorMessage = null
         scope.launch {
-            when (val res = VirtualNumberService.confirmVirtualNumberDetailed(currentUserId, currentToken, reservedRawNumber, context)) {
+            val token = SecurePrefsManager.getSupabaseAccessToken(context).ifBlank { currentToken }
+            when (val res = VirtualNumberService.confirmVirtualNumberDetailed(currentUserId, token, targetNumber, context)) {
                 is VirtualNumberConfirmationResult.Success -> {
                     isConfirming = false
                     isActivatedSuccess = true
-                    SessionManager.updateVirtualNumber(context, reservedRawNumber)
-                    SecurePrefsManager.setPrivateVirtualNumber(context, reservedRawNumber, currentUserId)
+                    reservedFormatted = res.formatted
+                    SessionManager.updateVirtualNumber(context, targetNumber)
+                    SecurePrefsManager.setPrivateVirtualNumber(context, targetNumber, currentUserId)
                     Toast.makeText(context, strings.virtualNumberActivatedSuccess, Toast.LENGTH_SHORT).show()
                     onSuccess(res.formatted)
                 }
@@ -288,25 +356,7 @@ fun HexShardIdClaimDialog(
 
                 Spacer(modifier = Modifier.height(20.dp))
 
-                if (isLoading) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 32.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        CircularProgressIndicator(
-                            color = HexShardTeal,
-                            modifier = Modifier.size(40.dp)
-                        )
-                        Spacer(modifier = Modifier.height(14.dp))
-                        Text(
-                            text = if (strings == RussianStrings) "Подбор уникального номера..." else "Selecting unique number...",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = HexTextSecondary
-                        )
-                    }
-                } else if (isActivatedSuccess) {
+                if (isActivatedSuccess) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -336,40 +386,145 @@ fun HexShardIdClaimDialog(
                             color = HexShardTealLight,
                             fontFamily = FontFamily.Monospace
                         )
+                        Spacer(modifier = Modifier.height(20.dp))
+                        Button(
+                            onClick = onDismiss,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = HexShardTeal,
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(if (strings == RussianStrings) "Готово" else "Done", fontWeight = FontWeight.Bold)
+                        }
                     }
                 } else {
-                    // Candidate Number Display Card
+                    // Interactive Custom & Generated Number Card
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(16.dp))
                             .background(HexDarkSurfaceInput)
-                            .border(1.dp, HexShardTeal.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
-                            .padding(vertical = 20.dp, horizontal = 16.dp),
-                        contentAlignment = Alignment.Center
+                            .border(1.dp, HexShardTeal.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
+                            .padding(vertical = 16.dp, horizontal = 16.dp)
                     ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
                             Text(
-                                text = "HexShard ID (+999)",
+                                text = "HEXSHARD ID (+999)",
                                 fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = HexTextSecondary,
-                                letterSpacing = 1.sp
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = reservedFormatted.ifBlank { "+999 — — — —" },
-                                fontSize = 24.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = HexTextPrimary,
-                                fontFamily = FontFamily.Monospace,
-                                modifier = Modifier.testTag("reserved_hexshard_number_text")
+                                color = HexShardTealLight,
+                                letterSpacing = 1.2.sp
                             )
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            // Editable Input Row with fixed +999 prefix
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(HexDarkBg)
+                                    .border(1.dp, HexDarkBorder, RoundedCornerShape(12.dp))
+                                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "+999",
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = HexShardTealLight,
+                                    fontFamily = FontFamily.Monospace
+                                )
+
+                                Spacer(modifier = Modifier.width(8.dp))
+
+                                OutlinedTextField(
+                                    value = userNumberInput,
+                                    onValueChange = { newVal ->
+                                        val digits = newVal.filter { it.isDigit() }
+                                        if (digits.length <= 8) {
+                                            userNumberInput = digits
+                                        }
+                                    },
+                                    placeholder = {
+                                        Text(
+                                            "XXXXXXXX",
+                                            color = HexTextTertiary,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 17.sp
+                                        )
+                                    },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(
+                                        keyboardType = KeyboardType.Number,
+                                        imeAction = ImeAction.Done
+                                    ),
+                                    textStyle = androidx.compose.ui.text.TextStyle(
+                                        fontSize = 18.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = HexTextPrimary,
+                                        fontFamily = FontFamily.Monospace,
+                                        letterSpacing = 1.2.sp
+                                    ),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = Color.Transparent,
+                                        unfocusedBorderColor = Color.Transparent,
+                                        focusedContainerColor = Color.Transparent,
+                                        unfocusedContainerColor = Color.Transparent
+                                    ),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("custom_hexshard_input")
+                                )
+
+                                if (userNumberInput.isNotEmpty()) {
+                                    IconButton(
+                                        onClick = { userNumberInput = "" },
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Close,
+                                            contentDescription = "Clear",
+                                            tint = HexTextSecondary,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                }
+
+                                IconButton(
+                                    onClick = {
+                                        userNumberInput = com.example.util.VirtualNumberGenerator.generateCandidate8Digits()
+                                    },
+                                    enabled = !isConfirming,
+                                    modifier = Modifier.size(28.dp).testTag("randomize_hexshard_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Refresh,
+                                        contentDescription = strings.reserveNewNumber,
+                                        tint = HexShardTealLight,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            val previewFormatted = com.example.util.VirtualNumberGenerator.format8Digits(userNumberInput)
                             Text(
-                                text = if (strings == RussianStrings) "Зарезервировано на сервере" else "Reserved on server",
-                                fontSize = 11.sp,
-                                color = HexShardTealLight
+                                text = if (userNumberInput.length == 8) {
+                                    previewFormatted
+                                } else {
+                                    val needed = 8 - userNumberInput.length
+                                    if (strings == RussianStrings) "Введите ещё $needed цифр или нажмите ⟳" else "Enter $needed more digits or tap ⟳"
+                                },
+                                fontSize = 12.sp,
+                                color = if (userNumberInput.length == 8) HexShardTealLight else HexTextSecondary,
+                                fontFamily = FontFamily.Monospace
                             )
                         }
                     }
@@ -393,8 +548,11 @@ fun HexShardIdClaimDialog(
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         OutlinedButton(
-                            onClick = { reserveCandidate() },
-                            enabled = !isConfirming && !isLoading,
+                            onClick = {
+                                userNumberInput = com.example.util.VirtualNumberGenerator.generateCandidate8Digits()
+                                errorMessage = null
+                            },
+                            enabled = !isConfirming,
                             modifier = Modifier.weight(1f).testTag("reserve_another_button"),
                             shape = RoundedCornerShape(12.dp),
                             colors = ButtonDefaults.outlinedButtonColors(
@@ -408,12 +566,15 @@ fun HexShardIdClaimDialog(
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text(strings.reserveNewNumber, fontSize = 12.sp)
+                            Text(
+                                text = if (strings == RussianStrings) "Случайный" else "Random",
+                                fontSize = 12.sp
+                            )
                         }
 
                         Button(
                             onClick = { confirmCandidate() },
-                            enabled = !isConfirming && !isLoading && reservedRawNumber.isNotBlank(),
+                            enabled = !isConfirming && userNumberInput.length == 8,
                             modifier = Modifier.weight(1.3f).testTag("confirm_hexshard_button"),
                             shape = RoundedCornerShape(12.dp),
                             colors = ButtonDefaults.buttonColors(

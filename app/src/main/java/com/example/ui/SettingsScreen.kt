@@ -965,9 +965,20 @@ fun SettingsScreen(
                             profileSaveError = if (isRussian) "Имя пользователя должно быть не менее 3 символов" else "Username must be at least 3 characters"
                             return@TextButton
                         }
+                        val trimmedDob = editDob.trim()
+                        val canonicalDob = if (trimmedDob.isNotBlank()) {
+                            val iso = com.example.util.DateOfBirthFormatter.toCanonicalIso(trimmedDob)
+                            if (iso == null) {
+                                profileSaveError = if (isRussian) "Некорректная дата рождения (например: 13.04.1998)" else "Invalid date of birth (e.g. 13.04.1998)"
+                                return@TextButton
+                            }
+                            iso
+                        } else {
+                            ""
+                        }
+
                         isSavingProfile = true
                         profileSaveError = null
-                        val finalDob = com.example.util.DateOfBirthFormatter.formatForDisplay(editDob, isRussian)
 
                         scope.launch {
                             val token = com.example.data.SecurePrefsManager.getSupabaseAccessToken(context)
@@ -977,7 +988,7 @@ fun SettingsScreen(
                                     token = token,
                                     displayName = trimmedName,
                                     bio = editBio.trim(),
-                                    dob = finalDob,
+                                    dob = canonicalDob,
                                     username = trimmedUsername
                                 )
                                 when {
@@ -986,7 +997,7 @@ fun SettingsScreen(
                                         name = updated?.displayName ?: trimmedName
                                         username = updated?.username ?: trimmedUsername
                                         bio = updated?.bio ?: editBio.trim()
-                                        dateOfBirth = updated?.dateOfBirth ?: finalDob
+                                        dateOfBirth = updated?.dateOfBirth ?: canonicalDob
                                         isSavingProfile = false
                                         showEditProfile = false
                                         Toast.makeText(context, if (isRussian) "Профиль сохранён" else "Profile saved", Toast.LENGTH_SHORT).show()
@@ -997,14 +1008,14 @@ fun SettingsScreen(
                                     }
                                 }
                             } else {
-                                // Offline fallback save
+                                // Offline local save when no session token exists
                                 name = trimmedName
                                 username = trimmedUsername
                                 bio = editBio.trim()
-                                dateOfBirth = finalDob
+                                dateOfBirth = canonicalDob
                                 com.example.data.SecurePrefsManager.setDisplayName(context, trimmedName, currentUserId)
                                 com.example.data.SecurePrefsManager.setBio(context, editBio.trim(), currentUserId)
-                                com.example.data.SecurePrefsManager.setDateOfBirth(context, finalDob, currentUserId)
+                                com.example.data.SecurePrefsManager.setDateOfBirth(context, canonicalDob, currentUserId)
                                 com.example.data.SecurePrefsManager.getPrefs(context).edit().putString("username", trimmedUsername).apply()
                                 isSavingProfile = false
                                 showEditProfile = false
@@ -1948,16 +1959,17 @@ fun SettingsScreen(
 
         if (showClaimHexShardDialog) {
             HexShardIdClaimDialog(
+                initialPreferred = privateVirtualNumber,
                 onDismiss = { showClaimHexShardDialog = false },
-                onSuccess = { _ ->
+                onSuccess = { formattedNumber ->
                     showClaimHexShardDialog = false
+                    phone = formattedNumber
                 }
             )
         }
 
         if (showCreditVisualDialog && creditVisualBitmap != null) {
             val bitmap = creditVisualBitmap!!
-            val aspect = if (bitmap.height > 0) bitmap.width.toFloat() / bitmap.height.toFloat() else 1f
 
             androidx.compose.ui.window.Dialog(
                 onDismissRequest = {
@@ -1971,7 +1983,7 @@ fun SettingsScreen(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.8f))
+                        .background(Color.Black.copy(alpha = 0.85f))
                         .clickable(
                             interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
                             indication = null
@@ -1979,15 +1991,12 @@ fun SettingsScreen(
                             showCreditVisualDialog = false
                             creditVisualBitmap = null
                         }
-                        .padding(28.dp),
+                        .padding(24.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Box(
+                    Surface(
                         modifier = Modifier
                             .wrapContentSize()
-                            .clip(RoundedCornerShape(18.dp))
-                            .background(Color(0xFF14161A))
-                            .padding(8.dp)
                             .clickable(
                                 interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
                                 indication = null
@@ -1995,18 +2004,26 @@ fun SettingsScreen(
                                 showCreditVisualDialog = false
                                 creditVisualBitmap = null
                             },
-                        contentAlignment = Alignment.Center
+                        shape = RoundedCornerShape(16.dp),
+                        color = Color(0xFF14161A),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, HexDarkBorder)
                     ) {
-                        androidx.compose.foundation.Image(
-                            bitmap = bitmap.asImageBitmap(),
-                            contentDescription = null,
-                            contentScale = ContentScale.Fit,
+                        Column(
                             modifier = Modifier
-                                .widthIn(min = 140.dp, max = 320.dp)
-                                .heightIn(min = 140.dp, max = 460.dp)
-                                .aspectRatio(aspect)
-                                .clip(RoundedCornerShape(12.dp))
-                        )
+                                .wrapContentSize()
+                                .padding(8.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            androidx.compose.foundation.Image(
+                                bitmap = bitmap.asImageBitmap(),
+                                contentDescription = null,
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier
+                                    .widthIn(min = 100.dp, max = 260.dp)
+                                    .heightIn(min = 100.dp, max = 380.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                            )
+                        }
                     }
                 }
             }

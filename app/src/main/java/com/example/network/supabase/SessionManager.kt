@@ -125,16 +125,26 @@ object SessionManager {
                         return@withContext _authState.value
                     }
 
-                    // Verify server user identity
-                    val serverUid = try {
-                        JSONObject(body).optString("id")
-                    } catch (_: Exception) { "" }
+                    // Verify server user identity and extract user_metadata
+                    val userObj = try { JSONObject(body) } catch (_: Exception) { null }
+                    val serverUid = userObj?.optString("id") ?: ""
 
                     if (serverUid.isNotBlank() && serverUid != userId) {
                         Timber.e("Server user ID mismatch ($serverUid != $userId). Invalidate session.")
                         clearSessionSoft(context)
                         _authState.value = AuthState.UNAUTHENTICATED
                         return@withContext AuthState.UNAUTHENTICATED
+                    }
+
+                    // Restore authoritatively saved virtual number from Supabase user_metadata if available
+                    val userMeta = userObj?.optJSONObject("user_metadata")
+                    val metaHex = userMeta?.optString("hex_number", userMeta.optString("virtual_number", "")) ?: ""
+                    var cleanMeta = metaHex.filter { it.isDigit() }
+                    if (cleanMeta.length == 11 && cleanMeta.startsWith("999")) {
+                        cleanMeta = cleanMeta.substring(3)
+                    }
+                    if (cleanMeta.length == 8) {
+                        SecurePrefsManager.setPrivateVirtualNumber(context, cleanMeta, userId)
                     }
 
                     val vNum = SecurePrefsManager.getPrivateVirtualNumber(context, userId)
@@ -304,6 +314,16 @@ object SessionManager {
                     val finalRefresh = if (rawNewRefresh.isNotBlank()) rawNewRefresh else refreshToken
                     val userObj = json.optJSONObject("user")
                     val uid = userObj?.optString("id") ?: SecurePrefsManager.getUserId(context)
+
+                    val userMeta = userObj?.optJSONObject("user_metadata")
+                    val metaHex = userMeta?.optString("hex_number", userMeta.optString("virtual_number", "")) ?: ""
+                    var cleanMeta = metaHex.filter { it.isDigit() }
+                    if (cleanMeta.length == 11 && cleanMeta.startsWith("999")) {
+                        cleanMeta = cleanMeta.substring(3)
+                    }
+                    if (cleanMeta.length == 8) {
+                        SecurePrefsManager.setPrivateVirtualNumber(context, cleanMeta, uid)
+                    }
 
                     if (newAccess.isNotBlank()) {
                         SecurePrefsManager.saveSupabaseTokens(context, newAccess, finalRefresh)

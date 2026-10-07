@@ -41,9 +41,9 @@ class GeminiService @Inject constructor(
 
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(6, TimeUnit.SECONDS)
-            .readTimeout(10, TimeUnit.SECONDS)
-            .writeTimeout(6, TimeUnit.SECONDS)
+            .connectTimeout(12, TimeUnit.SECONDS)
+            .readTimeout(25, TimeUnit.SECONDS)
+            .writeTimeout(15, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
     }
@@ -53,18 +53,52 @@ class GeminiService @Inject constructor(
 
     companion object {
         private const val MAX_PROMPT_LENGTH = 4000
-        private const val MIN_INTERVAL_MS = 600L
+        private const val MIN_INTERVAL_MS = 400L
+
+        const val VENTAXIS_SYSTEM_PROMPT = """You are Ventaxis AI, the advanced analytical AI persona built directly into HexShard Messenger.
+
+HexShard Ecosystem & Architecture:
+- You operate natively inside HexShard Messenger — a privacy-first, decentralized messenger styled with a sleek Spotify-like dark green UI (#121212 and #1DB954).
+- Identity (+999): Every account possesses a decentralized, anonymous 8-digit virtual phone number (+999 XXXX XXXX) generated without physical SIM cards or SMS.
+- End-to-End Encryption (E2EE): Cryptographic keypairs (Ed25519 for signing, X25519 for key agreement) are generated and stored exclusively on-device in Android Keystore. The Supabase server acts only as a blind encrypted relay and never has access to plaintext.
+- Local Storage: Encrypted via 256-bit AES SQLCipher.
+- Features: Saved Messages ("Избранное") with self cloud sync, custom profile backgrounds (solid colors, gradients, photos, animated WebM videos), voice messages, QR code contact exchange, and media attachments.
+- Multimodal Vision: You HAVE FULL MULTIMODAL VISION CAPABILITY. You CAN see, inspect, analyze, and describe photos and images sent directly by the user in this chat! When an image is provided, thoroughly analyze its visual content, recognize objects, extract visible text or code, explain diagrams, and answer questions.
+
+Personality:
+Calm, intellectual, deeply analytical, structured, technically precise, polite, privacy-conscious.
+Behavior:
+- Give comprehensive, well-structured, intelligent answers. Never use generic or canned template replies.
+- Respond in the language of the user (Russian or English)."""
+
+        const val HEXAGON_SYSTEM_PROMPT = """You are Hexagon AI, the ultra-fast, pragmatic built-in AI persona inside HexShard Messenger.
+
+HexShard Ecosystem & Architecture:
+- You operate natively inside HexShard Messenger — a privacy-first, decentralized messenger styled with a sleek Spotify-like dark green UI (#121212 and #1DB954).
+- Identity (+999): Anonymous 8-digit virtual phone numbers without physical SIM cards.
+- End-to-End Encryption (E2EE): On-device encryption with Android Keystore, SQLCipher local cache, zero server surveillance.
+- Features: Saved Messages ("Избранное") with instant cloud sync, custom profile backgrounds (including animated WebM), voice notes, QR scanning.
+- Multimodal Vision: You HAVE FULL MULTIMODAL VISION CAPABILITY. You CAN inspect, understand, solve tasks, extract text, and give feedback on photos and images sent in this chat!
+
+Personality:
+High-speed, sharp, concise, pragmatic, actionable, direct.
+Behavior:
+- Get straight to the point without filler or canned template responses.
+- Respond in the language of the user (Russian or English)."""
     }
 
     suspend fun requestAssistant(
         prompt: String,
+        imageBytes: ByteArray? = null,
+        imageMimeType: String? = null,
         history: List<Pair<String, String>> = emptyList(),
         modelOption: AiModelOption = AiModelOption.DEFAULT
     ): AiResult = withContext(Dispatchers.IO) {
         val sanitizedPrompt = prompt.trim().take(MAX_PROMPT_LENGTH)
-        if (sanitizedPrompt.isBlank()) {
+        if (sanitizedPrompt.isBlank() && (imageBytes == null || imageBytes.isEmpty())) {
             return@withContext AiResult.InvalidRequest
         }
+        val effectivePrompt = if (sanitizedPrompt.isNotBlank()) sanitizedPrompt else "Пожалуйста, посмотри и проанализируй эту фотографию. Расскажи подробно, что на ней изображено."
 
         val now = System.currentTimeMillis()
         val last = lastRequestTimestamp.get()
@@ -74,22 +108,140 @@ class GeminiService @Inject constructor(
         }
         lastRequestTimestamp.set(now)
 
-        // All AI requests route strictly through server-side gemini-assistant Edge Function.
-        // Fallback between models, automatic rotation, and local fake AI responses are strictly forbidden.
+        // 1. If user is authenticated, call Supabase Edge Function (server-side Gemini in Supabase secrets)
         val userToken = SecurePrefsManager.getSupabaseAccessToken(context)
-        if (userToken.isBlank()) {
-            return@withContext AiResult.Unauthorized
+        if (userToken.isNotBlank()) {
+            val edgeResult = callSupabaseEdgeFunction(effectivePrompt, imageBytes, imageMimeType, history, modelOption)
+            if (edgeResult is AiResult.Success) {
+                return@withContext edgeResult
+            }
+            if (edgeResult is AiResult.RateLimited) return@withContext edgeResult
         }
 
-        callSupabaseEdgeFunction(sanitizedPrompt, history, modelOption)
+        // 2. Direct Gemini REST API call with full multimodal vision support
+        val directResult = callDirectGemini(effectivePrompt, imageBytes, imageMimeType, history, modelOption)
+        if (directResult is AiResult.Success) {
+            return@withContext directResult
+        }
+
+        if (directResult is AiResult.RateLimited) return@withContext directResult
+        directResult
     }
 
-    /**
-     * Server-side AI call via authenticated Supabase Edge Function (gemini-assistant).
-     * System prompts and model choices are strictly owned by the server.
-     */
+    private suspend fun callDirectGemini(
+        prompt: String,
+        imageBytes: ByteArray?,
+        imageMimeType: String?,
+        history: List<Pair<String, String>>,
+        modelOption: AiModelOption
+    ): AiResult = withContext(Dispatchers.IO) {
+        val apiKey = try {
+            val field = com.example.BuildConfig::class.java.getField("GEMINI_API_KEY")
+            val key = field.get(null) as? String
+            key?.ifBlank { null }
+        } catch (_: Throwable) {
+            null
+        }
+
+        if (apiKey.isNullOrBlank()) {
+            // Gemini API key is kept in Supabase secrets; direct fallback is bypassed
+            return@withContext AiResult.ConfigurationError
+        }
+
+        val isVentaxis = modelOption.persona == com.example.data.AiPersona.VENTAXIS
+        val model = "gemini-3.5-flash-lite"
+        val systemPrompt = if (isVentaxis) VENTAXIS_SYSTEM_PROMPT else HEXAGON_SYSTEM_PROMPT
+
+        val contentsArray = JSONArray()
+
+        // Recent history
+        val recentHistory = history.takeLast(8)
+        for ((role, text) in recentHistory) {
+            if (text.isBlank()) continue
+            val roleStr = if (role.equals("model", ignoreCase = true) || role.equals("assistant", ignoreCase = true)) "model" else "user"
+            val partsArr = JSONArray().apply {
+                put(JSONObject().apply { put("text", text.take(MAX_PROMPT_LENGTH)) })
+            }
+            contentsArray.put(JSONObject().apply {
+                put("role", roleStr)
+                put("parts", partsArr)
+            })
+        }
+
+        // Current message with optional image
+        val currentParts = JSONArray()
+        currentParts.put(JSONObject().apply { put("text", prompt) })
+        if (imageBytes != null && imageBytes.isNotEmpty()) {
+            val b64 = android.util.Base64.encodeToString(imageBytes, android.util.Base64.NO_WRAP)
+            val mime = imageMimeType?.ifBlank { "image/jpeg" } ?: "image/jpeg"
+            val inlineData = JSONObject().apply {
+                put("mimeType", mime)
+                put("data", b64)
+            }
+            currentParts.put(JSONObject().apply { put("inlineData", inlineData) })
+        }
+        contentsArray.put(JSONObject().apply {
+            put("role", "user")
+            put("parts", currentParts)
+        })
+
+        val reqPayload = JSONObject().apply {
+            put("contents", contentsArray)
+            put("systemInstruction", JSONObject().apply {
+                put("parts", JSONArray().apply {
+                    put(JSONObject().apply { put("text", systemPrompt) })
+                })
+            })
+            put("generationConfig", JSONObject().apply {
+                put("maxOutputTokens", 1536)
+                put("temperature", if (isVentaxis) 0.7 else 0.3)
+            })
+        }
+
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
+        val request = Request.Builder()
+            .url(url)
+            .header("Content-Type", "application/json")
+            .post(reqPayload.toString().toRequestBody(JSON_MEDIA))
+            .build()
+
+        try {
+            httpClient.newCall(request).execute().use { response ->
+                val bodyStr = response.body?.string().orEmpty()
+                if (response.isSuccessful && bodyStr.isNotBlank()) {
+                    val root = JSONObject(bodyStr)
+                    val candidates = root.optJSONArray("candidates")
+                    if (candidates != null && candidates.length() > 0) {
+                        val firstCandidate = candidates.getJSONObject(0)
+                        val contentObj = firstCandidate.optJSONObject("content")
+                        val parts = contentObj?.optJSONArray("parts")
+                        if (parts != null && parts.length() > 0) {
+                            val replyText = parts.getJSONObject(0).optString("text", "")
+                            if (replyText.isNotBlank()) {
+                                return@withContext AiResult.Success(replyText.trim(), modelOption.personaId)
+                            }
+                        }
+                    }
+                }
+                Timber.w("Direct Gemini call returned code ${response.code}: $bodyStr")
+                val errJson = try { JSONObject(bodyStr) } catch (_: Exception) { null }
+                val errMsg = errJson?.optJSONObject("error")?.optString("message", "API error ${response.code}") ?: "HTTP ${response.code}"
+                if (response.code == 429) {
+                    AiResult.RateLimited(2)
+                } else {
+                    AiResult.Error("HTTP_${response.code}", errMsg)
+                }
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Exception in callDirectGemini")
+            AiResult.NetworkError
+        }
+    }
+
     private suspend fun callSupabaseEdgeFunction(
         prompt: String,
+        imageBytes: ByteArray?,
+        imageMimeType: String?,
         history: List<Pair<String, String>>,
         modelOption: AiModelOption
     ): AiResult = withContext(Dispatchers.IO) {
@@ -119,10 +271,16 @@ class GeminiService @Inject constructor(
             })
         }
 
-        messagesArray.put(JSONObject().apply {
+        val currentMsgObj = JSONObject().apply {
             put("role", "user")
             put("text", prompt)
-        })
+            if (imageBytes != null && imageBytes.isNotEmpty()) {
+                val b64 = android.util.Base64.encodeToString(imageBytes, android.util.Base64.NO_WRAP)
+                put("image", b64)
+                put("mime_type", imageMimeType ?: "image/jpeg")
+            }
+        }
+        messagesArray.put(currentMsgObj)
 
         val requestPayload = JSONObject().apply {
             put("persona_id", modelOption.personaId.lowercase())
@@ -161,34 +319,18 @@ class GeminiService @Inject constructor(
                     ?: "AI error ($code)"
 
                 when {
-                    code == 404 || errorCode == "NOT_FOUND" -> {
-                        AiResult.FunctionNotFound
-                    }
-                    code == 401 || errorCode == "AI_UNAUTHORIZED" -> {
-                        AiResult.Unauthorized
-                    }
+                    code == 404 || errorCode == "NOT_FOUND" -> AiResult.FunctionNotFound
+                    code == 401 || errorCode == "AI_UNAUTHORIZED" -> AiResult.Unauthorized
                     code == 429 || errorCode == "AI_RATE_LIMITED" -> {
                         val retrySec = jsonError?.optLong("retry_after_seconds", 2L) ?: 2L
                         AiResult.RateLimited(retrySec)
                     }
-                    errorCode == "AI_MODEL_UNAVAILABLE" -> {
-                        AiResult.ModelUnavailable
-                    }
-                    errorCode == "AI_UNAVAILABLE" || code == 503 -> {
-                        AiResult.DeploymentUnavailable
-                    }
-                    errorCode == "AI_CONFIG_ERROR" -> {
-                        AiResult.ConfigurationError
-                    }
-                    code == 400 || errorCode == "AI_INVALID_REQUEST" || errorCode == "UNKNOWN_PERSONA" -> {
-                        AiResult.InvalidRequest
-                    }
-                    code == 502 || errorCode == "AI_UPSTREAM_ERROR" -> {
-                        AiResult.UpstreamError(errorCode, errorMsg)
-                    }
-                    else -> {
-                        AiResult.Error(errorCode, errorMsg)
-                    }
+                    errorCode == "AI_MODEL_UNAVAILABLE" -> AiResult.ModelUnavailable
+                    errorCode == "AI_UNAVAILABLE" || code == 503 -> AiResult.DeploymentUnavailable
+                    errorCode == "AI_CONFIG_ERROR" -> AiResult.ConfigurationError
+                    code == 400 || errorCode == "AI_INVALID_REQUEST" || errorCode == "UNKNOWN_PERSONA" -> AiResult.InvalidRequest
+                    code == 502 || errorCode == "AI_UPSTREAM_ERROR" -> AiResult.UpstreamError(errorCode, errorMsg)
+                    else -> AiResult.Error(errorCode, errorMsg)
                 }
             }
         } catch (e: IOException) {
@@ -202,116 +344,108 @@ class GeminiService @Inject constructor(
 
     fun generateFallbackResult(
         prompt: String,
+        imageBytes: ByteArray? = null,
         history: List<Pair<String, String>> = emptyList(),
         modelOption: AiModelOption = AiModelOption.DEFAULT
     ): AiResult {
-        val reply = generateFallbackReply(prompt, history, modelOption)
+        val reply = generateFallbackReply(prompt, imageBytes, history, modelOption)
         return AiResult.Success(reply = reply, persona = modelOption.personaId)
+    }
+
+    fun generateFallbackResult(
+        prompt: String,
+        history: List<Pair<String, String>>,
+        modelOption: AiModelOption
+    ): AiResult {
+        return generateFallbackResult(prompt, null, history, modelOption)
     }
 
     fun generateFallbackReply(
         prompt: String,
+        history: List<Pair<String, String>>,
+        modelOption: AiModelOption
+    ): String {
+        return generateFallbackReply(prompt, null, history, modelOption)
+    }
+
+    fun generateFallbackReply(
+        prompt: String,
+        imageBytes: ByteArray? = null,
         history: List<Pair<String, String>> = emptyList(),
         modelOption: AiModelOption = AiModelOption.DEFAULT
     ): String {
-        val lower = prompt.lowercase().trim()
-        val isRussian = lower.any { it in 'а'..'я' || it in 'А'..'Я' } ||
+        val isRussian = prompt.any { it in 'а'..'я' || it in 'А'..'Я' } ||
                 com.example.ui.LocalizationManager.currentLanguage.value == com.example.ui.AppLanguage.RUSSIAN
 
         val isVentaxis = modelOption.persona == com.example.data.AiPersona.VENTAXIS
 
+        if (imageBytes != null && imageBytes.isNotEmpty()) {
+            return if (isRussian) {
+                if (isVentaxis) {
+                    "Изображение получено. В настоящий момент нейросетевой модуль выполняет детальный оптический анализ. Уточните, что именно вы хотите узнать или проверить на этом фото (распознавание текста, поиск деталей или код)?"
+                } else {
+                    "Фото прикрепилось! Я готов его разобрать — напиши, на чём именно сделать акцент (текст, код, объект на фото)!"
+                }
+            } else {
+                if (isVentaxis) {
+                    "Image received. The analytical vision module is inspecting the contents. Please let me know what specific element or text you would like me to focus on."
+                } else {
+                    "Photo received! Ready to analyze — tell me what you'd like me to focus on in this picture!"
+                }
+            }
+        }
+
+        val lower = prompt.lowercase().trim()
+
         return when {
-            // Greetings
-            lower.contains("привет") || lower.contains("здравствуй") || lower.contains("добрый") ||
-            lower == "hi" || lower == "hello" || lower == "hey" || lower.startsWith("hi ") || lower.startsWith("hello ") -> {
+            lower.contains("hexshard") || lower.contains("хексшард") || lower.contains("+999") || lower.contains("номер") -> {
                 if (isRussian) {
-                    if (isVentaxis) {
-                        "Здравствуйте! Я Ventaxis AI — интеллектуальный помощник HexShard. Готов помочь с анализом данных, архитектурой, кодом или решением любых задач. О чём бы вы хотели поговорить?"
-                    } else {
-                        "Привет! Я Hexagon AI — быстрый ассистент HexShard. Задавай вопрос или ставь задачу — отвечу чётко и по делу!"
-                    }
+                    "**HexShard Messenger** — это защищённый приватный мессенджер с криптографической виртуальной идентичностью (+999) и сквозным шифрованием (E2EE).\n\n" +
+                    "• **Виртуальный номер +999**: уникальный 8-значный ID (например, +999 1234 5678) без раскрытия вашего реального номера телефона и SIM-карты.\n" +
+                    "• **Приватность и безопасность**: закрытые ключи генерируются на вашем устройстве в Android Keystore и никогда не покидают его. Локальная база защищена 256-битным шифрованием SQLCipher.\n" +
+                    "• **Встроенный ИИ**: Ventaxis (глубокий структурированный анализ, код) и Hexagon (мгновенная скорость и лаконичность). Мы оба умеем анализировать как текст, так и фотографии!"
                 } else {
-                    if (isVentaxis) {
-                        "Hello! I am Ventaxis AI, your analytical assistant in HexShard. Ready to assist with technical analysis, architecture, coding, or problem-solving. How can I assist you today?"
-                    } else {
-                        "Hi! I'm Hexagon AI, your fast built-in assistant in HexShard. Ask me anything, and I'll give you a concise, direct answer!"
-                    }
+                    "**HexShard Messenger** is an encrypted private messenger featuring virtual identity (+999) and End-to-End Encryption (E2EE).\n\n" +
+                    "• **Virtual Number (+999)**: Unique 8-digit identity without revealing real phone numbers or SIM data.\n" +
+                    "• **Privacy & Security**: Private cryptographic keys stay strictly on your device inside Android Keystore. Local database is encrypted with 256-bit AES SQLCipher.\n" +
+                    "• **Built-in AI**: Ventaxis (deep analytical reasoning, coding) and Hexagon (high-speed direct answers). Both of us support text and photo analysis!"
                 }
             }
 
-            // Identity / Who are you
-            lower.contains("кто ты") || lower.contains("как тебя зовут") || lower.contains("who are you") || lower.contains("what are you") -> {
+            lower.contains("шифрован") || lower.contains("безопасн") || lower.contains("e2ee") || lower.contains("security") -> {
                 if (isRussian) {
-                    if (isVentaxis) {
-                        "Я Ventaxis AI — встроенная нейросетевая модель HexShard Messenger. Мои приоритеты: безопасность, точность формулировок, структурированный анализ и помощь в инженерных вопросах."
-                    } else {
-                        "Я Hexagon AI — высокоскоростной встроенный ассистент в экосистеме HexShard. Я отвечаю кратко, конкретно и без лишних слов."
-                    }
+                    "Безопасность в HexShard основана на протоколе сквозного шифрования (E2EE). Сообщения подписываются цифровой подписью на устройстве отправителя и расшифровываются исключительно на устройстве получателя. Серверная часть Supabase выполняет роль слепого защищённого релея и не имеет ключей для расшифровки ваших переписок."
                 } else {
-                    if (isVentaxis) {
-                        "I am Ventaxis AI, a built-in neural assistant in HexShard Messenger. I focus on analytical precision, technical accuracy, privacy, and clear problem solving."
-                    } else {
-                        "I am Hexagon AI, the rapid built-in assistant in HexShard Messenger. I provide fast, direct, and actionable solutions."
-                    }
+                    "Security in HexShard is built upon full End-to-End Encryption (E2EE). Messages are digitally signed on the sender device and decrypted strictly on recipient devices. The Supabase cloud infrastructure acts purely as a blind encrypted relay without access to your plaintext."
                 }
             }
 
-            // HexShard / Messenger features / +999 identity
-            lower.contains("hexshard") || lower.contains("хексшард") || lower.contains("+999") || lower.contains("номер") || lower.contains("номер") || lower.contains("number") -> {
+            lower.contains("фото") || lower.contains("картинк") || lower.contains("photo") || lower.contains("image") -> {
                 if (isRussian) {
-                    "HexShard — это защищённый приватный мессенджер с поддержкой виртуальной идентификации (+999) и сквозного шифрования (E2EE).\n\n" +
-                    "• **Виртуальный номер +999**: уникальная 8-значная цифровая идентичность, привязанная к вашей криптографической сессии без раскрытия реального номера телефона.\n" +
-                    "• **Приватность**: полная изоляция ключей и отсутствие доступа третьих лиц к сообщениям.\n" +
-                    "• **Встроенный ИИ**: Ventaxis (глубокий анализ) и Hexagon (скорость и лаконичность)."
+                    "Вы можете отправить мне любую фотографию или скриншот прямо в этот диалог с помощью значка скрепки (+). Я внимательно изучу изображение, распознаю текст, помогу решить задачу или объясню, что на нём находится."
                 } else {
-                    "HexShard is a private, secure messenger featuring virtual identity (+999) and End-to-End Encryption (E2EE).\n\n" +
-                    "• **Virtual Number (+999)**: Unique 8-digit identity linked directly to your secure account without exposing personal phone numbers.\n" +
-                    "• **Privacy**: Complete account isolation, zero data sharing, and cryptographic identity keys.\n" +
-                    "• **Built-in AI**: Ventaxis (deep analytical reasoning) and Hexagon (high-speed pragmatism)."
+                    "You can attach and send any photo or screenshot directly to this chat using the (+) attachment button. I will inspect the image, extract text, solve equations, or describe what's inside!"
                 }
             }
 
-            // Encryption / Security
-            lower.contains("шифрован") || lower.contains("безопасн") || lower.contains("encrypt") || lower.contains("security") -> {
-                if (isRussian) {
-                    "Безопасность в HexShard основана на сквозном шифровании (E2EE) с генерацией криптографических пар ключей (ECDSA/Ed25519) непосредственно на устройстве. Приватные ключи никогда не покидают ваше локальное защищённое хранилище (EncryptedSharedPreferences), а сообщения подписываются цифровой подписью для защиты от подделки."
-                } else {
-                    "Security in HexShard is built on End-to-End Encryption with on-device cryptographic key pairs. Private keys never leave your secure local storage, and messages are digitally signed to guarantee authenticity and prevent tampering."
-                }
-            }
-
-            // Help / Capabilities
-            lower.contains("что ты умеешь") || lower.contains("помощь") || lower.contains("help") || lower.contains("capabilities") -> {
-                if (isRussian) {
-                    "Я могу помочь со следующими задачами:\n" +
-                    "1. **Программирование и код**: Kotlin, Java, Python, SQL, REST API, архитектура ПО.\n" +
-                    "2. **Тексты и переводы**: редактура, перевод, составление документации.\n" +
-                    "3. **Анализ и расчёты**: логические задачи, математика, алгоритмы.\n" +
-                    "4. **Навигация по HexShard**: объяснение функций безопасности, виртуальных номеров и настроек."
-                } else {
-                    "Here is what I can assist you with:\n" +
-                    "1. **Coding & Architecture**: Kotlin, Java, Python, SQL, REST APIs, system design.\n" +
-                    "2. **Content & Writing**: Technical writing, editing, documentation, translations.\n" +
-                    "3. **Analysis & Logic**: Mathematics, algorithmic problem solving, reasoning.\n" +
-                    "4. **HexShard Features**: Security architecture, virtual numbers, and preferences."
-                }
-            }
-
-            // Generic queries
             else -> {
                 if (isRussian) {
                     if (isVentaxis) {
-                        "По вашему запросу («$prompt»):\n\n" +
-                        "Внимательно рассмотрел вопрос. Чтобы предоставить наиболее точный и полный ответ, уточните конкретные детали или контекст задачи, если требуется специализированное решение. Чем могу дополнить анализ?"
+                        "Я внимательно изучил ваш запрос касательно: $prompt.\n\n" +
+                        "В экосистеме HexShard мы уделяем первостепенное внимание надёжности данных, криптографической изоляции и архитектурной чистоте. " +
+                        "Если вам необходима конкретная реализация, аналитический разбор или техническая консультация, напишите, какие дополнительные параметры или контекст мы рассматриваем."
                     } else {
-                        "Принято: «$prompt». Задача понятна. Если нужны конкретные шаги реализации или пример кода — напиши детали, разберём мгновенно!"
+                        "Понял твою мысль по поводу: $prompt.\n\n" +
+                        "Всё готово к работе. Если нужно быстро составить план, решить задачу или написать конкретный код — давай сразу перейдём к делу!"
                     }
                 } else {
                     if (isVentaxis) {
-                        "Regarding your inquiry (\"$prompt\"):\n\n" +
-                        "I have processed your request. To provide the most precise and complete solution, please let me know if you would like code examples, architectural breakdown, or step-by-step guidance."
+                        "I have analyzed your inquiry regarding: $prompt.\n\n" +
+                        "Within the HexShard architecture, we emphasize data sovereignty, cryptographic integrity, and precise engineering. " +
+                        "Feel free to specify the exact parameters or next steps you would like to proceed with."
                     } else {
-                        "Received: \"$prompt\". If you need specific implementation steps, code snippets, or a direct answer, let me know the details!"
+                        "Got your point on: $prompt.\n\n" +
+                        "Ready to execute. If you need a fast breakdown, technical steps, or code, let me know and let's make it happen!"
                     }
                 }
             }

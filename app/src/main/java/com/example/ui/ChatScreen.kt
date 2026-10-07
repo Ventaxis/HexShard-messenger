@@ -11,6 +11,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
@@ -31,6 +34,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -106,18 +110,22 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
         viewModel.onAccountChanged()
         val uid = com.example.data.SecurePrefsManager.getUserId(context)
         val token = com.example.data.SecurePrefsManager.getSupabaseAccessToken(context)
-        var localNumber = com.example.data.SecurePrefsManager.getPrivateVirtualNumber(context, uid)
-        if (localNumber.isBlank() && uid.isNotBlank() && token.isNotBlank()) {
-            val state = com.example.network.supabase.VirtualNumberService.loadActiveVirtualNumber(uid, token, context)
-            if (state is com.example.network.supabase.ActiveVirtualNumberState.Active) {
-                localNumber = state.formatted
-                currentVirtualNumber = localNumber
-            }
-        }
-        if (localNumber.isBlank()) {
-            val dismissed = com.example.data.SecurePrefsManager.isHexShardPromptDismissed(context, uid)
-            if (!dismissed) {
-                showMissingHexShardDialog = true
+        if (uid.isNotBlank() && token.isNotBlank()) {
+            when (val state = com.example.network.supabase.VirtualNumberService.loadActiveVirtualNumber(uid, token, context)) {
+                is com.example.network.supabase.ActiveVirtualNumberState.Active -> {
+                    currentVirtualNumber = state.formatted
+                }
+                is com.example.network.supabase.ActiveVirtualNumberState.NoActiveNumber -> {
+                    currentVirtualNumber = ""
+                    val dismissed = com.example.data.SecurePrefsManager.isHexShardPromptDismissed(context, uid)
+                    if (!dismissed) {
+                        showMissingHexShardDialog = true
+                    }
+                }
+                is com.example.network.supabase.ActiveVirtualNumberState.TemporaryError -> {
+                    // Do NOT show missing dialog on temporary server / network error!
+                    timber.log.Timber.d("Active virtual number query temporary error: ${state.message}")
+                }
             }
         }
     }
@@ -130,13 +138,14 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
         modifier = Modifier.fillMaxSize(),
         color = bg
     ) {
-        BoxWithConstraints(modifier = Modifier.fillMaxSize().navigationBarsPadding().statusBarsPadding()) {
+        BoxWithConstraints(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
             val isWide = maxWidth > 640.dp
             
             val chats by viewModel.chats.collectAsStateWithLifecycle()
             val selectedId by viewModel.selectedChatId.collectAsStateWithLifecycle()
             val messages by viewModel.selectedChatMessages.collectAsStateWithLifecycle()
             val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
+            val searchResults by viewModel.searchResults.collectAsStateWithLifecycle()
             val isSending by viewModel.isSending.collectAsStateWithLifecycle()
             val typingChatId by viewModel.typingChatId.collectAsStateWithLifecycle()
             val selectedAiModel by viewModel.selectedAiModel.collectAsStateWithLifecycle()
@@ -146,15 +155,17 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
                 // Expanded / Tablet Canonical Layout (List-Detail in row)
                 Row(modifier = Modifier.fillMaxSize()) {
                     SidebarPanel(
-                        modifier = Modifier.width(360.dp).fillMaxHeight(),
+                        modifier = Modifier.width(360.dp).fillMaxHeight().navigationBarsPadding(),
                         chats = chats,
                         selectedId = selectedId,
                         searchQuery = searchQuery,
+                        searchResults = searchResults,
                         typingChatId = typingChatId,
                         isDark = isDark,
                         virtualNumber = currentVirtualNumber,
                         onClaimHexShardId = { showClaimHexShardDialog = true },
                         onChatSelected = { viewModel.selectChat(it) },
+                        onUserSelected = { viewModel.openChatWithUser(it) },
                         onQueryChanged = { viewModel.updateSearchQuery(it) },
                         onAddChatClicked = { name, initials -> viewModel.createNewChat(name, initials) },
                         onToggleTheme = { viewModel.toggleTheme() },
@@ -204,6 +215,7 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
                 // Compact Screen Layout (Mobile Single-view Navigation)
                 AnimatedContent(
                     targetState = selectedId,
+                    modifier = Modifier.fillMaxSize(),
                     transitionSpec = {
                         if (targetState != null) {
                             // Slide inside details
@@ -219,15 +231,17 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
                 ) { currentId ->
                     if (currentId == null) {
                         SidebarPanel(
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier.fillMaxSize().navigationBarsPadding(),
                             chats = chats,
                             selectedId = null,
                             searchQuery = searchQuery,
+                            searchResults = searchResults,
                             typingChatId = typingChatId,
                             isDark = isDark,
                             virtualNumber = currentVirtualNumber,
                             onClaimHexShardId = { showClaimHexShardDialog = true },
                             onChatSelected = { viewModel.selectChat(it) },
+                            onUserSelected = { viewModel.openChatWithUser(it) },
                             onQueryChanged = { viewModel.updateSearchQuery(it) },
                             onAddChatClicked = { name, initials -> viewModel.createNewChat(name, initials) },
                             onToggleTheme = { viewModel.toggleTheme() },
@@ -266,9 +280,12 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
             }
         }
 
+        var pendingPreferredNumber by remember { mutableStateOf("") }
+
         if (showMissingHexShardDialog) {
             HexShardIdMissingDialog(
-                onContinue = {
+                onContinue = { preferred ->
+                    pendingPreferredNumber = preferred
                     showMissingHexShardDialog = false
                     showClaimHexShardDialog = true
                 },
@@ -281,10 +298,15 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
 
         if (showClaimHexShardDialog) {
             HexShardIdClaimDialog(
-                onDismiss = { showClaimHexShardDialog = false },
+                initialPreferred = pendingPreferredNumber,
+                onDismiss = {
+                    showClaimHexShardDialog = false
+                    pendingPreferredNumber = ""
+                },
                 onSuccess = { formatted ->
                     currentVirtualNumber = formatted
                     showClaimHexShardDialog = false
+                    pendingPreferredNumber = ""
                 }
             )
         }
@@ -297,11 +319,13 @@ fun SidebarPanel(
     chats: List<ChatEntity>,
     selectedId: Int?,
     searchQuery: String,
+    searchResults: UnifiedSearchResults = UnifiedSearchResults(),
     typingChatId: Int?,
     isDark: Boolean,
     virtualNumber: String = "",
     onClaimHexShardId: () -> Unit = {},
     onChatSelected: (Int) -> Unit,
+    onUserSelected: (com.example.data.repository.UserRepository.UserSearchResult) -> Unit = {},
     onQueryChanged: (String) -> Unit,
     onAddChatClicked: (String, String) -> Unit,
     onToggleTheme: () -> Unit,
@@ -371,7 +395,7 @@ fun SidebarPanel(
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(horizontal = 10.dp)
+                            modifier = Modifier.padding(horizontal = 8.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.PhoneAndroid,
@@ -381,8 +405,10 @@ fun SidebarPanel(
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = "+999",
-                                fontSize = 12.sp,
+                                text = "+999 • HexShard ID",
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                softWrap = false,
                                 fontWeight = FontWeight.SemiBold,
                                 color = HexShardTealLight
                             )
@@ -451,9 +477,6 @@ fun SidebarPanel(
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 6.dp)
         ) {
-            var isFocused by remember { mutableStateOf(false) }
-            val borderTint = if (isFocused) SpotifyGreen else border
-
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = onQueryChanged,
@@ -472,6 +495,18 @@ fun SidebarPanel(
                         modifier = Modifier.size(18.dp)
                     )
                 },
+                trailingIcon = {
+                    if (searchQuery.isNotEmpty()) {
+                        IconButton(onClick = { onQueryChanged("") }) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Clear",
+                                tint = txtSec,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                },
                 singleLine = true,
                 shape = RoundedCornerShape(24.dp),
                 colors = OutlinedTextFieldDefaults.colors(
@@ -489,49 +524,173 @@ fun SidebarPanel(
             )
         }
 
+        if (searchQuery.isNotBlank() && searchResults.isSearching) {
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp)
+                    .height(2.dp),
+                color = SpotifyGreen,
+                trackColor = border
+            )
+        }
+
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Chat list
-        LazyColumn(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .testTag("chat_list")
-        ) {
-            if (chats.isEmpty()) {
-                item {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 80.dp, start = 16.dp, end = 16.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        AnimatedCrystalLogo(size = 140.dp)
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = strings.noConversationsYet,
-                            color = txtSec,
-                            fontSize = 14.sp,
-                            textAlign = TextAlign.Center
+        if (searchQuery.isNotBlank()) {
+            // Unified Search Results (Users from Supabase profiles, Local Chats, and Messages)
+            LazyColumn(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .testTag("unified_search_results")
+            ) {
+                val hasUsers = searchResults.users.isNotEmpty()
+                val hasChats = searchResults.chats.isNotEmpty()
+                val hasMessages = searchResults.messages.isNotEmpty()
+
+                if (!hasUsers && !hasChats && !hasMessages && !searchResults.isSearching) {
+                    item {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 60.dp, start = 24.dp, end = 24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Search,
+                                contentDescription = null,
+                                tint = txtSec.copy(alpha = 0.5f),
+                                modifier = Modifier.size(54.dp)
+                            )
+                            Spacer(modifier = Modifier.height(14.dp))
+                            Text(
+                                text = strings.noSearchResults,
+                                color = txtMain,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = if (strings == RussianStrings) "По запросу \"$searchQuery\" ничего не найдено" else "No results found for \"$searchQuery\"",
+                                color = txtSec,
+                                fontSize = 13.sp,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                }
+
+                // 1. Users Section (From Supabase profiles)
+                if (hasUsers) {
+                    item {
+                        SearchSectionHeader(
+                            title = strings.searchUsers,
+                            count = searchResults.users.size,
+                            icon = Icons.Default.Person,
+                            isDark = isDark
+                        )
+                    }
+                    items(searchResults.users, key = { "user_${it.userId}" }) { user ->
+                        SearchUserResultItem(
+                            user = user,
+                            isDark = isDark,
+                            onClick = { onUserSelected(user) }
                         )
                     }
                 }
-            } else {
-                val sortedChats = chats.sortedByDescending { it.isPinned }
-                items(sortedChats, key = { it.id }) { chat ->
-                    val isSelected = chat.id == selectedId
-                    val isTyping = typingChatId == chat.id
-                    
-                    ChatListItem(
-                        chat = chat,
-                        isSelected = isSelected,
-                        isTyping = isTyping,
-                        isDark = isDark,
-                        onClick = { onChatSelected(chat.id) },
-                        onPin = { onTogglePin(chat.id) },
-                        onDelete = { onDeleteChat(chat.id) }
-                    )
+
+                // 2. Chats Section
+                if (hasChats) {
+                    item {
+                        SearchSectionHeader(
+                            title = strings.searchChats,
+                            count = searchResults.chats.size,
+                            icon = Icons.Default.ChatBubble,
+                            isDark = isDark
+                        )
+                    }
+                    items(searchResults.chats, key = { "chat_${it.id}" }) { chat ->
+                        ChatListItem(
+                            chat = chat,
+                            isSelected = chat.id == selectedId,
+                            isTyping = typingChatId == chat.id,
+                            isDark = isDark,
+                            onClick = { onChatSelected(chat.id) },
+                            onPin = { onTogglePin(chat.id) },
+                            onDelete = { onDeleteChat(chat.id) }
+                        )
+                    }
+                }
+
+                // 3. Messages Section
+                if (hasMessages) {
+                    item {
+                        SearchSectionHeader(
+                            title = strings.searchUnifiedMessages,
+                            count = searchResults.messages.size,
+                            icon = Icons.Default.Email,
+                            isDark = isDark
+                        )
+                    }
+                    items(searchResults.messages, key = { "msg_${it.id}" }) { msg ->
+                        val chat = chats.find { it.id == msg.chatId }
+                        val chatName = chat?.name ?: (if (strings == RussianStrings) "Чат" else "Chat")
+                        SearchMessageResultItem(
+                            message = msg,
+                            chatName = chatName,
+                            query = searchQuery,
+                            isDark = isDark,
+                            onClick = { onChatSelected(msg.chatId) }
+                        )
+                    }
+                }
+            }
+        } else {
+            // Chat list
+            LazyColumn(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .testTag("chat_list")
+            ) {
+                if (chats.isEmpty()) {
+                    item {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 80.dp, start = 16.dp, end = 16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            AnimatedCrystalLogo(size = 140.dp)
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = strings.noConversationsYet,
+                                color = txtSec,
+                                fontSize = 14.sp,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                } else {
+                    val sortedChats = chats.sortedByDescending { it.isPinned }
+                    items(sortedChats, key = { it.id }) { chat ->
+                        val isSelected = chat.id == selectedId
+                        val isTyping = typingChatId == chat.id
+                        
+                        ChatListItem(
+                            chat = chat,
+                            isSelected = isSelected,
+                            isTyping = isTyping,
+                            isDark = isDark,
+                            onClick = { onChatSelected(chat.id) },
+                            onPin = { onTogglePin(chat.id) },
+                            onDelete = { onDeleteChat(chat.id) }
+                        )
+                    }
                 }
             }
         }
@@ -732,6 +891,174 @@ fun ChatListItem(
 }
 
 @Composable
+fun SearchSectionHeader(
+    title: String,
+    count: Int,
+    icon: ImageVector,
+    isDark: Boolean
+) {
+    val txtSec = if (isDark) DarkTxtSec else LightTxtSec
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = SpotifyGreen,
+                modifier = Modifier.size(15.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = title.uppercase(),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = SpotifyGreen,
+                letterSpacing = 1.sp
+            )
+        }
+        Text(
+            text = "$count",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = txtSec
+        )
+    }
+}
+
+@Composable
+fun SearchUserResultItem(
+    user: com.example.data.repository.UserRepository.UserSearchResult,
+    isDark: Boolean,
+    onClick: () -> Unit
+) {
+    val txtMain = if (isDark) DarkTxtMain else LightTxtMain
+    val txtSec = if (isDark) DarkTxtSec else LightTxtSec
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(42.dp)
+                .clip(CircleShape)
+                .background(Brush.linearGradient(listOf(SpotifyGreen, Color(0xFF00897B)))),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = user.displayName.ifBlank { user.username }.take(2).uppercase(),
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                fontSize = 15.sp
+            )
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = user.displayName.ifBlank { user.username },
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = txtMain,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (user.username.isNotBlank()) {
+                Text(
+                    text = "@${user.username}",
+                    fontSize = 13.sp,
+                    color = HexShardTealLight,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        IconButton(onClick = onClick) {
+            Icon(
+                imageVector = Icons.Default.ChatBubble,
+                contentDescription = "Message",
+                tint = SpotifyGreen,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+    }
+}
+
+@Composable
+fun SearchMessageResultItem(
+    message: MessageEntity,
+    chatName: String,
+    query: String,
+    isDark: Boolean,
+    onClick: () -> Unit
+) {
+    val txtMain = if (isDark) DarkTxtMain else LightTxtMain
+    val txtSec = if (isDark) DarkTxtSec else LightTxtSec
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(38.dp)
+                .clip(CircleShape)
+                .background(if (isDark) Color(0xFF222222) else Color(0xFFE8E8E8)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Email,
+                contentDescription = null,
+                tint = txtSec,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = chatName,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = txtMain,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = message.time,
+                    fontSize = 11.sp,
+                    color = txtSec
+                )
+            }
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = message.text,
+                fontSize = 13.sp,
+                color = txtSec,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
 fun ChatArea(
     modifier: Modifier = Modifier,
     chat: ChatEntity,
@@ -803,6 +1130,14 @@ fun ChatArea(
         }
     }
 
+    val isImeVisible = WindowInsets.isImeVisible
+    LaunchedEffect(isImeVisible) {
+        if (isImeVisible && messages.isNotEmpty()) {
+            val targetIdx = (messages.size - 1).coerceAtLeast(0)
+            listState.animateScrollToItem(targetIdx)
+        }
+    }
+
     var isSearching by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
 
@@ -816,6 +1151,7 @@ fun ChatArea(
         modifier = modifier
             .background(bg)
             .fillMaxSize()
+            .imePadding()
     ) {
         // Chat Header
         AnimatedContent(
@@ -1192,8 +1528,12 @@ fun ChatArea(
             }
         }
 
+        val isImeVisible = WindowInsets.isImeVisible
+        val bottomBarModifier = if (!isImeVisible) Modifier.navigationBarsPadding() else Modifier
+
         // Bottom Input bar
         InputBarLayout(
+            modifier = bottomBarModifier,
             isSending = isSending,
             isDark = isDark,
             chatId = chat.id,
@@ -1608,8 +1948,10 @@ fun LocationMessagePayload(
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun InputBarLayout(
+    modifier: Modifier = Modifier,
     isSending: Boolean,
     isDark: Boolean,
     chatId: Int,
@@ -1631,6 +1973,14 @@ fun InputBarLayout(
     val haptic = LocalHapticFeedback.current
     val context = androidx.compose.ui.platform.LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    val bringIntoViewRequester = remember { BringIntoViewRequester() }
+    val isImeVisible = WindowInsets.isImeVisible
+
+    LaunchedEffect(isImeVisible) {
+        if (isImeVisible) {
+            bringIntoViewRequester.bringIntoView()
+        }
+    }
     
     val voiceHelper = remember { VoiceMessageHelper(context) }
     var isRecording by remember { mutableStateOf(false) }
@@ -1702,8 +2052,9 @@ fun InputBarLayout(
     }
 
     Surface(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
+            .bringIntoViewRequester(bringIntoViewRequester)
             .drawBehind {
                 drawLine(
                     color = border,
@@ -1857,6 +2208,14 @@ fun InputBarLayout(
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(max = 100.dp)
+                            .bringIntoViewRequester(bringIntoViewRequester)
+                            .onFocusChanged { focusState ->
+                                if (focusState.isFocused) {
+                                    coroutineScope.launch {
+                                        bringIntoViewRequester.bringIntoView()
+                                    }
+                                }
+                            }
                             .testTag("message_input_box")
                     )
                 }

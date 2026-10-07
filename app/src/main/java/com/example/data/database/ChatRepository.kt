@@ -211,6 +211,18 @@ open class ChatRepository(
     suspend fun resolveUser(identifier: String): Pair<String, String>? =
         userRepository.resolveUser(identifier)
 
+    suspend fun searchUsers(query: String): List<UserRepository.UserSearchResult> =
+        userRepository.searchUsers(query)
+
+    suspend fun fetchPeerProfile(peerIdOrUsername: String): UserRepository.PeerProfileInfo? =
+        userRepository.fetchPeerProfile(peerIdOrUsername)
+
+    suspend fun searchChats(query: String): List<ChatEntity> =
+        chatDao.searchChats(query, getCurrentUserId())
+
+    suspend fun searchMessages(query: String): List<MessageEntity> =
+        chatDao.searchMessages(query, getCurrentUserId())
+
     suspend fun createProfileShareToken(expiresInDays: Int = 7): String? =
         userRepository.createProfileShareToken(expiresInDays)
 

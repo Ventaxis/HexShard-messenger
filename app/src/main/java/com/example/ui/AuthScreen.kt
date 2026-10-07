@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
@@ -1144,6 +1145,21 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
                                             modifier = Modifier.weight(1f)
                                         )
 
+                                        if (raw8DigitsInput.isNotEmpty()) {
+                                            IconButton(
+                                                onClick = { raw8DigitsInput = "" },
+                                                modifier = Modifier.size(24.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Close,
+                                                    contentDescription = "Clear",
+                                                    tint = Color(0xFF8B8B9E),
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                        }
+
                                         // Refresh / Generate button
                                         IconButton(
                                             onClick = {
@@ -1164,9 +1180,9 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
                                     // Formatted preview
                                     val formattedPreview = VirtualNumberGenerator.format8Digits(raw8DigitsInput)
                                     Text(
-                                        text = formattedPreview,
+                                        text = if (raw8DigitsInput.length == 8) formattedPreview else if (strings == RussianStrings) "Введите 8 цифр или нажмите ⟳" else "Enter 8 digits or tap ⟳",
                                         fontSize = 14.sp,
-                                        color = Color(0xFF8B8B9E),
+                                        color = if (raw8DigitsInput.length == 8) Color(0xFF1DB954) else Color(0xFF8B8B9E),
                                         fontFamily = FontFamily.Monospace
                                     )
                                 }

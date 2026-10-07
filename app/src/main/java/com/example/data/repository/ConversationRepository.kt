@@ -7,6 +7,7 @@ import com.example.data.database.ChatEntity
 import com.example.data.database.MessageEntity
 import com.example.data.database.isAiAssistant
 import com.example.data.database.isSavedMessages
+import com.example.network.supabase.SupabaseConfig
 import com.example.ui.AppLanguage
 import com.example.ui.LocalizationManager
 import kotlinx.coroutines.Dispatchers
@@ -23,7 +24,16 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
+import org.json.JSONObject
 import timber.log.Timber
+import java.util.concurrent.TimeUnit
+
+private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
 class ConversationRepository(
     private val chatDao: ChatDao,
@@ -129,7 +139,11 @@ class ConversationRepository(
     }
 
     suspend fun insertChat(chat: ChatEntity): Long = withContext(Dispatchers.IO) {
-        chatDao.insertChat(chat)
+        val id = chatDao.insertChat(chat)
+        if (!chat.isSavedMessages && !chat.isAiAssistant) {
+            persistConversationToCloud(chat.accountId, chat)
+        }
+        id
     }
 
     suspend fun insertChats(chats: List<ChatEntity>) = withContext(Dispatchers.IO) {
@@ -158,6 +172,12 @@ class ConversationRepository(
     }
 
     suspend fun ensureDefaultChatsExist(accountId: String = getCurrentAccountId()) = withContext(Dispatchers.IO) {
+        try {
+            chatDao.resetStaleOnlineStatuses()
+        } catch (e: Exception) {
+            Timber.w(e, "Could not reset stale online statuses")
+        }
+
         val targetAccountId = if (accountId.isNotBlank()) accountId else getCurrentAccountId()
         if (targetAccountId.isBlank()) {
             return@withContext
@@ -171,6 +191,9 @@ class ConversationRepository(
                 chatDao.backfillLegacyOutboxAccountId(targetAccountId)
                 SecurePrefsManager.setLegacyMigrationDone(context, true)
             }
+
+            // Ensure stale online statuses are cleared so offline contacts aren't falsely shown as online
+            chatDao.resetStaleOnlineStatuses()
 
             val isRussian = LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN
             val savedName = if (isRussian) "Избранное" else "Saved Messages"
@@ -390,6 +413,208 @@ class ConversationRepository(
                     }
                 }
             }
+        }
+    }
+
+    private val httpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .build()
+    }
+
+    suspend fun syncConversationsFromServer(userId: String) = withContext(Dispatchers.IO) {
+        if (userId.isBlank()) return@withContext
+        ensureDefaultChatsExist(userId)
+        val ctx = context ?: return@withContext
+        val baseUrl = SupabaseConfig.getBaseUrl()
+        val anonKey = SupabaseConfig.getAnonKey(ctx)
+        val token = SecurePrefsManager.getSupabaseAccessToken(ctx).takeIf { it.isNotBlank() } ?: return@withContext
+
+        try {
+            val filter = "or=(participant1.eq.$userId,participant2.eq.$userId)"
+            val url = "$baseUrl/rest/v1/conversations?$filter&select=*&order=updated_at.desc"
+            val req = Request.Builder()
+                .url(url)
+                .header("apikey", anonKey)
+                .header("Authorization", "Bearer $token")
+                .get()
+                .build()
+
+            val resp = try { httpClient.newCall(req).execute() } catch (e: Exception) { null }
+            val body = resp?.body?.string() ?: ""
+            val isSuccess = resp?.isSuccessful == true
+            resp?.close()
+
+            if (isSuccess && body.isNotBlank()) {
+                val array = try { JSONArray(body) } catch (_: Exception) { JSONArray() }
+                for (i in 0 until array.length()) {
+                    val obj = array.getJSONObject(i)
+                    val convId = obj.optString("id")
+                    val convType = obj.optString("type", "DIRECT")
+                    val p1 = obj.optString("participant1")
+                    val p2 = obj.optString("participant2")
+                    val peerId = if (p1 == userId) p2 else p1
+
+                    if (peerId.isNotBlank() && peerId != "null") {
+                        val existing = chatDao.getChatByConversationId(convId, userId) ?: chatDao.getChatByRecipientId(peerId, userId)
+                        if (existing == null) {
+                            fetchAndInsertPeerChat(baseUrl, anonKey, token, userId, peerId, convId, convType)
+                        }
+                    }
+                }
+            }
+
+            // Sync from Supabase Auth server metadata (survives app reinstallation even without conversations table)
+            try {
+                val authReq = Request.Builder()
+                    .url("$baseUrl/auth/v1/user")
+                    .header("apikey", anonKey)
+                    .header("Authorization", "Bearer $token")
+                    .get()
+                    .build()
+                val authResp = httpClient.newCall(authReq).execute()
+                val authBody = authResp.body?.string() ?: ""
+                authResp.close()
+                if (authResp.isSuccessful && authBody.isNotBlank()) {
+                    val userMeta = JSONObject(authBody).optJSONObject("user_metadata")
+                    val convArray = userMeta?.optJSONArray("conversations")
+                    if (convArray != null) {
+                        for (i in 0 until convArray.length()) {
+                            val cObj = convArray.getJSONObject(i)
+                            val convId = cObj.optString("id")
+                            val peerId = cObj.optString("peer_id")
+                            val convType = cObj.optString("type", "DIRECT")
+                            if (peerId.isNotBlank() && peerId != "null") {
+                                val existing = chatDao.getChatByConversationId(convId, userId) ?: chatDao.getChatByRecipientId(peerId, userId)
+                                if (existing == null) {
+                                    fetchAndInsertPeerChat(baseUrl, anonKey, token, userId, peerId, convId, convType)
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (authEx: Exception) {
+                Timber.w(authEx, "Non-fatal: could not sync conversations from auth user_metadata")
+            }
+        } catch (e: Exception) {
+            Timber.w(e, "syncConversationsFromServer error: ${e.message}")
+        }
+    }
+
+    private suspend fun fetchAndInsertPeerChat(
+        baseUrl: String,
+        anonKey: String,
+        token: String,
+        userId: String,
+        peerId: String,
+        convId: String,
+        convType: String
+    ) = withContext(Dispatchers.IO) {
+        val pUrl = "$baseUrl/rest/v1/profiles?id=eq.$peerId&select=id,username,display_name,avatar_path,avatar_url&limit=1"
+        val pReq = Request.Builder()
+            .url(pUrl)
+            .header("apikey", anonKey)
+            .header("Authorization", "Bearer $token")
+            .get()
+            .build()
+        val pResp = try { httpClient.newCall(pReq).execute() } catch (_: Exception) { null }
+        var peerName = "User ${peerId.take(4)}"
+        var peerAva = peerName.take(2).uppercase()
+        var avatarUrl = ""
+
+        if (pResp != null && pResp.isSuccessful) {
+            val pBody = pResp.body?.string() ?: ""
+            pResp.close()
+            val pArr = try { JSONArray(pBody) } catch (_: Exception) { JSONArray() }
+            if (pArr.length() > 0) {
+                val pObj = pArr.getJSONObject(0)
+                val uName = pObj.optString("username", "")
+                val dName = pObj.optString("display_name", "")
+                peerName = if (dName.isNotBlank()) dName else if (uName.isNotBlank()) uName else peerName
+                peerAva = peerName.take(2).uppercase()
+                val rawAva = pObj.optString("avatar_url", pObj.optString("avatar_path", ""))
+                if (rawAva.isNotBlank()) {
+                    avatarUrl = if (rawAva.startsWith("http")) rawAva else "$baseUrl/storage/v1/object/public/avatars/$rawAva"
+                }
+            }
+        } else {
+            pResp?.close()
+        }
+
+        val newChat = ChatEntity(
+            accountId = userId,
+            name = peerName,
+            ava = if (avatarUrl.isNotBlank()) avatarUrl else peerAva,
+            status = "offline",
+            preview = "",
+            time = "",
+            isGroup = false,
+            recipientId = peerId,
+            conversationId = convId,
+            conversationType = convType
+        )
+        chatDao.insertChat(newChat)
+    }
+
+    suspend fun persistConversationToCloud(userId: String, chat: ChatEntity) = withContext(Dispatchers.IO) {
+        if (userId.isBlank() || chat.isSavedMessages || chat.isAiAssistant) return@withContext
+        val ctx = context ?: return@withContext
+        val baseUrl = SupabaseConfig.getBaseUrl()
+        val anonKey = SupabaseConfig.getAnonKey(ctx)
+        val token = SecurePrefsManager.getSupabaseAccessToken(ctx).takeIf { it.isNotBlank() } ?: return@withContext
+
+        try {
+            // Retrieve current conversations from user_metadata
+            val authReq = Request.Builder()
+                .url("$baseUrl/auth/v1/user")
+                .header("apikey", anonKey)
+                .header("Authorization", "Bearer $token")
+                .get()
+                .build()
+            val authResp = httpClient.newCall(authReq).execute()
+            val authBody = authResp.body?.string() ?: ""
+            authResp.close()
+
+            val existingArray = if (authResp.isSuccessful && authBody.isNotBlank()) {
+                val userMeta = JSONObject(authBody).optJSONObject("user_metadata")
+                userMeta?.optJSONArray("conversations") ?: JSONArray()
+            } else JSONArray()
+
+            val newArray = JSONArray()
+            var exists = false
+            for (i in 0 until existingArray.length()) {
+                val item = existingArray.getJSONObject(i)
+                if (item.optString("peer_id") == chat.recipientId || item.optString("id") == chat.conversationId) {
+                    exists = true
+                }
+                newArray.put(item)
+            }
+            if (!exists && chat.recipientId.isNotBlank()) {
+                newArray.put(JSONObject().apply {
+                    put("id", chat.conversationId)
+                    put("peer_id", chat.recipientId)
+                    put("name", chat.name)
+                    put("type", chat.conversationType)
+                    put("created_at", System.currentTimeMillis())
+                })
+            }
+
+            val updatePayload = JSONObject().apply {
+                put("data", JSONObject().apply {
+                    put("conversations", newArray)
+                })
+            }
+            val updateReq = Request.Builder()
+                .url("$baseUrl/auth/v1/user")
+                .header("apikey", anonKey)
+                .header("Authorization", "Bearer $token")
+                .header("Content-Type", "application/json")
+                .put(updatePayload.toString().toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+            httpClient.newCall(updateReq).execute().close()
+        } catch (e: Exception) {
+            Timber.w(e, "Could not persist conversation to Supabase Auth metadata")
         }
     }
 }

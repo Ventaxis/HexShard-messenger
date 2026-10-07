@@ -188,6 +188,18 @@ object E2ECryptoManager {
     }
 
     /**
+     * Derives a deterministic symmetric key for local / peer chats when the peer's public key
+     * is not yet registered or available on the remote server.
+     */
+    fun deriveFallbackConversationSecret(accountId: String? = null, conversationId: String): ByteArray {
+        val baseSecret = deriveSelfStorageSecret(accountId)
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(baseSecret, "HmacSHA256"))
+        mac.update("HEXSHARD_CONVERSATION_FALLBACK_V1".toByteArray(Charsets.UTF_8))
+        return mac.doFinal(conversationId.toByteArray(Charsets.UTF_8))
+    }
+
+    /**
      * Derives shared secret with ANOTHER user's public key using ECDH.
      * Intermediate buffers are safely zeroized.
      * Keypair is strictly scoped to the requesting accountId.

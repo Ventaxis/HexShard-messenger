@@ -269,19 +269,42 @@ object SupabaseAuthService {
                 val profilePayload = JSONObject().apply {
                     put("id", accountId)
                     put("username", cleanUsername)
+                    put("display_name", cleanUsername)
                     put("normalized_username", normalized)
                     put("public_key", identityPubKey)
                 }
-                val profReq = Request.Builder()
+                var profReq = Request.Builder()
                     .url("$baseUrl/rest/v1/profiles")
                     .header("apikey", anonKey)
                     .header("Authorization", authHeader)
                     .header("Prefer", "resolution=merge-duplicates")
                     .post(profilePayload.toString().toRequestBody(JSON_MEDIA))
                     .build()
-                val profResp = httpClient.newCall(profReq).execute()
+                var profResp = httpClient.newCall(profReq).execute()
+                var pBody = profResp.body?.string() ?: ""
+                var retryP = 0
+                while (!profResp.isSuccessful && retryP < 3) {
+                    profResp.close()
+                    retryP++
+                    if (pBody.contains("public_key", ignoreCase = true)) {
+                        profilePayload.remove("public_key")
+                    } else if (pBody.contains("normalized_username", ignoreCase = true)) {
+                        profilePayload.remove("normalized_username")
+                    } else {
+                        break
+                    }
+                    profReq = Request.Builder()
+                        .url("$baseUrl/rest/v1/profiles")
+                        .header("apikey", anonKey)
+                        .header("Authorization", authHeader)
+                        .header("Prefer", "resolution=merge-duplicates")
+                        .post(profilePayload.toString().toRequestBody(JSON_MEDIA))
+                        .build()
+                    profResp = httpClient.newCall(profReq).execute()
+                    pBody = profResp.body?.string() ?: ""
+                }
                 if (!profResp.isSuccessful) {
-                    Timber.w("Profile initial sync returned HTTP ${profResp.code}")
+                    Timber.w("Profile initial sync returned HTTP ${profResp.code} - $pBody")
                 }
                 profResp.close()
             } catch (e: Exception) {
@@ -428,50 +451,45 @@ object SupabaseAuthService {
             var vNumber = ""
             var isTgVerified = false
 
-            // Fetch and sync user profile (bio, date_of_birth, avatar_url, hex_number)
-            try {
-                val profileRepo = com.example.data.repository.ProfileRepository(context)
-                val profileData = profileRepo.fetchProfileFromServer(accountId, accessToken)
-                if (profileData != null && profileData.hexNumber.isNotBlank()) {
-                    val cleanDigits = profileData.hexNumber.filter { it.isDigit() }
-                    if (cleanDigits.length == 8) {
-                        vNumber = cleanDigits
-                    }
-                }
-            } catch (e: Exception) {
-                Timber.d("Profile sync exception on sign-in: ${e.message}")
+            val userMeta = userObj.optJSONObject("user_metadata")
+            val metaHex = userMeta?.optString("hex_number", userMeta.optString("virtual_number", "")) ?: ""
+            var cleanMeta = metaHex.filter { it.isDigit() }
+            if (cleanMeta.length == 11 && cleanMeta.startsWith("999")) {
+                cleanMeta = cleanMeta.substring(3)
+            }
+            if (cleanMeta.length == 8) {
+                vNumber = cleanMeta
+                SecurePrefsManager.setPrivateVirtualNumber(context, cleanMeta, accountId)
             }
 
+            // 1. Fetch and restore server-authoritative profile (display_name, bio, DOB, avatar, background, hex_number)
             try {
-                val numReq = Request.Builder()
-                    .url("$baseUrl/rest/v1/hex_numbers?owner_id=eq.$accountId&status=eq.active&select=*&limit=1")
-                    .header("apikey", anonKey)
-                    .header("Authorization", "Bearer $accessToken")
-                    .get()
-                    .build()
-                val nResp = httpClient.newCall(numReq).execute()
-                val nBody = nResp.body?.string() ?: ""
-                if (nResp.isSuccessful && nBody.isNotEmpty()) {
-                    val arr = JSONArray(nBody)
-                    if (arr.length() > 0) {
-                        val obj = arr.getJSONObject(0)
-                        val rawFromDb = obj.optString("number", obj.optString("raw_number", ""))
-                        val cleanDigits = rawFromDb.filter { it.isDigit() }
-                        if (cleanDigits.length == 8) {
-                            vNumber = cleanDigits
+                val profileRepo = com.example.data.repository.ProfileRepository(context)
+                profileRepo.fetchProfileFromServer(accountId, accessToken)
+            } catch (e: Exception) {
+                Timber.w(e, "Profile sync exception on sign-in")
+            }
+
+            // 2. Fetch server-authoritative active +999 HexShard ID via canonical RPC
+            try {
+                when (val activeState = VirtualNumberService.loadActiveVirtualNumber(accountId, accessToken, context)) {
+                    is ActiveVirtualNumberState.Active -> {
+                        vNumber = activeState.raw8Digits
+                    }
+                    is ActiveVirtualNumberState.NoActiveNumber -> {
+                        vNumber = ""
+                        SecurePrefsManager.clearPrivateVirtualNumber(context, accountId)
+                    }
+                    is ActiveVirtualNumberState.TemporaryError -> {
+                        // Server temporarily unreachable; preserve existing valid account cache as offline fallback
+                        val cached = SecurePrefsManager.getRawPrivateVirtualNumber(context, accountId)
+                        if (cached.length == 8) {
+                            vNumber = cached
                         }
                     }
                 }
             } catch (e: Exception) {
-                Timber.d("Error fetching hex_number from server: ${e.message}")
-            }
-
-            // If server was unreachable or error occurred, preserve valid cached number for this account
-            if (vNumber.isBlank()) {
-                val cached = SecurePrefsManager.getRawPrivateVirtualNumber(context, accountId)
-                if (cached.length == 8) {
-                    vNumber = cached
-                }
+                Timber.w(e, "Error loading active virtual number on sign-in")
             }
 
             try {

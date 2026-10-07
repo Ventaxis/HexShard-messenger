@@ -50,5 +50,19 @@ object VirtualNumberGenerator {
         val clean = phone.filter { it.isDigit() || it == '+' }
         return clean.startsWith("+999") || phone.contains("Virtual", ignoreCase = true)
     }
+
+    /**
+     * Generates a clean 8-digit candidate (e.g. from 20000000 to 89999999).
+     */
+    fun generateCandidate8Digits(seed: String? = null): String {
+        val random = if (!seed.isNullOrBlank()) {
+            val hash = seed.hashCode().toLong() and 0xFFFFFFFFL
+            java.util.Random(hash xor System.currentTimeMillis())
+        } else {
+            java.security.SecureRandom()
+        }
+        val n = 20000000 + random.nextInt(70000000)
+        return n.toString()
+    }
 }
 

@@ -1,20 +1,29 @@
 package com.example.util
 
-import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
 import java.util.TimeZone
 
 /**
- * Utility for formatting and parsing birth dates with textual month representation
- * (e.g. "13 апреля 1998" or "13 April 1998").
- * Ensures birthdays are displayed in an elegant, human-readable format rather than raw digits (e.g. 13041998).
+ * Utility for formatting, parsing, and validating birth dates.
+ *
+ * CANONICAL / DATABASE STORAGE:
+ * Strict ISO 8601: "YYYY-MM-DD" (e.g. "1998-04-13").
+ *
+ * USER DISPLAY:
+ * Russian: "13 апреля 1998"
+ * English: "13 April 1998"
  */
 object DateOfBirthFormatter {
 
     val RU_MONTHS_GENITIVE = arrayOf(
         "", "января", "февраля", "марта", "апреля", "мая", "июня",
         "июля", "августа", "сентября", "октября", "ноября", "декабря"
+    )
+
+    val RU_MONTHS_NOMINATIVE = arrayOf(
+        "", "январь", "февраль", "март", "апрель", "май", "июнь",
+        "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"
     )
 
     val EN_MONTHS = arrayOf(
@@ -30,148 +39,228 @@ object DateOfBirthFormatter {
         }
     }
 
+    /**
+     * Leap year rule:
+     * Divisible by 4 and not by 100, or divisible by 400.
+     */
+    fun isLeapYear(year: Int): Boolean {
+        return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    }
+
+    /**
+     * Exact number of days in the given month and year.
+     */
     fun getDaysInMonth(month: Int, year: Int): Int {
         return when (month) {
             1, 3, 5, 7, 8, 10, 12 -> 31
             4, 6, 9, 11 -> 30
             2 -> if (isLeapYear(year)) 29 else 28
-            else -> 31
+            else -> 0
         }
     }
 
-    fun formatFromParts(day: Int, month: Int, year: Int, isRussian: Boolean): String {
-        val safeMonth = month.coerceIn(1, 12)
-        val maxDays = getDaysInMonth(safeMonth, year)
-        val safeDay = day.coerceIn(1, maxDays)
-        return formatParts(safeDay, safeMonth, year, isRussian)
+    /**
+     * Strict calendar date validation.
+     * Validates:
+     * - Year within 1900..currentYear+1
+     * - Month within 1..12
+     * - Day within 1..getDaysInMonth(month, year)
+     *
+     * Correct behavior:
+     * 29.02.2024 -> true (leap)
+     * 29.02.2023 -> false
+     * 31.04.2024 -> false (April has 30 days)
+     * 00.01.2020 -> false
+     * 32.01.2020 -> false
+     */
+    fun isValidDate(day: Int, month: Int, year: Int): Boolean {
+        val currentYear = Calendar.getInstance(TimeZone.getTimeZone("UTC")).get(Calendar.YEAR)
+        if (year !in 1900..(currentYear + 1)) return false
+        if (month !in 1..12) return false
+        val maxDays = getDaysInMonth(month, year)
+        return day in 1..maxDays
     }
 
     /**
-     * Formats an epoch millisecond timestamp (from DatePickerDialog) into a textual date.
+     * Parses any recognized date string into (day, month, year).
+     * Supports:
+     * 1. ISO 8601: "YYYY-MM-DD"
+     * 2. Delimited: "DD.MM.YYYY", "DD/MM/YYYY", "DD-MM-YYYY"
+     * 3. Textual with Russian or English month names: "13 апреля 1998", "13 April 1998"
+     * 4. Pure 8 digits: "13041998" (DDMMYYYY)
+     *
+     * Returns null if the string cannot be parsed or if the date is calendar-invalid.
      */
-    fun formatFromMillis(millis: Long, isRussian: Boolean = true): String {
-        val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
-            timeInMillis = millis
-        }
-        val day = cal.get(Calendar.DAY_OF_MONTH)
-        val month = cal.get(Calendar.MONTH) + 1 // 1-based
-        val year = cal.get(Calendar.YEAR)
-        return formatParts(day, month, year, isRussian)
-    }
-
-    /**
-     * Parses an input string (digits, dotted, dashed, or textual) and returns millisecond epoch if valid.
-     */
-    fun parseToMillis(input: String): Long? {
+    fun parseParts(input: String): Triple<Int, Int, Int>? {
         val clean = input.trim()
         if (clean.isBlank()) return null
 
-        // Try parsing textual format first
-        val parts = parseParts(clean)
-        if (parts != null) {
-            val (day, month, year) = parts
-            val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
-                clear()
-                set(year, month - 1, day)
+        // 1. Check for textual month names (Russian genitive/nominative & English)
+        for (m in 1..12) {
+            val ruGen = RU_MONTHS_GENITIVE[m]
+            val ruNom = RU_MONTHS_NOMINATIVE[m]
+            val en = EN_MONTHS[m]
+
+            val matchedPattern = when {
+                ruGen.isNotEmpty() && clean.contains(ruGen, ignoreCase = true) -> ruGen
+                ruNom.isNotEmpty() && clean.contains(ruNom, ignoreCase = true) -> ruNom
+                en.isNotEmpty() && clean.contains(en, ignoreCase = true) -> en
+                else -> null
             }
-            return cal.timeInMillis
+
+            if (matchedPattern != null) {
+                val replaced = clean.replace(Regex("(?i)$matchedPattern"), " ")
+                val digitTokens = replaced.split(Regex("[^0-9]+")).filter { it.isNotBlank() }
+                if (digitTokens.size >= 2) {
+                    val day = digitTokens[0].toIntOrNull()
+                    val year = digitTokens[1].toIntOrNull()
+                    if (day != null && year != null && isValidDate(day, m, year)) {
+                        return Triple(day, m, year)
+                    }
+                }
+                // Text matched month name but failed date check
+                return null
+            }
         }
 
-        // Try standard format patterns as fallback
-        val patterns = arrayOf(
-            "dd.MM.yyyy", "dd/MM/yyyy", "yyyy-MM-dd", "dd-MM-yyyy"
-        )
-        for (pattern in patterns) {
-            try {
-                val sdf = SimpleDateFormat(pattern, Locale.US).apply {
-                    isLenient = false
-                    timeZone = TimeZone.getTimeZone("UTC")
+        // 2. Delimited: '.', '/', '-'
+        val delimiterTokens = clean.split('.', '/', '-')
+        if (delimiterTokens.size == 3) {
+            val t0 = delimiterTokens[0].trim().toIntOrNull()
+            val t1 = delimiterTokens[1].trim().toIntOrNull()
+            val t2 = delimiterTokens[2].trim().toIntOrNull()
+            if (t0 != null && t1 != null && t2 != null) {
+                // Check if YYYY-MM-DD
+                if (t0 > 1000) {
+                    val year = t0
+                    val month = t1
+                    val day = t2
+                    if (isValidDate(day, month, year)) {
+                        return Triple(day, month, year)
+                    }
                 }
-                val date = sdf.parse(clean)
-                if (date != null) return date.time
-            } catch (_: Exception) {}
+                // Check if DD.MM.YYYY
+                if (t2 > 1000) {
+                    val day = t0
+                    val month = t1
+                    val year = t2
+                    if (isValidDate(day, month, year)) {
+                        return Triple(day, month, year)
+                    }
+                }
+            }
+            return null
+        }
+
+        // 3. Pure 8 digits: "13041998" (DDMMYYYY)
+        val pureDigits = clean.filter { it.isDigit() }
+        if (pureDigits.length == 8) {
+            val day = pureDigits.substring(0, 2).toIntOrNull()
+            val month = pureDigits.substring(2, 4).toIntOrNull()
+            val year = pureDigits.substring(4, 8).toIntOrNull()
+            if (day != null && month != null && year != null && isValidDate(day, month, year)) {
+                return Triple(day, month, year)
+            }
         }
 
         return null
     }
 
     /**
-     * Takes any stored date representation (e.g. "13041998", "13.04.1998", "1998-04-13",
-     * or already formatted text) and converts it to the elegant textual representation.
+     * Converts any valid date format into canonical ISO "YYYY-MM-DD".
+     * Returns null if invalid or blank.
+     */
+    fun toCanonicalIso(input: String): String? {
+        val clean = input.trim()
+        if (clean.isBlank()) return null
+        val parts = parseParts(clean) ?: return null
+        return String.format(Locale.US, "%04d-%02d-%02d", parts.third, parts.second, parts.first)
+    }
+
+    /**
+     * Formats date for UI display (e.g. "13 апреля 1998" or "13 April 1998").
+     * Supports canonical ISO strings, legacy localized strings, and digit strings.
      */
     fun formatForDisplay(rawInput: String, isRussian: Boolean = true): String {
         val clean = rawInput.trim()
         if (clean.isBlank()) return ""
-
         val parts = parseParts(clean)
-        if (parts != null) {
-            val (day, month, year) = parts
-            return formatParts(day, month, year, isRussian)
+        return if (parts != null) {
+            formatFromParts(parts.first, parts.second, parts.third, isRussian)
+        } else {
+            // If cannot parse, return empty or trimmed string
+            clean
         }
-
-        // If it already matches textual format, return as is
-        return clean
     }
 
     /**
-     * Auto-formats during manual typing. Converts digit sequences (e.g. "13041998", "13.04.1998",
-     * or partial "1304") into textual month representations ("13 апреля 1998").
+     * Formats day, month, year into UI display string.
+     */
+    fun formatFromParts(day: Int, month: Int, year: Int, isRussian: Boolean = true): String {
+        val monthName = getMonthName(month, isRussian)
+        return "$day $monthName $year"
+    }
+
+    /**
+     * Formats day, month, year into canonical ISO string.
+     */
+    fun formatPartsToIso(day: Int, month: Int, year: Int): String {
+        return String.format(Locale.US, "%04d-%02d-%02d", year, month, day)
+    }
+
+    /**
+     * Parses any recognized date string and returns UTC milliseconds epoch, or null if invalid.
+     */
+    fun parseToMillis(input: String): Long? {
+        val parts = parseParts(input) ?: return null
+        val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+            clear()
+            set(parts.third, parts.second - 1, parts.first)
+        }
+        return cal.timeInMillis
+    }
+
+    /**
+     * Formats UTC milliseconds into textual display string.
+     */
+    fun formatFromMillis(millis: Long, isRussian: Boolean = true): String {
+        val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+            timeInMillis = millis
+        }
+        val day = cal.get(Calendar.DAY_OF_MONTH)
+        val month = cal.get(Calendar.MONTH) + 1
+        val year = cal.get(Calendar.YEAR)
+        return formatFromParts(day, month, year, isRussian)
+    }
+
+    /**
+     * Formats UTC milliseconds into canonical ISO string.
+     */
+    fun formatFromMillisToIso(millis: Long): String {
+        val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+            timeInMillis = millis
+        }
+        val day = cal.get(Calendar.DAY_OF_MONTH)
+        val month = cal.get(Calendar.MONTH) + 1
+        val year = cal.get(Calendar.YEAR)
+        return formatPartsToIso(day, month, year)
+    }
+
+    /**
+     * Auto-formats during manual typing.
      */
     fun autoFormatTyping(input: String, isRussian: Boolean = true): String {
         val clean = input.trim()
         if (clean.isBlank()) return ""
 
-        // Check if string contains already month text
-        var matchedMonth: Int? = null
-        for (m in 1..12) {
-            val ru = RU_MONTHS_GENITIVE[m]
-            val en = EN_MONTHS[m]
-            if ((ru.isNotEmpty() && clean.contains(ru, ignoreCase = true)) ||
-                (en.isNotEmpty() && clean.contains(en, ignoreCase = true))) {
-                matchedMonth = m
-                break
-            }
+        // Delimited or pure digits
+        val parts = parseParts(clean)
+        if (parts != null) {
+            return formatFromParts(parts.first, parts.second, parts.third, isRussian)
         }
 
-        if (matchedMonth != null) {
-            // Already has month name, e.g. "13 апреля" or "13 апреля 1998"
-            val mName = getMonthName(matchedMonth, isRussian)
-            val parts = clean.split(Regex("(?i)$mName|\\s+")).filter { it.isNotBlank() }
-            val dayPart = parts.firstOrNull()?.filter { it.isDigit() }?.toIntOrNull()
-            val yearPart = if (parts.size > 1) parts[1].filter { it.isDigit() } else ""
-            if (dayPart != null) {
-                return if (yearPart.isNotBlank()) {
-                    "$dayPart $mName $yearPart"
-                } else {
-                    "$dayPart $mName"
-                }
-            }
-            return clean
-        }
-
-        // Delimited formats like "13.04.1998", "13/04/1998", "13 04 1998"
-        val tokens = clean.split(Regex("[./\\-\\s]+")).filter { it.isNotBlank() }
-        if (tokens.size >= 2) {
-            val day = tokens[0].filter { it.isDigit() }.toIntOrNull()
-            val month = tokens[1].filter { it.isDigit() }.toIntOrNull()
-            val yearStr = tokens.getOrNull(2)?.filter { it.isDigit() } ?: ""
-            if (day != null && month != null && month in 1..12 && day in 1..31) {
-                val mName = getMonthName(month, isRussian)
-                return if (yearStr.isNotBlank()) "$day $mName $yearStr" else "$day $mName"
-            }
-        }
-
-        // Pure digits: e.g. "13041998", "1304", "130419"
+        // Partial typing fallback
         val digitsOnly = clean.filter { it.isDigit() }
-        if (digitsOnly.length == 8) {
-            val day = digitsOnly.substring(0, 2).toIntOrNull()
-            val month = digitsOnly.substring(2, 4).toIntOrNull()
-            val year = digitsOnly.substring(4, 8).toIntOrNull()
-            if (day != null && month != null && year != null && month in 1..12 && day in 1..31) {
-                return "$day ${getMonthName(month, isRussian)} $year"
-            }
-        }
-
         if (digitsOnly.length in 4..7) {
             val day = digitsOnly.substring(0, 2).toIntOrNull()
             val month = digitsOnly.substring(2, 4).toIntOrNull()
@@ -185,86 +274,10 @@ object DateOfBirthFormatter {
         return clean
     }
 
-    fun parseParts(input: String): Triple<Int, Int, Int>? {
-        val clean = input.trim()
-
-        // 1. Text format like "13 апреля 1998" or "13 April 1998"
-        for (m in 1..12) {
-            val ruName = RU_MONTHS_GENITIVE[m]
-            if (clean.contains(ruName, ignoreCase = true)) {
-                val digits = clean.replace(ruName, " ").split(Regex("\\s+")).filter { it.isNotBlank() }
-                if (digits.size >= 2) {
-                    val day = digits[0].toIntOrNull() ?: 1
-                    val year = digits[1].toIntOrNull() ?: 2000
-                    if (isValidDate(day, m, year)) return Triple(day, m, year)
-                }
-            }
-            val enName = EN_MONTHS[m]
-            if (clean.contains(enName, ignoreCase = true)) {
-                val digits = clean.replace(enName, " ").split(Regex("\\s+")).filter { it.isNotBlank() }
-                if (digits.size >= 2) {
-                    val day = digits[0].toIntOrNull() ?: 1
-                    val year = digits[1].toIntOrNull() ?: 2000
-                    if (isValidDate(day, m, year)) return Triple(day, m, year)
-                }
-            }
-        }
-
-        // 2. Pure 8 digits: "13041998"
-        val pureDigits = clean.filter { it.isDigit() }
-        if (pureDigits.length == 8) {
-            val day = pureDigits.substring(0, 2).toIntOrNull()
-            val month = pureDigits.substring(2, 4).toIntOrNull()
-            val year = pureDigits.substring(4, 8).toIntOrNull()
-            if (day != null && month != null && year != null && isValidDate(day, month, year)) {
-                return Triple(day, month, year)
-            }
-        }
-
-        // 3. Delimited by dots, slashes, or hyphens: "13.04.1998" or "1998-04-13"
-        val tokens = clean.split('.', '/', '-')
-        if (tokens.size == 3) {
-            val t0 = tokens[0].trim().toIntOrNull()
-            val t1 = tokens[1].trim().toIntOrNull()
-            val t2 = tokens[2].trim().toIntOrNull()
-            if (t0 != null && t1 != null && t2 != null) {
-                // Check if YYYY-MM-DD
-                if (t0 > 1000 && isValidDate(t2, t1, t0)) {
-                    return Triple(t2, t1, t0)
-                }
-                // DD.MM.YYYY
-                if (t2 > 1000 && isValidDate(t0, t1, t2)) {
-                    return Triple(t0, t1, t2)
-                }
-            }
-        }
-
-        return null
-    }
-
-    private fun formatParts(day: Int, month: Int, year: Int, isRussian: Boolean): String {
-        return if (isRussian) {
-            val monthName = if (month in 1..12) RU_MONTHS_GENITIVE[month] else month.toString()
-            "$day $monthName $year"
-        } else {
-            val monthName = if (month in 1..12) EN_MONTHS[month] else month.toString()
-            "$day $monthName $year"
-        }
-    }
-
-    private fun isValidDate(day: Int, month: Int, year: Int): Boolean {
-        if (year !in 1900..2026) return false
-        if (month !in 1..12) return false
-        val maxDays = when (month) {
-            1, 3, 5, 7, 8, 10, 12 -> 31
-            4, 6, 9, 11 -> 30
-            2 -> if (isLeapYear(year)) 29 else 28
-            else -> 31
-        }
-        return day in 1..maxDays
-    }
-
-    private fun isLeapYear(year: Int): Boolean {
-        return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    /**
+     * Validates if the input represents a valid date.
+     */
+    fun isValid(input: String): Boolean {
+        return parseParts(input) != null
     }
 }

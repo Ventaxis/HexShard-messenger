@@ -84,7 +84,8 @@ class AttachmentRepository(
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(ctx)
 
-        val isSelf = recipientId == "self" || recipientId == "me" || recipientId.isBlank()
+        val isSelf = recipientId == "self" || recipientId == "me" || recipientId.isBlank() ||
+                recipientId == "ai_assistant" || recipientId.startsWith("ai_") || recipientId.contains("ai", ignoreCase = true)
         val sharedSecret = if (isSelf) {
             E2ECryptoManager.deriveSelfStorageSecret(currentUserId)
         } else {
@@ -151,15 +152,16 @@ class AttachmentRepository(
             val resp = httpClient.newCall(req).execute()
             if (resp.isSuccessful) {
                 // Register attachment metadata in attachments table
+                var metaSuccess = false
                 try {
                     val attachBody = JSONObject().apply {
                         put("id", UUID.randomUUID().toString())
                         put("conversation_id", conversationId)
                         put("message_id", idempotencyKey.ifBlank { null })
-                        put("owner_id", currentUserId)
+                        put("uploader_id", currentUserId)
                         put("storage_path", objectPath)
                         put("mime_type", fileType)
-                        put("size", tempEncryptedFile.length())
+                        put("size_bytes", tempEncryptedFile.length())
                         put("encryption_version", 2)
                     }.toString().toRequestBody(JSON_MEDIA)
 
@@ -171,9 +173,27 @@ class AttachmentRepository(
                         .post(attachBody)
                         .build()
 
-                    httpClient.newCall(attachReq).execute().close()
+                    val attachResp = httpClient.newCall(attachReq).execute()
+                    metaSuccess = attachResp.isSuccessful
+                    attachResp.close()
                 } catch (metaEx: Exception) {
                     Timber.w(metaEx, "Failed to register attachment metadata")
+                }
+
+                if (!metaSuccess) {
+                    Timber.w("Attachment metadata insert failed. Rolling back Storage object.")
+                    try {
+                        val delReq = Request.Builder()
+                            .url(url)
+                            .header("apikey", anonKey)
+                            .header("Authorization", "Bearer $accessToken")
+                            .delete()
+                            .build()
+                        httpClient.newCall(delReq).execute().close()
+                    } catch (delEx: Exception) {
+                        Timber.w(delEx, "Failed to rollback Storage object: $objectPath")
+                    }
+                    return@withContext null
                 }
 
                 objectPath
@@ -208,7 +228,8 @@ class AttachmentRepository(
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(ctx)
 
-        val isSelf = recipientId == "self" || recipientId == "me" || recipientId.isBlank()
+        val isSelf = recipientId == "self" || recipientId == "me" || recipientId.isBlank() ||
+                recipientId == "ai_assistant" || recipientId.startsWith("ai_") || recipientId.contains("ai", ignoreCase = true)
         val sharedSecret = if (isSelf) {
             E2ECryptoManager.deriveSelfStorageSecret(currentUserId)
         } else {

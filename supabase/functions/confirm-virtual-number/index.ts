@@ -27,7 +27,7 @@ serve(async (req: Request) => {
       );
     }
 
-    const rawNumber = payload?.raw_number?.toString().trim();
+    const rawNumber = payload?.raw_number?.toString().trim() || payload?.p_raw_number?.toString().trim();
     if (!rawNumber || !/^\d{8}$/.test(rawNumber.replace(/\D/g, ""))) {
       return new Response(
         JSON.stringify({ error: "A valid 8-digit virtual number is required" }),
@@ -43,9 +43,15 @@ serve(async (req: Request) => {
     });
 
     if (error) {
+      let status = 500;
+      if (error.code === "23505") status = 409;
+      else if (error.code === "22023") status = 400;
+      else if (error.code === "42501") status = 403;
+      else if (error.code === "P0002") status = 404;
+
       return new Response(
-        JSON.stringify({ error: error.message || "Failed to confirm virtual number" }),
-        { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        JSON.stringify({ error: error.message || "Failed to confirm virtual number", code: error.code }),
+        { status, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 

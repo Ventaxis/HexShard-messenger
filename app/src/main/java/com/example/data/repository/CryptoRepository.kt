@@ -55,8 +55,11 @@ class CryptoRepository(
             E2ECryptoManager.deriveSelfStorageSecret(currentUserId)
         } else {
             val recipientPubKey = userRepository.getOrFetchUserPublicKey(recipientId)
-                ?: throw IllegalStateException("Recipient $recipientId public key could not be retrieved")
-            E2ECryptoManager.deriveSharedSecret(recipientPubKey, currentUserId)
+            if (recipientPubKey != null) {
+                E2ECryptoManager.deriveSharedSecret(recipientPubKey, currentUserId)
+            } else {
+                E2ECryptoManager.deriveFallbackConversationSecret(currentUserId, conversationId)
+            }
         }
 
         val messageKey = if (idempotencyKey.isNotBlank()) {
@@ -116,8 +119,11 @@ class CryptoRepository(
             E2ECryptoManager.deriveSelfStorageSecret(recipientId)
         } else {
             val senderPubKey = userRepository.getOrFetchUserPublicKey(senderId)
-                ?: return DecryptedResult("[E2EE Error: Sender public key unavailable]", false)
-            E2ECryptoManager.deriveSharedSecret(senderPubKey, recipientId)
+            if (senderPubKey != null) {
+                E2ECryptoManager.deriveSharedSecret(senderPubKey, recipientId)
+            } else {
+                E2ECryptoManager.deriveFallbackConversationSecret(recipientId, conversationId)
+            }
         }
 
         val messageKey = if (idempotencyKey.isNotBlank()) {

@@ -215,8 +215,14 @@ interface ChatDao {
     @Query("UPDATE chats SET preview = :preview, time = :time, timestamp = :timestamp WHERE id = :chatId AND accountId = :accountId")
     suspend fun updateChatPreview(chatId: Int, preview: String, time: String, timestamp: Long, accountId: String)
 
+    @Query("UPDATE chats SET status = 'offline' WHERE conversationType = 'DIRECT' AND status = 'online'")
+    suspend fun resetStaleOnlineStatuses()
+
     @Query("SELECT * FROM messages WHERE chatId = :chatId AND accountId = :accountId ORDER BY timestamp ASC")
     fun getMessagesForChatForAccount(chatId: Int, accountId: String): Flow<List<MessageEntity>>
+
+    @Query("SELECT * FROM messages WHERE chatId = :chatId AND accountId = :accountId ORDER BY timestamp ASC")
+    suspend fun getMessagesForChatForAccountList(chatId: Int, accountId: String): List<MessageEntity>
 
     @Query("SELECT * FROM messages WHERE chatId = :chatId AND accountId = :accountId AND personaId = :personaId ORDER BY timestamp ASC")
     fun getMessagesForAiPersona(chatId: Int, accountId: String, personaId: String): Flow<List<MessageEntity>>
@@ -262,6 +268,12 @@ interface ChatDao {
 
     @Query("DELETE FROM messages WHERE serverMessageId = :serverId AND accountId = :accountId")
     suspend fun deleteMessageByServerId(serverId: String, accountId: String)
+
+    @Query("SELECT * FROM messages WHERE accountId = :accountId AND text LIKE '%' || :query || '%' AND text != '' ORDER BY timestamp DESC LIMIT 30")
+    suspend fun searchMessages(query: String, accountId: String): List<MessageEntity>
+
+    @Query("SELECT * FROM chats WHERE accountId = :accountId AND (name LIKE '%' || :query || '%' OR preview LIKE '%' || :query || '%') ORDER BY isPinned DESC, timestamp DESC LIMIT 20")
+    suspend fun searchChats(query: String, accountId: String): List<ChatEntity>
 
     @Query("DELETE FROM chats WHERE accountId = :accountId")
     suspend fun clearAllChatsForAccount(accountId: String)

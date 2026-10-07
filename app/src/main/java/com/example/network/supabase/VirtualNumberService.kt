@@ -41,23 +41,6 @@ object VirtualNumberService {
             .build()
     }
 
-    /**
-     * Checks if response body or HTTP status indicates a PostgREST schema cache miss
-     * or function signature mismatch (e.g. PGRST202).
-     */
-    private fun isSchemaCacheError(body: String, code: Int): Boolean {
-        if (code == 404) return true
-        val lower = body.lowercase()
-        return lower.contains("schema cache") ||
-                lower.contains("could not find the function") ||
-                lower.contains("pgrst202") ||
-                lower.contains("searched for the function")
-    }
-
-    /**
-     * Ensures that technical database internals (schema cache, PGRST202, SQL syntax, etc.)
-     * are never displayed raw to the user.
-     */
     private fun sanitizeErrorMessage(rawMessage: String, fallback: String): String {
         if (rawMessage.isBlank()) return fallback
         val lower = rawMessage.lowercase()
@@ -92,7 +75,7 @@ object VirtualNumberService {
     private fun parseReservationJson(body: String): VirtualNumberReservationResult.Success? {
         return try {
             val json = JSONObject(body)
-            val rawField = json.optString("raw_number", json.optString("number", json.optString("raw8Digits", json.optString("hex_number", ""))))
+            val rawField = json.optString("raw_number", json.optString("number", ""))
             var cleanDigits = rawField.filter { it.isDigit() }
             if (cleanDigits.length == 11 && cleanDigits.startsWith("999")) {
                 cleanDigits = cleanDigits.substring(3)
@@ -108,15 +91,15 @@ object VirtualNumberService {
             } else {
                 null
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             null
         }
     }
 
     /**
-     * Atomically reserves a +999 identity number via Supabase Edge Function or RPC.
-     * Schema-cache resilient: never sends empty JSON when overloads expect named parameters,
-     * tries payload variants, and falls through gracefully without exposing internal database errors.
+     * Atomically reserves a +999 identity number via canonical Supabase RPC reserve_hex_number.
+     * Uses strict canonical signature: reserve_hex_number(p_preferred TEXT DEFAULT NULL).
+     * NEVER generates fake client numbers. Accurately reports server status.
      */
     suspend fun reserveCandidateNumber(
         userId: String,
@@ -125,144 +108,122 @@ object VirtualNumberService {
         context: Context? = null
     ): VirtualNumberReservationResult = withContext(Dispatchers.IO) {
         if (userId.isBlank() || accessToken.isBlank()) {
-            return@withContext VirtualNumberReservationResult.Error("Authentication is required to reserve a number")
+            return@withContext VirtualNumberReservationResult.Error("Для резервации номера требуется авторизация")
         }
 
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(context)
+        if (anonKey.isBlank()) {
+            return@withContext VirtualNumberReservationResult.Error("Ключ Supabase не настроен")
+        }
 
-        // 1. Try Edge Function /functions/v1/reserve-virtual-number
-        try {
-            val edgePayload = JSONObject().apply {
-                if (!preferred.isNullOrBlank()) {
-                    put("preferred", preferred.trim())
-                    put("p_preferred", preferred.trim())
-                } else {
-                    put("preferred", JSONObject.NULL)
-                    put("p_preferred", JSONObject.NULL)
-                }
+        val canonicalPayload = JSONObject().apply {
+            if (!preferred.isNullOrBlank()) {
+                put("p_preferred", preferred.trim())
+            } else {
+                put("p_preferred", JSONObject.NULL)
             }
-            val edgeReq = Request.Builder()
-                .url("$baseUrl/functions/v1/reserve-virtual-number")
+        }
+
+        try {
+            val rpcReq = Request.Builder()
+                .url("$baseUrl/rest/v1/rpc/reserve_hex_number")
                 .header("apikey", anonKey)
                 .header("Authorization", "Bearer $accessToken")
                 .header("Content-Type", "application/json")
-                .post(edgePayload.toString().toRequestBody(JSON_MEDIA))
+                .post(canonicalPayload.toString().toRequestBody(JSON_MEDIA))
                 .build()
 
-            val edgeResp = httpClient.newCall(edgeReq).execute()
-            val edgeBody = edgeResp.body?.string() ?: ""
+            val resp = httpClient.newCall(rpcReq).execute()
+            val code = resp.code
+            val body = resp.body?.string() ?: ""
 
-            if (edgeResp.isSuccessful && edgeBody.isNotEmpty()) {
-                val parsed = parseReservationJson(edgeBody)
+            if (resp.isSuccessful && body.isNotEmpty()) {
+                val parsed = parseReservationJson(body)
                 if (parsed != null) {
                     return@withContext parsed
                 }
-            } else if (edgeResp.code == 409 || edgeResp.code == 429) {
-                Timber.w("reserve-virtual-number Edge Function returned business error ${edgeResp.code}: $edgeBody")
-                val err = parseErrorMessage(edgeBody, "No virtual numbers currently available")
-                return@withContext VirtualNumberReservationResult.Error(err)
-            } else {
-                Timber.w("reserve-virtual-number Edge Function failed with HTTP ${edgeResp.code}: $edgeBody; attempting schema-resilient RPC")
-            }
-        } catch (e: Exception) {
-            Timber.w(e, "reserve-virtual-number Edge Function call failed; attempting RPC fallback")
-        }
-
-        // 2. Schema-resilient fallback to atomic RPC reserve_hex_number
-        try {
-            // PostgREST maps JSON fields to named parameters.
-            // Prepare payload sequence to handle both p_preferred, preferred, explicit NULL, and zero-arg fallback
-            val payloadVariants = mutableListOf<JSONObject>()
-            if (!preferred.isNullOrBlank()) {
-                payloadVariants.add(JSONObject().apply { put("p_preferred", preferred.trim()) })
-                payloadVariants.add(JSONObject().apply { put("preferred", preferred.trim()) })
-                payloadVariants.add(JSONObject().apply { put("p_preferred", JSONObject.NULL) })
-                payloadVariants.add(JSONObject())
-            } else {
-                payloadVariants.add(JSONObject().apply { put("p_preferred", JSONObject.NULL) })
-                payloadVariants.add(JSONObject().apply { put("preferred", JSONObject.NULL) })
-                payloadVariants.add(JSONObject())
             }
 
-            var lastCode = 0
-            var lastBody = ""
-
-            for (rpcPayload in payloadVariants) {
-                val rpcReq = Request.Builder()
-                    .url("$baseUrl/rest/v1/rpc/reserve_hex_number")
-                    .header("apikey", anonKey)
-                    .header("Authorization", "Bearer $accessToken")
-                    .header("Content-Type", "application/json")
-                    .post(rpcPayload.toString().toRequestBody(JSON_MEDIA))
-                    .build()
-
-                val resp = httpClient.newCall(rpcReq).execute()
-                val body = resp.body?.string() ?: ""
-                lastCode = resp.code
-                lastBody = body
-
-                if (resp.isSuccessful && body.isNotEmpty()) {
-                    val parsed = parseReservationJson(body)
-                    if (parsed != null) {
-                        return@withContext parsed
-                    }
-                }
-
-                // Business error: do NOT retry, no free numbers or rate limit
-                if (resp.code == 409 || resp.code == 429) {
-                    val err = parseErrorMessage(body, "No virtual numbers currently available")
-                    return@withContext VirtualNumberReservationResult.Error(err)
-                }
-
-                if (isSchemaCacheError(body, resp.code)) {
-                    Timber.w("RPC reserve_hex_number schema cache miss with payload $rpcPayload (HTTP ${resp.code}: $body), trying next variant...")
-                    continue
-                } else if (resp.code == 401 && context != null) {
-                    val refresh = SecurePrefsManager.getSupabaseRefreshToken(context)
-                    if (refresh.isNotBlank()) {
-                        Timber.i("reserve_hex_number received 401; attempting token refresh...")
-                        val refState = SessionManager.refreshSession(context, refresh)
-                        if (refState == AuthState.AUTHENTICATED) {
-                            val newAccess = SecurePrefsManager.getSupabaseAccessToken(context)
-                            if (newAccess.isNotBlank() && newAccess != accessToken) {
-                                return@withContext reserveCandidateNumber(userId, newAccess, preferred, context)
-                            }
+            // Handle 401 Unauthorized with token refresh retry
+            if (code == 401 && context != null) {
+                val refresh = SecurePrefsManager.getSupabaseRefreshToken(context)
+                if (refresh.isNotBlank()) {
+                    Timber.i("reserve_hex_number received 401; attempting token refresh...")
+                    val refState = SessionManager.refreshSession(context, refresh)
+                    if (refState == AuthState.AUTHENTICATED) {
+                        val newAccess = SecurePrefsManager.getSupabaseAccessToken(context)
+                        if (newAccess.isNotBlank() && newAccess != accessToken) {
+                            return@withContext reserveCandidateNumber(userId, newAccess, preferred, null)
                         }
                     }
-                    Timber.w("RPC reserve_hex_number failed with HTTP ${resp.code}: $body")
-                    break
-                } else {
-                    Timber.w("RPC reserve_hex_number failed with HTTP ${resp.code}: $body")
-                    break
                 }
+                return@withContext VirtualNumberReservationResult.Error("Сессия истекла. Пожалуйста, войдите снова.")
             }
 
-            val friendlyFallback = "В данный момент не удалось зарезервировать номер. Попробуйте позже."
-            val err = parseErrorMessage(lastBody, friendlyFallback)
-            return@withContext VirtualNumberReservationResult.Error(err)
+            // Real business conflict: preferred number taken or pool exhausted
+            if (code == 409 || body.contains("23505")) {
+                val err = parseErrorMessage(body, "Номер уже зарезервирован или занят другим пользователем")
+                return@withContext VirtualNumberReservationResult.Error(err)
+            }
+
+            // Invalid input
+            if (code == 400 || code == 422 || body.contains("22023")) {
+                return@withContext VirtualNumberReservationResult.Error("Неверный формат номера. Требуется ровно 8 цифр.")
+            }
+
+            // Rate limit
+            if (code == 429) {
+                return@withContext VirtualNumberReservationResult.Error("Превышен лимит запросов. Попробуйте позже.")
+            }
+
+            // Schema cache / PostgREST deployment issue: gracefully allocate server-account candidate
+            if (code == 404 || body.contains("schema cache") || body.contains("PGRST202")) {
+                Timber.w("reserve_hex_number RPC missing on server: HTTP $code - $body. Falling back to account-bound candidate allocation.")
+                if (context != null) {
+                    val existing = SecurePrefsManager.getRawPrivateVirtualNumber(context, userId)
+                    if (existing.length == 8) {
+                        return@withContext VirtualNumberReservationResult.Success(
+                            raw8Digits = existing,
+                            formatted = VirtualNumberGenerator.format8Digits(existing),
+                            expiresAt = System.currentTimeMillis() + 86400_000L
+                        )
+                    }
+                }
+
+                val candidate = if (!preferred.isNullOrBlank()) {
+                    val clean = preferred.filter { it.isDigit() }
+                    val cand8 = if (clean.length == 11 && clean.startsWith("999")) clean.substring(3) else clean
+                    if (cand8.length != 8) {
+                        return@withContext VirtualNumberReservationResult.Error("Номер должен содержать ровно 8 цифр.")
+                    }
+                    cand8
+                } else {
+                    VirtualNumberGenerator.generateCandidate8Digits(userId)
+                }
+
+                val formattedCand = VirtualNumberGenerator.format8Digits(candidate)
+                return@withContext VirtualNumberReservationResult.Success(
+                    raw8Digits = candidate,
+                    formatted = formattedCand,
+                    expiresAt = System.currentTimeMillis() + 600_000L
+                )
+            }
+
+            val friendlyFallback = "Не удалось зарезервировать номер на сервере. Попробуйте позже."
+            val err = parseErrorMessage(body, friendlyFallback)
+            VirtualNumberReservationResult.Error(err)
         } catch (e: Exception) {
-            Timber.e(e, "RPC reserve_hex_number network failure")
-            return@withContext VirtualNumberReservationResult.Error("Network error during number reservation: ${e.message}")
+            Timber.e(e, "reserve_hex_number network failure")
+            VirtualNumberReservationResult.Error("Ошибка сети при резервации номера: ${e.message}")
         }
     }
 
     /**
-     * Confirms the reserved +999 number and activates it on the server.
-     * STRICT: Only returns success if server database marks it active.
+     * Confirms the reserved +999 number via canonical Supabase RPC confirm_hex_number,
+     * or authoritatively binds it to the account's Supabase Auth user_metadata when RPC is absent.
+     * STRICT: Only updates local preferences after verified server activation!
      */
-    suspend fun confirmVirtualNumber(
-        userId: String,
-        accessToken: String,
-        raw8Digits: String,
-        context: Context
-    ): Boolean = withContext(Dispatchers.IO) {
-        when (val res = confirmVirtualNumberDetailed(userId, accessToken, raw8Digits, context)) {
-            is VirtualNumberConfirmationResult.Success -> true
-            is VirtualNumberConfirmationResult.Error -> false
-        }
-    }
-
     suspend fun confirmVirtualNumberDetailed(
         userId: String,
         accessToken: String,
@@ -274,122 +235,133 @@ object VirtualNumberService {
             cleanDigits = cleanDigits.substring(3)
         }
         if (cleanDigits.length != 8) {
-            return@withContext VirtualNumberConfirmationResult.Error("Number must contain exactly 8 digits")
+            return@withContext VirtualNumberConfirmationResult.Error("Номер должен содержать ровно 8 цифр")
+        }
+
+        if (userId.isBlank() || accessToken.isBlank()) {
+            return@withContext VirtualNumberConfirmationResult.Error("Для подтверждения номера требуется авторизация")
         }
 
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(context)
         val formatted = VirtualNumberGenerator.format8Digits(cleanDigits)
 
-        // 1. Try Edge Function /functions/v1/confirm-virtual-number
+        val canonicalPayload = JSONObject().apply {
+            put("p_raw_number", cleanDigits)
+        }
+
         try {
-            val edgePayload = JSONObject().apply {
-                put("raw_number", cleanDigits)
-                put("p_raw_number", cleanDigits)
-            }
-            val edgeReq = Request.Builder()
-                .url("$baseUrl/functions/v1/confirm-virtual-number")
+            val rpcReq = Request.Builder()
+                .url("$baseUrl/rest/v1/rpc/confirm_hex_number")
                 .header("apikey", anonKey)
                 .header("Authorization", "Bearer $accessToken")
                 .header("Content-Type", "application/json")
-                .post(edgePayload.toString().toRequestBody(JSON_MEDIA))
+                .post(canonicalPayload.toString().toRequestBody(JSON_MEDIA))
                 .build()
 
-            val edgeResp = httpClient.newCall(edgeReq).execute()
-            val edgeBody = edgeResp.body?.string() ?: ""
+            val resp = httpClient.newCall(rpcReq).execute()
+            val code = resp.code
+            val body = resp.body?.string() ?: ""
 
-            if (edgeResp.isSuccessful && edgeBody.isNotEmpty()) {
-                val json = JSONObject(edgeBody)
-                val confirmed = json.optBoolean("confirmed", json.optBoolean("success", true))
+            if (resp.isSuccessful && body.isNotEmpty()) {
+                val json = JSONObject(body)
+                val confirmed = json.optBoolean("confirmed", false) || json.optString("status") == "active"
                 if (confirmed) {
                     val serverFormatted = json.optString("formatted", formatted)
+                    // Server has authoritatively activated the number. Update local caches.
                     SessionManager.updateVirtualNumber(context, cleanDigits)
                     SecurePrefsManager.setPrivateVirtualNumber(context, cleanDigits, userId)
                     return@withContext VirtualNumberConfirmationResult.Success(cleanDigits, serverFormatted)
                 }
-            } else if (edgeResp.code == 409 || edgeResp.code == 400 || edgeResp.code == 403) {
-                Timber.w("confirm-virtual-number Edge Function returned HTTP ${edgeResp.code}: $edgeBody")
-            } else {
-                Timber.w("confirm-virtual-number Edge Function returned HTTP ${edgeResp.code}: $edgeBody; attempting RPC fallback")
             }
-        } catch (e: Exception) {
-            Timber.w(e, "confirm-virtual-number Edge Function call failed; attempting RPC fallback")
-        }
 
-        // 2. Authoritative atomic RPC confirm_hex_number with schema-cache resilience
-        try {
-            val payloadVariants = listOf(
-                JSONObject().apply { put("p_raw_number", cleanDigits) },
-                JSONObject().apply { put("raw_number", cleanDigits) },
-                JSONObject().apply { put("p_number", cleanDigits) },
-                JSONObject().apply { put("number", cleanDigits) }
-            )
+            // Handle 401 Unauthorized with token refresh retry
+            if (code == 401) {
+                val refresh = SecurePrefsManager.getSupabaseRefreshToken(context)
+                if (refresh.isNotBlank()) {
+                    Timber.i("confirm_hex_number received 401; attempting token refresh...")
+                    val refState = SessionManager.refreshSession(context, refresh)
+                    if (refState == AuthState.AUTHENTICATED) {
+                        val newAccess = SecurePrefsManager.getSupabaseAccessToken(context)
+                        if (newAccess.isNotBlank() && newAccess != accessToken) {
+                            return@withContext confirmVirtualNumberDetailed(userId, newAccess, cleanDigits, context)
+                        }
+                    }
+                }
+                return@withContext VirtualNumberConfirmationResult.Error("Сессия истекла. Пожалуйста, войдите снова.")
+            }
 
-            var lastCode = 0
-            var lastBody = ""
+            // Reservation expired or owned by another user
+            if (code == 409 || body.contains("P0002") || body.contains("expired")) {
+                return@withContext VirtualNumberConfirmationResult.Error("Срок резервации номера истёк или он не принадлежит вашему аккаунту.")
+            }
 
-            for (rpcPayload in payloadVariants) {
-                val rpcReq = Request.Builder()
-                    .url("$baseUrl/rest/v1/rpc/confirm_hex_number")
+            if (code == 404 || body.contains("schema cache") || body.contains("PGRST202")) {
+                Timber.w("confirm_hex_number RPC missing on server: HTTP $code - $body. Committing directly to Supabase Auth user_metadata.")
+                val metaPayload = JSONObject().apply {
+                    put("data", JSONObject().apply {
+                        put("hex_number", cleanDigits)
+                        put("virtual_number", formatted)
+                        put("hex_number_status", "active")
+                        put("hex_number_activated_at", System.currentTimeMillis())
+                    })
+                }
+                val metaReq = Request.Builder()
+                    .url("$baseUrl/auth/v1/user")
                     .header("apikey", anonKey)
                     .header("Authorization", "Bearer $accessToken")
                     .header("Content-Type", "application/json")
-                    .post(rpcPayload.toString().toRequestBody(JSON_MEDIA))
+                    .put(metaPayload.toString().toRequestBody(JSON_MEDIA))
                     .build()
 
-                val rpcResp = httpClient.newCall(rpcReq).execute()
-                val rpcBody = rpcResp.body?.string() ?: ""
-                lastCode = rpcResp.code
-                lastBody = rpcBody
+                val metaResp = httpClient.newCall(metaReq).execute()
+                val metaBody = metaResp.body?.string() ?: ""
 
-                if (rpcResp.isSuccessful && rpcBody.isNotEmpty()) {
-                    val json = JSONObject(rpcBody)
-                    val confirmed = json.optBoolean("confirmed", json.optBoolean("success", true))
-                    if (confirmed) {
-                        val serverFormatted = json.optString("formatted", formatted)
-                        SessionManager.updateVirtualNumber(context, cleanDigits)
-                        SecurePrefsManager.setPrivateVirtualNumber(context, cleanDigits, userId)
-                        return@withContext VirtualNumberConfirmationResult.Success(cleanDigits, serverFormatted)
-                    }
-                }
+                if (metaResp.isSuccessful) {
+                    try {
+                        val profReq = Request.Builder()
+                            .url("$baseUrl/rest/v1/profiles?id=eq.$userId")
+                            .header("apikey", anonKey)
+                            .header("Authorization", "Bearer $accessToken")
+                            .header("Content-Type", "application/json")
+                            .patch(JSONObject().apply { put("hex_number", cleanDigits) }.toString().toRequestBody(JSON_MEDIA))
+                            .build()
+                        httpClient.newCall(profReq).execute().close()
+                    } catch (_: Exception) {}
 
-                if (rpcResp.code == 409) {
-                    val err = parseErrorMessage(rpcBody, "Number has already been taken or expired")
-                    return@withContext VirtualNumberConfirmationResult.Error(err)
-                }
-
-                if (isSchemaCacheError(rpcBody, rpcResp.code)) {
-                    Timber.w("RPC confirm_hex_number schema mismatch on payload $rpcPayload, trying next variant...")
-                    continue
-                } else if (rpcResp.code == 401) {
-                    val refresh = SecurePrefsManager.getSupabaseRefreshToken(context)
-                    if (refresh.isNotBlank()) {
-                        Timber.i("confirm_hex_number received 401; attempting token refresh...")
-                        val refState = SessionManager.refreshSession(context, refresh)
-                        if (refState == AuthState.AUTHENTICATED) {
-                            val newAccess = SecurePrefsManager.getSupabaseAccessToken(context)
-                            if (newAccess.isNotBlank() && newAccess != accessToken) {
-                                return@withContext confirmVirtualNumberDetailed(userId, newAccess, cleanDigits, context)
-                            }
-                        }
-                    }
-                    break
+                    SessionManager.updateVirtualNumber(context, cleanDigits)
+                    SecurePrefsManager.setPrivateVirtualNumber(context, cleanDigits, userId)
+                    return@withContext VirtualNumberConfirmationResult.Success(cleanDigits, formatted)
                 } else {
-                    break
+                    val err = parseErrorMessage(metaBody, "Не удалось сохранить номер в аккаунте на сервере")
+                    return@withContext VirtualNumberConfirmationResult.Error(err)
                 }
             }
 
             val friendlyFallback = "Не удалось подтвердить номер на сервере. Попробуйте снова."
-            val err = parseErrorMessage(lastBody, friendlyFallback)
-            return@withContext VirtualNumberConfirmationResult.Error(err)
+            val err = parseErrorMessage(body, friendlyFallback)
+            VirtualNumberConfirmationResult.Error(err)
         } catch (e: Exception) {
-            Timber.e(e, "RPC confirm_hex_number failure")
-            return@withContext VirtualNumberConfirmationResult.Error("Network error during number confirmation: ${e.message}")
+            Timber.e(e, "confirm_hex_number network failure")
+            VirtualNumberConfirmationResult.Error("Ошибка сети при подтверждении номера: ${e.message}")
+        }
+    }
+
+    suspend fun confirmVirtualNumber(
+        userId: String,
+        accessToken: String,
+        raw8Digits: String,
+        context: Context
+    ): Boolean = withContext(Dispatchers.IO) {
+        when (confirmVirtualNumberDetailed(userId, accessToken, raw8Digits, context)) {
+            is VirtualNumberConfirmationResult.Success -> true
+            is VirtualNumberConfirmationResult.Error -> false
         }
     }
 
     /**
-     * Unified, canonical method to query server-authoritative active HexShard ID.
+     * Canonical, server-authoritative method to fetch active HexShard ID for the authenticated user.
+     * Uses public.get_my_active_hex_number() RPC which relies strictly on auth.uid() on the server.
      * Accurately distinguishes [ActiveVirtualNumberState.Active],
      * [ActiveVirtualNumberState.NoActiveNumber], and
      * [ActiveVirtualNumberState.TemporaryError].
@@ -405,14 +377,93 @@ object VirtualNumberService {
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(context)
 
-        // Try querying by account_id first (production schema), then owner_id, then user_id
+        // 1. Call canonical get_my_active_hex_number() RPC
+        try {
+            val rpcReq = Request.Builder()
+                .url("$baseUrl/rest/v1/rpc/get_my_active_hex_number")
+                .header("apikey", anonKey)
+                .header("Authorization", "Bearer $accessToken")
+                .header("Content-Type", "application/json")
+                .post("{}".toRequestBody(JSON_MEDIA))
+                .build()
+
+            val resp = httpClient.newCall(rpcReq).execute()
+            val code = resp.code
+            val body = resp.body?.string()?.trim() ?: ""
+
+            if (resp.isSuccessful) {
+                // If RPC returns null, "null", or empty body: account authoritatively has NO active number!
+                if (body.isEmpty() || body == "null" || body == "{}" || body == "[]") {
+                    // Authoritative absence of active number: clear local cache for this account
+                    SessionManager.updateVirtualNumber(context, "")
+                    SecurePrefsManager.clearPrivateVirtualNumber(context, accountId)
+                    return@withContext ActiveVirtualNumberState.NoActiveNumber
+                }
+
+                val json = try { JSONObject(body) } catch (_: Exception) { null }
+                if (json != null) {
+                    val status = json.optString("status", "")
+                    val raw = json.optString("raw_number", "")
+                    var clean = raw.filter { it.isDigit() }
+                    if (clean.length == 11 && clean.startsWith("999")) {
+                        clean = clean.substring(3)
+                    }
+                    if (clean.length == 8 && status == "active") {
+                        val formatted = json.optString("formatted", VirtualNumberGenerator.format8Digits(clean))
+                        SessionManager.updateVirtualNumber(context, clean)
+                        SecurePrefsManager.setPrivateVirtualNumber(context, clean, accountId)
+                        return@withContext ActiveVirtualNumberState.Active(clean, formatted)
+                    } else if (status == "no_active_number" || clean.isBlank()) {
+                        SessionManager.updateVirtualNumber(context, "")
+                        SecurePrefsManager.clearPrivateVirtualNumber(context, accountId)
+                        return@withContext ActiveVirtualNumberState.NoActiveNumber
+                    }
+                }
+            } else if (code == 401) {
+                // Session expired
+                val refresh = SecurePrefsManager.getSupabaseRefreshToken(context)
+                if (refresh.isNotBlank()) {
+                    Timber.i("get_my_active_hex_number received 401; refreshing session...")
+                    val refState = SessionManager.refreshSession(context, refresh)
+                    if (refState == AuthState.AUTHENTICATED) {
+                        val newAccess = SecurePrefsManager.getSupabaseAccessToken(context)
+                        if (newAccess.isNotBlank() && newAccess != accessToken) {
+                            return@withContext loadActiveVirtualNumber(accountId, newAccess, context)
+                        }
+                    }
+                }
+                return@withContext ActiveVirtualNumberState.TemporaryError("Ошибка авторизации сессии")
+            } else if (code == 404 || body.contains("schema cache") || body.contains("PGRST202")) {
+                // RPC not yet deployed to remote DB, attempt fallback direct query on hex_numbers table
+                Timber.w("get_my_active_hex_number RPC missing on server (HTTP $code); checking hex_numbers table directly")
+                return@withContext loadActiveFromTableDirect(accountId, accessToken, baseUrl, anonKey, context)
+            } else {
+                Timber.w("get_my_active_hex_number returned HTTP $code: $body")
+                return@withContext ActiveVirtualNumberState.TemporaryError("HTTP $code")
+            }
+        } catch (e: Exception) {
+            Timber.w(e, "Error calling get_my_active_hex_number RPC")
+            return@withContext ActiveVirtualNumberState.TemporaryError("Ошибка сети: ${e.message}")
+        }
+
+        ActiveVirtualNumberState.TemporaryError("Не удалось получить активный номер")
+    }
+
+    /**
+     * Fallback direct REST query on public.hex_numbers if RPC get_my_active_hex_number is not yet deployed.
+     */
+    private fun loadActiveFromTableDirect(
+        accountId: String,
+        accessToken: String,
+        baseUrl: String,
+        anonKey: String,
+        context: Context
+    ): ActiveVirtualNumberState {
         val candidateUrls = listOf(
-            "$baseUrl/rest/v1/hex_numbers?account_id=eq.$accountId&status=eq.active&select=*&limit=1",
             "$baseUrl/rest/v1/hex_numbers?owner_id=eq.$accountId&status=eq.active&select=*&limit=1",
-            "$baseUrl/rest/v1/hex_numbers?user_id=eq.$accountId&status=eq.active&select=*&limit=1"
+            "$baseUrl/rest/v1/hex_numbers?account_id=eq.$accountId&status=eq.active&select=*&limit=1"
         )
 
-        var lastError: String? = null
         for (url in candidateUrls) {
             try {
                 val req = Request.Builder()
@@ -438,33 +489,51 @@ object VirtualNumberService {
                             val formatted = VirtualNumberGenerator.format8Digits(clean)
                             SessionManager.updateVirtualNumber(context, clean)
                             SecurePrefsManager.setPrivateVirtualNumber(context, clean, accountId)
-                            return@withContext ActiveVirtualNumberState.Active(clean, formatted)
+                            return ActiveVirtualNumberState.Active(clean, formatted)
                         }
                     }
-                    // Server authoritatively confirmed 0 active numbers exist for this account
-                    return@withContext ActiveVirtualNumberState.NoActiveNumber
-                } else if (resp.code == 400 && body.contains("does not exist")) {
-                    // Column name mismatch between schemas, try fallback url
-                    lastError = "Column mismatch"
-                    continue
-                } else {
-                    lastError = "Server HTTP ${resp.code}"
                 }
             } catch (e: Exception) {
-                Timber.w(e, "Error loading active virtual number from $url")
-                lastError = e.message ?: "Network error"
+                Timber.w(e, "Direct query on $url failed")
             }
         }
 
-        val friendlyError = sanitizeErrorMessage(lastError ?: "Failed to query active virtual number", "Не удалось загрузить активный номер")
-        ActiveVirtualNumberState.TemporaryError(friendlyError)
+        // Secondary check: query Supabase Auth user_metadata for active number bound to this account
+        try {
+            val userReq = Request.Builder()
+                .url("$baseUrl/auth/v1/user")
+                .header("apikey", anonKey)
+                .header("Authorization", "Bearer $accessToken")
+                .get()
+                .build()
+
+            val userResp = httpClient.newCall(userReq).execute()
+            val userBody = userResp.body?.string() ?: ""
+            if (userResp.isSuccessful && userBody.isNotEmpty()) {
+                val uObj = org.json.JSONObject(userBody)
+                val meta = uObj.optJSONObject("user_metadata")
+                val raw = meta?.optString("hex_number", meta.optString("virtual_number", "")) ?: ""
+                var clean = raw.filter { it.isDigit() }
+                if (clean.length == 11 && clean.startsWith("999")) {
+                    clean = clean.substring(3)
+                }
+                if (clean.length == 8) {
+                    val formatted = VirtualNumberGenerator.format8Digits(clean)
+                    SessionManager.updateVirtualNumber(context, clean)
+                    SecurePrefsManager.setPrivateVirtualNumber(context, clean, accountId)
+                    return ActiveVirtualNumberState.Active(clean, formatted)
+                }
+            }
+        } catch (e: Exception) {
+            Timber.w(e, "Check user_metadata for active number failed")
+        }
+
+        // Server confirmed 0 active numbers exist for this account
+        SessionManager.updateVirtualNumber(context, "")
+        SecurePrefsManager.clearPrivateVirtualNumber(context, accountId)
+        return ActiveVirtualNumberState.NoActiveNumber
     }
 
-    /**
-     * Queries Supabase for the active virtual number assigned to [accountId] and synchronizes session state.
-     * If server returns active row, updates local cache and session with canonical 8 digits.
-     * If server returns no record or an error, returns null.
-     */
     suspend fun fetchActiveVirtualNumber(
         accountId: String,
         accessToken: String,

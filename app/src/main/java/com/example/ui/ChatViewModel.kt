@@ -45,6 +45,13 @@ sealed class AiUiError {
     }
 }
 
+data class UnifiedSearchResults(
+    val users: List<com.example.data.repository.UserRepository.UserSearchResult> = emptyList(),
+    val chats: List<ChatEntity> = emptyList(),
+    val messages: List<MessageEntity> = emptyList(),
+    val isSearching: Boolean = false
+)
+
 class ChatViewModel @Inject constructor(
     private val repository: ChatRepository,
     private val geminiService: GeminiService
@@ -55,6 +62,11 @@ class ChatViewModel @Inject constructor(
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    private val _searchResults = MutableStateFlow(UnifiedSearchResults())
+    val searchResults: StateFlow<UnifiedSearchResults> = _searchResults.asStateFlow()
+
+    private var searchJob: Job? = null
 
     private val _pendingProfileConfirmation = MutableStateFlow<com.example.util.ProfileQrData?>(null)
     val pendingProfileConfirmation: StateFlow<com.example.util.ProfileQrData?> = _pendingProfileConfirmation.asStateFlow()
@@ -73,6 +85,40 @@ class ChatViewModel @Inject constructor(
 
     private val _aiErrorState = MutableStateFlow<AiUiError?>(null)
     val aiErrorState: StateFlow<AiUiError?> = _aiErrorState.asStateFlow()
+
+    private val _viewingPeerProfile = MutableStateFlow<com.example.data.repository.UserRepository.PeerProfileInfo?>(null)
+    val viewingPeerProfile: StateFlow<com.example.data.repository.UserRepository.PeerProfileInfo?> = _viewingPeerProfile.asStateFlow()
+
+    private val _chatCreateError = MutableStateFlow<String?>(null)
+    val chatCreateError: StateFlow<String?> = _chatCreateError.asStateFlow()
+
+    fun dismissChatCreateError() {
+        _chatCreateError.value = null
+    }
+
+    fun openPeerProfile(chat: ChatEntity) {
+        if (chat.isSavedMessages || chat.isAiAssistant) return
+        viewModelScope.launch {
+            val peerId = chat.recipientId.ifBlank { chat.name }
+            val profile = repository.fetchPeerProfile(peerId) ?: com.example.data.repository.UserRepository.PeerProfileInfo(
+                id = chat.recipientId.ifBlank { chat.name },
+                username = chat.name.removePrefix("@"),
+                displayName = chat.name,
+                virtualNumber = "",
+                avatarUrl = null,
+                backgroundPath = null,
+                backgroundType = null,
+                bio = "",
+                dateOfBirth = "",
+                isOnline = chat.status == "online"
+            )
+            _viewingPeerProfile.value = profile
+        }
+    }
+
+    fun dismissPeerProfile() {
+        _viewingPeerProfile.value = null
+    }
 
     fun dismissAiError() {
         _aiErrorState.value = null
@@ -158,6 +204,76 @@ class ChatViewModel @Inject constructor(
 
     fun updateSearchQuery(query: String) {
         _searchQuery.value = query
+        searchJob?.cancel()
+        if (query.isBlank()) {
+            _searchResults.value = UnifiedSearchResults()
+            return
+        }
+
+        searchJob = viewModelScope.launch {
+            _searchResults.value = _searchResults.value.copy(isSearching = true)
+
+            // Local searches
+            val matchedChats = repository.searchChats(query)
+            val matchedMessages = repository.searchMessages(query)
+
+            _searchResults.value = _searchResults.value.copy(
+                chats = matchedChats,
+                messages = matchedMessages
+            )
+
+            // Debounced remote user search
+            delay(250)
+            val matchedUsers = try {
+                repository.searchUsers(query)
+            } catch (_: Exception) {
+                emptyList()
+            }
+
+            _searchResults.value = UnifiedSearchResults(
+                users = matchedUsers,
+                chats = matchedChats,
+                messages = matchedMessages,
+                isSearching = false
+            )
+        }
+    }
+
+    fun openChatWithUser(user: com.example.data.repository.UserRepository.UserSearchResult) {
+        _searchQuery.value = ""
+        _searchResults.value = UnifiedSearchResults()
+        viewModelScope.launch {
+            val currentUserId = repository.getCurrentUserId()
+            val recipientId = user.userId.ifBlank { user.username }
+            val name = user.displayName.ifBlank { user.username }
+            val initials = name.take(2).uppercase()
+            val conversationId = repository.computeConversationId(currentUserId, recipientId)
+
+            val existing = repository.getChatByConversationId(conversationId)
+                ?: repository.getChatByRecipientId(recipientId)
+                ?: chats.value.find { 
+                    it.recipientId == recipientId || it.name.equals(name, ignoreCase = true) || (it.conversationId.isNotBlank() && it.conversationId == conversationId)
+                }
+
+            if (existing != null) {
+                _selectedChatId.value = existing.id
+                return@launch
+            }
+
+            val newChat = ChatEntity(
+                accountId = currentUserId,
+                name = name,
+                ava = initials,
+                status = "offline",
+                preview = "E2E encryption channel opened",
+                time = getFormattedTime(),
+                recipientId = recipientId,
+                conversationId = conversationId,
+                conversationType = com.example.data.ConversationType.DIRECT.name
+            )
+            val newChatIdInt = repository.insertChat(newChat).toInt()
+            _selectedChatId.value = newChatIdInt
+        }
     }
 
     fun toggleTheme() {
@@ -211,15 +327,27 @@ class ChatViewModel @Inject constructor(
                 val timeStr = getFormattedTime()
                 val idempotencyKey = generateIdempotencyKey()
 
-                val audioUrl = repository.uploadMediaMessage(context, uri, cid, type, idempotencyKey, chat.recipientId.ifEmpty { chat.name })
-                
+                val isSelfChat = chat.isSavedMessages
+                val isAiChat = chat.isAiAssistant
+
+                val imageBytes = if (isAiChat && type == "image") {
+                    try {
+                        context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    } catch (_: Exception) { null }
+                } else null
+                val mimeType = if (isAiChat && type == "image") {
+                    context.contentResolver.getType(uri) ?: "image/jpeg"
+                } else null
+
+                var audioUrl = repository.uploadMediaMessage(context, uri, cid, type, idempotencyKey, chat.recipientId.ifEmpty { chat.name })
+                if (audioUrl == null && (isSelfChat || isAiChat)) {
+                    audioUrl = uri.toString()
+                }
+
                 if (audioUrl == null) {
                     _isSending.value = false
                     return@launch
                 }
-
-                val isSelfChat = chat.isSavedMessages
-                val isAiChat = chat.isAiAssistant
 
                 val msgId = repository.sendMessage(
                     chatId = cid,
@@ -240,6 +368,15 @@ class ChatViewModel @Inject constructor(
                 if (msgId != -1L) {
                     if (isSelfChat || isAiChat) {
                         repository.updateMessageStatus(msgId.toInt(), "delivered")
+                    }
+                    if (isAiChat && imageBytes != null) {
+                        handleAiReply(
+                            chatId = cid,
+                            userMsg = "Пожалуйста, посмотри и детально опиши эту фотографию. Расскажи, что на ней изображено, распознай текст или детали.",
+                            originalMsgId = msgId.toInt(),
+                            imageBytes = imageBytes,
+                            mimeType = mimeType
+                        )
                     }
                 }
             } catch (e: Exception) {
@@ -491,7 +628,13 @@ class ChatViewModel @Inject constructor(
         _selectedAiModel.value = model
     }
 
-    private fun handleAiReply(chatId: Int, userMsg: String, originalMsgId: Int) {
+    private fun handleAiReply(
+        chatId: Int,
+        userMsg: String,
+        originalMsgId: Int,
+        imageBytes: ByteArray? = null,
+        mimeType: String? = null
+    ) {
         viewModelScope.launch {
             delay(150)
             repository.updateMessageStatus(originalMsgId, "read")
@@ -513,10 +656,12 @@ class ChatViewModel @Inject constructor(
                     Pair(if (msg.isMe) "user" else "model", msg.text)
                 }
 
-                // Guard with a strict 9s timeout so the UI never hangs or shows typing indefinitely
-                val result = kotlinx.coroutines.withTimeoutOrNull(9000L) {
+                // Guard with a 15s timeout for multimodal or cloud response
+                val result = kotlinx.coroutines.withTimeoutOrNull(15000L) {
                     geminiService.requestAssistant(
                         prompt = userMsg,
+                        imageBytes = imageBytes,
+                        imageMimeType = mimeType,
                         history = history,
                         modelOption = modelOption
                     )
@@ -607,8 +752,23 @@ class ChatViewModel @Inject constructor(
             }
 
             val resolved = repository.resolveUser(trimmed)
-            val finalRecipientId = resolved?.first ?: trimmed
-            val finalName = resolved?.second ?: trimmed
+            if (resolved == null) {
+                // If not found as user, search if there is any user matching
+                val searchList = try { repository.searchUsers(trimmed) } catch (_: Exception) { emptyList() }
+                val match = searchList.firstOrNull { 
+                    it.username.equals(trimmed.removePrefix("@"), ignoreCase = true) ||
+                    it.displayName.equals(trimmed, ignoreCase = true) ||
+                    (it.virtualNumber != null && it.virtualNumber.contains(trimmed.filter { c -> c.isDigit() }))
+                }
+                if (match == null) {
+                    _chatCreateError.value = trimmed
+                    return@launch
+                }
+                openChatWithUser(match)
+                return@launch
+            }
+            val finalRecipientId = resolved.first
+            val finalName = resolved.second
             val finalAva = if (initials.isNotBlank()) initials.uppercase().take(2) else finalName.take(2).uppercase()
             val conversationId = repository.computeConversationId(currentUserId, finalRecipientId)
 
@@ -626,7 +786,7 @@ class ChatViewModel @Inject constructor(
                 accountId = currentUserId,
                 name = finalName,
                 ava = finalAva,
-                status = "online",
+                status = "offline",
                 preview = "E2E encryption channel opened",
                 time = getFormattedTime(),
                 recipientId = finalRecipientId,
@@ -664,7 +824,7 @@ class ChatViewModel @Inject constructor(
                     accountId = currentUserId,
                     name = finalName,
                     ava = finalAva,
-                    status = "online",
+                    status = "offline",
                     preview = "Verified via QR profile exchange",
                     time = getFormattedTime(),
                     recipientId = profile.userId,
@@ -712,7 +872,7 @@ class ChatViewModel @Inject constructor(
                     accountId = currentUserId,
                     name = finalName,
                     ava = finalAva,
-                    status = "online",
+                    status = "offline",
                     preview = "Verified via secure QR token exchange",
                     time = getFormattedTime(),
                     recipientId = profile.userId,
@@ -765,7 +925,7 @@ class ChatViewModel @Inject constructor(
                         accountId = currentUserId,
                         name = finalName,
                         ava = finalAva,
-                        status = "online",
+                        status = "offline",
                         preview = "Verified via secure QR token exchange",
                         time = getFormattedTime(),
                         recipientId = profile.userId,

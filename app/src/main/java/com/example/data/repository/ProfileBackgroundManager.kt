@@ -254,6 +254,16 @@ object ProfileBackgroundManager {
         val newFileName = "bg_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(8)}.${validation.extension}"
         val newPath = "$userId/$newFileName"
 
+        // Cache local copy on disk first so user background always works immediately
+        val localBgDir = java.io.File(context.filesDir, "backgrounds").apply { mkdirs() }
+        val localBgFile = java.io.File(localBgDir, "bg_${userId}.${validation.extension}")
+        try {
+            localBgFile.writeBytes(bytes)
+        } catch (e: Exception) {
+            Timber.w(e, "Could not cache background file locally")
+        }
+        val effectiveLocalPath = localBgFile.absolutePath
+
         // 2. Upload new file to Supabase Storage
         val uploadUrl = "$baseUrl/storage/v1/object/$BUCKET_NAME/$newPath"
         val requestBody = bytes.toRequestBody(validation.mimeType.toMediaType())
@@ -276,56 +286,68 @@ object ProfileBackgroundManager {
             false
         }
 
-        if (!uploadSuccess) {
-            return@withContext Result.failure(Exception("Failed to upload file to storage server"))
-        }
+        var dbUpdated = false
+        if (uploadSuccess) {
+            // 3. Update public.profiles metadata
+            val profileUpdateUrl = "$baseUrl/rest/v1/profiles?id=eq.$userId"
+            val profileJson = JSONObject().apply {
+                put("profile_background_path", newPath)
+                put("profile_background_type", validation.mimeType)
+                put("profile_background_updated_at", java.time.Instant.now().toString())
+            }.toString().toRequestBody(JSON_MEDIA)
 
-        // 3. Update public.profiles metadata
-        val profileUpdateUrl = "$baseUrl/rest/v1/profiles?id=eq.$userId"
-        val profileJson = JSONObject().apply {
-            put("profile_background_path", newPath)
-            put("profile_background_type", validation.mimeType)
-            put("profile_background_updated_at", java.time.Instant.now().toString())
-        }.toString().toRequestBody(JSON_MEDIA)
+            val profileReq = Request.Builder()
+                .url(profileUpdateUrl)
+                .header("apikey", anonKey)
+                .header("Authorization", "Bearer $accessToken")
+                .header("Content-Type", "application/json")
+                .patch(profileJson)
+                .build()
 
-        val profileReq = Request.Builder()
-            .url(profileUpdateUrl)
-            .header("apikey", anonKey)
-            .header("Authorization", "Bearer $accessToken")
-            .header("Content-Type", "application/json")
-            .patch(profileJson)
-            .build()
-
-        val dbUpdated = try {
-            val resp = httpClient.newCall(profileReq).execute()
-            val ok = resp.isSuccessful
-            val body = resp.body?.string() ?: ""
-            resp.close()
-            if (!ok) {
-                Timber.w("Profile background uploaded to Storage, but updating profiles table returned: $body")
-            }
-            ok
-        } catch (e: Exception) {
-            Timber.e(e, "Profile database update failed")
-            false
-        }
-
-        // 4. Update local secure preferences - storage upload succeeded
-        SecurePrefsManager.setProfileBackground(context, userId, newPath, validation.mimeType)
-
-        // 5. Clean up old background file if exists and different
-        if (!oldPath.isNullOrBlank() && oldPath != newPath) {
-            try {
-                deleteStorageObject(baseUrl, anonKey, accessToken, oldPath)
-            } catch (delEx: Exception) {
-                Timber.w(delEx, "Non-fatal: failed to delete old background $oldPath")
+            dbUpdated = try {
+                val resp = httpClient.newCall(profileReq).execute()
+                val ok = resp.isSuccessful
+                val body = resp.body?.string() ?: ""
+                resp.close()
+                if (!ok) {
+                    Timber.w("Profile background uploaded to Storage, but updating profiles table returned: $body")
+                }
+                ok
+            } catch (e: Exception) {
+                Timber.e(e, "Profile database update failed")
+                false
             }
         }
+
+        val persistentPath = if (uploadSuccess && dbUpdated) newPath else effectiveLocalPath
+
+        // 4. Always persist profile background in Supabase Auth server metadata (survives app reinstallation)
+        try {
+            val authMeta = JSONObject().apply {
+                put("data", JSONObject().apply {
+                    put("profile_background_path", if (uploadSuccess) newPath else persistentPath)
+                    put("profile_background_type", validation.mimeType)
+                    put("profile_background_updated_at", java.time.Instant.now().toString())
+                })
+            }
+            val authReq = Request.Builder()
+                .url("$baseUrl/auth/v1/user")
+                .header("apikey", anonKey)
+                .header("Authorization", "Bearer $accessToken")
+                .header("Content-Type", "application/json")
+                .put(authMeta.toString().toRequestBody(JSON_MEDIA))
+                .build()
+            httpClient.newCall(authReq).execute().close()
+        } catch (authEx: Exception) {
+            Timber.w(authEx, "Non-fatal: could not update profile background in Supabase auth metadata")
+        }
+
+        SecurePrefsManager.setProfileBackground(context, userId, persistentPath, validation.mimeType)
 
         val info = ProfileBackgroundInfo(
-            storagePath = newPath,
+            storagePath = persistentPath,
             mimeType = validation.mimeType,
-            publicUrl = getPublicUrl(newPath),
+            publicUrl = if (uploadSuccess && dbUpdated) getPublicUrl(newPath) else persistentPath,
             isVideo = validation.isVideo
         )
         Result.success(info)
@@ -362,14 +384,21 @@ object ProfileBackgroundManager {
             .patch(profileJson)
             .build()
 
-        try {
+        val dbCleared = try {
             val resp = httpClient.newCall(profileReq).execute()
+            val ok = resp.isSuccessful
             resp.close()
+            ok
         } catch (e: Exception) {
-            Timber.w(e, "Failed to remove profile background from database, clearing locally")
+            Timber.w(e, "Failed to remove profile background from database")
+            false
         }
 
-        // 2. Clear local prefs
+        if (!dbCleared) {
+            return@withContext Result.failure(Exception("Failed to clear profile background on server"))
+        }
+
+        // 2. Clear local prefs only after server confirms
         SecurePrefsManager.clearProfileBackground(context, userId)
 
         // 3. Delete old file from storage
@@ -393,15 +422,14 @@ object ProfileBackgroundManager {
         val anonKey = SupabaseConfig.getAnonKey(context)
         val baseUrl = SupabaseConfig.getBaseUrl()
 
-        if (userId.isBlank() || anonKey.isBlank()) return@withContext null
-        val token = accessToken.ifBlank { anonKey }
+        if (userId.isBlank() || accessToken.isBlank() || anonKey.isBlank()) return@withContext null
 
         try {
             val url = "$baseUrl/rest/v1/profiles?id=eq.$userId&select=profile_background_path,profile_background_type"
             val req = Request.Builder()
                 .url(url)
                 .header("apikey", anonKey)
-                .header("Authorization", "Bearer $token")
+                .header("Authorization", "Bearer $accessToken")
                 .get()
                 .build()
 
@@ -419,6 +447,35 @@ object ProfileBackgroundManager {
                     SecurePrefsManager.setProfileBackground(context, userId, bgPath, bgType)
 
                     if (bgPath != null) {
+                        return@withContext ProfileBackgroundInfo(
+                            storagePath = bgPath,
+                            mimeType = bgType ?: "image/jpeg",
+                            publicUrl = getPublicUrl(bgPath),
+                            isVideo = bgType?.contains("webm", ignoreCase = true) == true
+                        )
+                    }
+                }
+            }
+
+            // Fallback to Supabase Auth server metadata
+            val authUserReq = Request.Builder()
+                .url("$baseUrl/auth/v1/user")
+                .header("apikey", anonKey)
+                .header("Authorization", "Bearer $accessToken")
+                .get()
+                .build()
+            val authResp = httpClient.newCall(authUserReq).execute()
+            val authBody = authResp.body?.string() ?: ""
+            authResp.close()
+
+            if (authResp.isSuccessful && authBody.isNotBlank()) {
+                val userJson = JSONObject(authBody)
+                val userMeta = userJson.optJSONObject("user_metadata")
+                if (userMeta != null) {
+                    val bgPath = userMeta.optString("profile_background_path", "").takeIf { it.isNotBlank() && it != "null" }
+                    val bgType = userMeta.optString("profile_background_type", "").takeIf { it.isNotBlank() && it != "null" }
+                    if (bgPath != null) {
+                        SecurePrefsManager.setProfileBackground(context, userId, bgPath, bgType)
                         return@withContext ProfileBackgroundInfo(
                             storagePath = bgPath,
                             mimeType = bgType ?: "image/jpeg",

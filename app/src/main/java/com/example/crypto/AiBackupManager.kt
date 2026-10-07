@@ -193,7 +193,7 @@ object AiBackupManager {
                     accountId = accountId,
                     name = "HexShard AI",
                     ava = "AI",
-                    status = "online",
+                    status = "offline",
                     preview = "Chat restored from encrypted backup",
                     time = "",
                     recipientId = "ai_assistant",

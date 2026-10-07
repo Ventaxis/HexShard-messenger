@@ -50,7 +50,8 @@ class AuthServiceTest {
     fun testFailClosedVirtualNumberReservationWithoutAuth() = runBlocking {
         val res = VirtualNumberService.reserveCandidateNumber("", "")
         assertTrue(res is VirtualNumberReservationResult.Error)
-        assertEquals("Authentication is required to reserve a number", (res as VirtualNumberReservationResult.Error).message)
+        val msg = (res as VirtualNumberReservationResult.Error).message
+        assertTrue(msg.contains("авторизация") || msg.contains("Authentication"))
     }
 
     @Test
@@ -58,6 +59,7 @@ class AuthServiceTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val res = VirtualNumberService.confirmVirtualNumberDetailed("user123", "token123", "12345", context)
         assertTrue(res is VirtualNumberConfirmationResult.Error)
-        assertEquals("Number must contain exactly 8 digits", (res as VirtualNumberConfirmationResult.Error).message)
+        val msg = (res as VirtualNumberConfirmationResult.Error).message
+        assertTrue(msg.contains("8") && (msg.contains("цифр") || msg.contains("digits")))
     }
 }

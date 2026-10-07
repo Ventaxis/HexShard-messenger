@@ -82,104 +82,216 @@ class MessageRepository(
     }
 
     suspend fun markAllAsRead(chatId: Int, accountId: String = getCurrentAccountId()) = withContext(Dispatchers.IO) {
-        if (accountId.isNotBlank()) chatDao.markAllAsRead(chatId, accountId)
-    }
-
-    suspend fun editMessage(messageId: Int, newText: String, accountId: String = getCurrentAccountId()) = withContext(Dispatchers.IO) {
-        if (accountId.isNotBlank()) chatDao.editMessage(messageId, newText, System.currentTimeMillis(), accountId)
-    }
-
-    suspend fun deleteMessage(messageId: Int, accountId: String = getCurrentAccountId()) = withContext(Dispatchers.IO) {
         if (accountId.isBlank()) return@withContext
-        val msg = chatDao.getMessageById(messageId, accountId)
-        chatDao.deleteMessage(messageId, accountId)
+        val chat = chatDao.getChatById(chatId, accountId) ?: return@withContext
+        chatDao.markAllAsRead(chatId, accountId)
 
-        val serverId = msg?.serverMessageId?.takeIf { it.isNotBlank() }
-            ?: msg?.idempotencyKey?.takeIf { it.isNotBlank() }
-            ?: messageId.toString()
-
-        backgroundScope.launch {
-            try {
-                val baseUrl = SupabaseConfig.getBaseUrl()
-                val anonKey = SupabaseConfig.getAnonKey(context)
-                val token = context?.let { SecurePrefsManager.getSupabaseAccessToken(it) }?.takeIf { it.isNotBlank() }
-                    ?: return@launch
-
-                val body = JSONObject().apply {
-                    put("is_deleted", true)
-                    put("payload", "[DELETED]")
-                }.toString().toRequestBody(JSON_MEDIA)
-
-                val req = Request.Builder()
-                    .url("$baseUrl/rest/v1/messages?or=(id.eq.$serverId,client_message_id.eq.$serverId)")
-                    .header("apikey", anonKey)
-                    .header("Authorization", "Bearer $token")
-                    .header("Content-Type", "application/json")
-                    .patch(body)
-                    .build()
-
-                httpClient.newCall(req).execute().close()
-            } catch (e: Exception) {
-                Timber.w(e, "Error updating deleted message on Supabase")
+        // Mark on server as well
+        val ctx = context ?: return@withContext
+        val baseUrl = SupabaseConfig.getBaseUrl()
+        val anonKey = SupabaseConfig.getAnonKey(ctx)
+        val token = SecurePrefsManager.getSupabaseAccessToken(ctx)
+        if (token.isNotBlank() && chat.conversationId.isNotBlank()) {
+            backgroundScope.launch {
+                try {
+                    val messages = chatDao.getMessagesForChatForAccountList(chatId, accountId)
+                    val maxSeq = messages.maxOfOrNull { it.timestamp } ?: 0L
+                    val payload = JSONObject().apply {
+                        put("p_conversation_id", chat.conversationId)
+                        put("p_sequence", maxSeq)
+                    }
+                    val req = Request.Builder()
+                        .url("$baseUrl/rest/v1/rpc/mark_conversation_read")
+                        .header("apikey", anonKey)
+                        .header("Authorization", "Bearer $token")
+                        .header("Content-Type", "application/json")
+                        .post(payload.toString().toRequestBody(JSON_MEDIA))
+                        .build()
+                    httpClient.newCall(req).execute().close()
+                } catch (e: Exception) {
+                    Timber.w(e, "markAllAsRead server RPC failed")
+                }
             }
         }
     }
 
+    suspend fun editMessage(messageId: Int, newText: String, accountId: String = getCurrentAccountId()): Boolean = withContext(Dispatchers.IO) {
+        if (accountId.isBlank()) return@withContext false
+        val msg = chatDao.getMessageById(messageId, accountId) ?: return@withContext false
+        val serverId = msg.serverMessageId.ifBlank { msg.idempotencyKey }
+
+        // Local cache optimistic update
+        chatDao.editMessage(messageId, newText, System.currentTimeMillis(), accountId)
+
+        val ctx = context ?: return@withContext true
+        val baseUrl = SupabaseConfig.getBaseUrl()
+        val anonKey = SupabaseConfig.getAnonKey(ctx)
+        val token = SecurePrefsManager.getSupabaseAccessToken(ctx)
+        if (token.isNotBlank() && serverId.isNotBlank()) {
+            try {
+                val isSelfOrAi = isSelfConversation(msg.conversationId) || isAiConversation(msg.conversationId)
+                val encrypted = cryptoRepository.encryptOutboundMessage(
+                    currentUserId = accountId,
+                    recipientId = msg.sender,
+                    conversationId = msg.conversationId,
+                    idempotencyKey = msg.idempotencyKey,
+                    plainText = newText,
+                    isSelfOrAi = isSelfOrAi
+                )
+                val payload = JSONObject().apply {
+                    put("p_message_id", serverId)
+                    put("p_payload", encrypted.base64Payload)
+                    put("p_signature", encrypted.base64Signature)
+                }
+                val req = Request.Builder()
+                    .url("$baseUrl/rest/v1/rpc/edit_message")
+                    .header("apikey", anonKey)
+                    .header("Authorization", "Bearer $token")
+                    .header("Content-Type", "application/json")
+                    .post(payload.toString().toRequestBody(JSON_MEDIA))
+                    .build()
+                val resp = httpClient.newCall(req).execute()
+                val ok = resp.isSuccessful
+                resp.close()
+                return@withContext ok
+            } catch (e: Exception) {
+                Timber.w(e, "editMessage remote RPC failed")
+            }
+        }
+        true
+    }
+
+    suspend fun deleteMessage(messageId: Int, accountId: String = getCurrentAccountId()): Boolean = withContext(Dispatchers.IO) {
+        if (accountId.isBlank()) return@withContext false
+        val msg = chatDao.getMessageById(messageId, accountId) ?: return@withContext false
+        val serverId = msg.serverMessageId.ifBlank { msg.idempotencyKey }
+
+        // Local cache delete
+        chatDao.deleteMessage(messageId, accountId)
+
+        val ctx = context ?: return@withContext true
+        val baseUrl = SupabaseConfig.getBaseUrl()
+        val anonKey = SupabaseConfig.getAnonKey(ctx)
+        val token = SecurePrefsManager.getSupabaseAccessToken(ctx)
+        if (token.isNotBlank() && serverId.isNotBlank()) {
+            try {
+                val payload = JSONObject().apply {
+                    put("p_message_id", serverId)
+                }
+                val req = Request.Builder()
+                    .url("$baseUrl/rest/v1/rpc/delete_message")
+                    .header("apikey", anonKey)
+                    .header("Authorization", "Bearer $token")
+                    .header("Content-Type", "application/json")
+                    .post(payload.toString().toRequestBody(JSON_MEDIA))
+                    .build()
+                val resp = httpClient.newCall(req).execute()
+                val ok = resp.isSuccessful
+                resp.close()
+                return@withContext ok
+            } catch (e: Exception) {
+                Timber.w(e, "deleteMessage remote RPC failed")
+            }
+        }
+        true
+    }
+
     /**
-     * Primary entry point for sending a message.
-     * Encrypts message, signs payload, saves to Room as "sending",
-     * updates chat preview, and dispatches to Supabase.
+     * Persists AI conversation history atomically to Supabase.
      */
+    suspend fun sendAiTranscript(
+        conversationId: String,
+        userClientId: String,
+        userText: String,
+        replyClientId: String,
+        replyText: String,
+        personaId: String,
+        timeStr: String
+    ): Boolean = withContext(Dispatchers.IO) {
+        val baseUrl = SupabaseConfig.getBaseUrl()
+        val anonKey = SupabaseConfig.getAnonKey(context)
+        val token = context?.let { SecurePrefsManager.getSupabaseAccessToken(it) }?.takeIf { it.isNotBlank() }
+        if (token.isNullOrBlank() || anonKey.isBlank()) return@withContext false
+
+        try {
+            val payload = JSONObject().apply {
+                put("p_conversation_id", conversationId)
+                put("p_user_client_id", userClientId)
+                put("p_user_text", userText)
+                put("p_reply_client_id", replyClientId)
+                put("p_reply_text", replyText)
+                put("p_persona_id", personaId)
+                put("p_time_str", timeStr)
+            }
+            val req = Request.Builder()
+                .url("$baseUrl/rest/v1/rpc/send_ai_message")
+                .header("apikey", anonKey)
+                .header("Authorization", "Bearer $token")
+                .header("Content-Type", "application/json")
+                .post(payload.toString().toRequestBody(JSON_MEDIA))
+                .build()
+            val resp = httpClient.newCall(req).execute()
+            val ok = resp.isSuccessful
+            resp.close()
+            ok
+        } catch (e: Exception) {
+            Timber.e(e, "sendAiTranscript RPC network failure")
+            false
+        }
+    }
+
     suspend fun sendMessage(
         chatId: Int,
         sender: String,
         text: String,
         isMe: Boolean,
-        isAttachment: Boolean = false,
+        isAttachment: Boolean,
         timeStr: String,
         status: String = "sending",
+        recipientId: String = "",
         type: String = "text",
         audioUrl: String? = null,
         duration: Int? = null,
-        recipientId: String,
         idempotencyKey: String = "",
         personaId: String? = null
     ): Long = withContext(Dispatchers.IO) {
         messageWriteLimiter.acquire()
         try {
-            val currentUserId = context?.let { SecurePrefsManager.getUserId(it) } ?: ""
-            if (currentUserId.isBlank()) {
-                Timber.w("Cannot send message: user is not authenticated")
-                return@withContext -1L
-            }
+            val currentUserId = getCurrentAccountId()
             val isSelfChat = isSelfConversation(recipientId = recipientId, id = chatId)
-            val isAiChat = isAiConversation(recipientId = recipientId)
+            val isAiChat = isAiConversation(recipientId = recipientId, conversationId = personaId)
             val conversationId = conversationRepository.computeConversationId(currentUserId, recipientId)
-            val resolvedPersona = personaId ?: if (isAiChat) {
-                com.example.network.AiModelOption.DEFAULT.personaId
-            } else null
 
-            val plainTextToEncrypt = if (!audioUrl.isNullOrBlank() || type != "text") {
+            val resolvedPersona = when {
+                personaId != null -> com.example.data.AiPersona.fromIdOrNull(personaId)?.id
+                isAiChat -> "hexagon"
+                else -> null
+            }
+
+            val payloadToEncrypt = if (isAttachment && audioUrl != null) {
                 JSONObject().apply {
                     put("text", text)
+                    put("audioUrl", audioUrl)
                     put("type", type)
-                    if (!audioUrl.isNullOrBlank()) put("audioUrl", audioUrl)
                     if (duration != null) put("duration", duration)
                 }.toString()
             } else {
                 text
             }
 
+            // Cryptographic envelope
             val encryptedPayload = cryptoRepository.encryptOutboundMessage(
                 currentUserId = currentUserId,
-                recipientId = recipientId,
+                recipientId = if (isSelfChat) currentUserId else recipientId,
                 conversationId = conversationId,
                 idempotencyKey = idempotencyKey,
-                plainText = plainTextToEncrypt,
+                plainText = payloadToEncrypt,
                 isSelfOrAi = isSelfChat || isAiChat
             )
 
-            val initialStatus = if (isSelfChat || isAiChat) "delivered" else "sending"
+            val token = context?.let { SecurePrefsManager.getSupabaseAccessToken(it) }?.takeIf { it.isNotBlank() }
+            val isRemoteAuthed = currentUserId.isNotBlank() && token != null
+            val initialStatus = if (isRemoteAuthed) "sending" else "pending"
 
             val message = MessageEntity(
                 accountId = currentUserId,
@@ -205,9 +317,8 @@ class MessageRepository(
             val messageId = chatDao.insertMessage(message)
             conversationRepository.updateChatPreview(chatId, text, timeStr, message.timestamp)
 
-            val isRemoteAuthed = currentUserId.isNotBlank()
-            if (!isAiChat && idempotencyKey.isNotEmpty() && isRemoteAuthed) {
-                // 1. Enqueue in durable outbox table
+            // ALL user-initiated messages are enqueued into durable outbox (direct, saved, and AI user prompts)
+            if (isMe && idempotencyKey.isNotEmpty()) {
                 val outboxEntry = OutboxEntity(
                     accountId = currentUserId,
                     localMessageId = messageId.toInt(),
@@ -226,28 +337,32 @@ class MessageRepository(
                 )
                 val outboxRowId = chatDao.insertOutbox(outboxEntry)
 
-                // 2. Attempt immediate delivery
-                backgroundScope.launch {
-                    try {
-                        val sentOk = sendRemoteMessage(
-                            idempotencyKey = idempotencyKey,
-                            conversationId = conversationId,
-                            senderId = currentUserId,
-                            recipientId = if (isSelfChat) currentUserId else recipientId,
-                            payloadBase64 = encryptedPayload.base64Payload,
-                            signatureBase64 = encryptedPayload.base64Signature,
-                            type = type,
-                            timeStr = timeStr
-                        )
-                        if (sentOk) {
-                            chatDao.deleteOutboxByIdempotencyKey(idempotencyKey, currentUserId)
-                            updateMessageStatus(messageId.toInt(), "sent", currentUserId)
-                        } else {
-                            chatDao.updateOutboxAttempt(outboxRowId, "pending", System.currentTimeMillis(), "Initial delivery failed", currentUserId)
+                if (isRemoteAuthed && !isAiChat) {
+                    backgroundScope.launch {
+                        try {
+                            val sentOk = sendRemoteMessage(
+                                idempotencyKey = idempotencyKey,
+                                conversationId = conversationId,
+                                senderId = currentUserId,
+                                recipientId = if (isSelfChat) currentUserId else recipientId,
+                                payloadBase64 = encryptedPayload.base64Payload,
+                                signatureBase64 = encryptedPayload.base64Signature,
+                                type = type,
+                                timeStr = timeStr,
+                                personaId = resolvedPersona
+                            )
+                            if (sentOk) {
+                                chatDao.deleteOutboxByIdempotencyKey(idempotencyKey, currentUserId)
+                                updateMessageStatus(messageId.toInt(), "sent", currentUserId)
+                            } else {
+                                chatDao.updateOutboxAttempt(outboxRowId, "pending", System.currentTimeMillis(), "Server send failed", currentUserId)
+                                updateMessageStatus(messageId.toInt(), "pending", currentUserId)
+                            }
+                        } catch (netEx: Exception) {
+                            Timber.e(netEx, "Supabase message send network failure, will retry via outbox")
+                            chatDao.updateOutboxAttempt(outboxRowId, "pending", System.currentTimeMillis(), netEx.message ?: "Network error", currentUserId)
+                            updateMessageStatus(messageId.toInt(), "pending", currentUserId)
                         }
-                    } catch (netEx: Exception) {
-                        Timber.e(netEx, "Supabase message send network failure, will retry via outbox queue")
-                        chatDao.updateOutboxAttempt(outboxRowId, "pending", System.currentTimeMillis(), netEx.message ?: "Network error", currentUserId)
                     }
                 }
             }
@@ -290,6 +405,10 @@ class MessageRepository(
         }
     }
 
+    /**
+     * Sends message to Supabase via canonical send_message_idempotent RPC.
+     * STRICT: No fake delivery. If server call fails, returns false fail-closed.
+     */
     suspend fun sendRemoteMessage(
         idempotencyKey: String,
         conversationId: String,
@@ -298,7 +417,8 @@ class MessageRepository(
         payloadBase64: String,
         signatureBase64: String,
         type: String,
-        timeStr: String
+        timeStr: String,
+        personaId: String? = null
     ): Boolean = withContext(Dispatchers.IO) {
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(context)
@@ -308,11 +428,8 @@ class MessageRepository(
             return@withContext false
         }
 
-        // STRICT SERVER AUTHORITY: Call atomic send_message_idempotent RPC with schema-cache resilience.
-        // No direct table insertion fallback is permitted because sequence allocation,
-        // membership enforcement, and idempotency checks are server-side invariants.
         try {
-            val primaryPayload = JSONObject().apply {
+            val payload = JSONObject().apply {
                 put("p_conversation_id", conversationId)
                 put("p_client_message_id", idempotencyKey)
                 put("p_payload", payloadBase64)
@@ -326,6 +443,7 @@ class MessageRepository(
                 }
                 put("p_type", type)
                 put("p_time_str", timeStr)
+                if (personaId != null) put("p_persona_id", personaId)
                 put("p_encryption_version", 2)
             }
 
@@ -334,13 +452,13 @@ class MessageRepository(
                 .header("apikey", anonKey)
                 .header("Authorization", "Bearer $accessToken")
                 .header("Content-Type", "application/json")
-                .post(primaryPayload.toString().toRequestBody(JSON_MEDIA))
+                .post(payload.toString().toRequestBody(JSON_MEDIA))
                 .build()
 
             var rpcResp = httpClient.newCall(rpcReq).execute()
             var isSuccess = rpcResp.isSuccessful
-            var errorBody = if (!isSuccess) rpcResp.body?.string() ?: "" else ""
             val initialCode = rpcResp.code
+            var errorBody = if (!isSuccess) rpcResp.body?.string() ?: "" else ""
             rpcResp.close()
 
             // If unauthorized 401, attempt single-flight token refresh and retry
@@ -366,46 +484,12 @@ class MessageRepository(
                 }
             }
 
-            // If schema cache mismatch, try non-prefixed parameter names
-            if (!isSuccess && (initialCode == 404 || errorBody.contains("schema cache") || errorBody.contains("Could not find the function") || errorBody.contains("PGRST202"))) {
-                Timber.w("send_message_idempotent schema mismatch, trying fallback payload without p_ prefix")
-                val activeToken = (if (context != null) SecurePrefsManager.getSupabaseAccessToken(context) else "").ifBlank { accessToken }
-                val fallbackPayload = JSONObject().apply {
-                    put("conversation_id", conversationId)
-                    put("client_message_id", idempotencyKey)
-                    put("payload", payloadBase64)
-                    put("signature", signatureBase64)
-                    if (isSelfConversation(recipientId)) {
-                        put("recipient_id", senderId)
-                    } else if (recipientId.isNotBlank() && !isAiConversation(recipientId)) {
-                        put("recipient_id", recipientId)
-                    } else {
-                        put("recipient_id", JSONObject.NULL)
-                    }
-                    put("type", type)
-                    put("time_str", timeStr)
-                    put("encryption_version", 2)
-                }
-                val fallbackReq = Request.Builder()
-                    .url("$baseUrl/rest/v1/rpc/send_message_idempotent")
-                    .header("apikey", anonKey)
-                    .header("Authorization", "Bearer $activeToken")
-                    .header("Content-Type", "application/json")
-                    .post(fallbackPayload.toString().toRequestBody(JSON_MEDIA))
-                    .build()
-
-                rpcResp = httpClient.newCall(fallbackReq).execute()
-                isSuccess = rpcResp.isSuccessful
-                if (!isSuccess) {
-                    errorBody = rpcResp.body?.string() ?: ""
-                    Timber.w("send_message_idempotent fallback RPC failed with HTTP ${rpcResp.code}: $errorBody")
-                }
-                rpcResp.close()
-            } else if (!isSuccess) {
-                Timber.w("send_message_idempotent RPC failed: $errorBody")
+            if (!isSuccess) {
+                Timber.e("send_message_idempotent failed (HTTP $initialCode): $errorBody")
+                return@withContext false
             }
 
-            isSuccess
+            true
         } catch (e: Exception) {
             Timber.e(e, "send_message_idempotent RPC network failure")
             false

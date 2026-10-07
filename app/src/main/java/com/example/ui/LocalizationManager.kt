@@ -241,7 +241,12 @@ data class AppStrings(
     val confirmAndActivate: String,
     val virtualNumberActivatedSuccess: String,
     val selectBirthDate: String,
-    val birthDateHint: String
+    val birthDateHint: String,
+    val searchUsers: String,
+    val searchChats: String,
+    val searchUnifiedMessages: String,
+    val noSearchResults: String,
+    val userNotFound: String
 )
 
 val EnglishStrings = AppStrings(
@@ -249,7 +254,7 @@ val EnglishStrings = AppStrings(
     savedMessages = "Saved Messages",
     savedMessagesDesc = "Store notes, save messages, and keep media here.",
     welcomeSavedMessages = "Welcome to Saved Messages!",
-    searchMessages = "Search messages...",
+    searchMessages = "Search",
     pinChat = "Pin Chat",
     unpinChat = "Unpin Chat",
     muteNotifications = "Mute Notifications",
@@ -465,7 +470,12 @@ val EnglishStrings = AppStrings(
     confirmAndActivate = "Confirm & Activate",
     virtualNumberActivatedSuccess = "HexShard ID successfully activated!",
     selectBirthDate = "Select Date of Birth",
-    birthDateHint = "e.g. 13 April 1998"
+    birthDateHint = "e.g. 13 April 1998",
+    searchUsers = "Users",
+    searchChats = "Chats",
+    searchUnifiedMessages = "Messages",
+    noSearchResults = "No results found",
+    userNotFound = "User not found. Enter an existing @username or HexShard ID."
 )
 
 val RussianStrings = AppStrings(
@@ -473,7 +483,7 @@ val RussianStrings = AppStrings(
     savedMessages = "Избранное",
     savedMessagesDesc = "Сохраняйте важные заметки, файлы и сообщения здесь.",
     welcomeSavedMessages = "Добро пожаловать в Избранное!",
-    searchMessages = "Поиск сообщений...",
+    searchMessages = "Поиск",
     pinChat = "Закрепить чат",
     unpinChat = "Открепить чат",
     muteNotifications = "Отключить уведомления",
@@ -689,7 +699,12 @@ val RussianStrings = AppStrings(
     confirmAndActivate = "Подтвердить и активировать",
     virtualNumberActivatedSuccess = "HexShard ID успешно активирован!",
     selectBirthDate = "Выберите дату рождения",
-    birthDateHint = "например, 13 апреля 1998"
+    birthDateHint = "например, 13 апреля 1998",
+    searchUsers = "Пользователи",
+    searchChats = "Чаты",
+    searchUnifiedMessages = "Сообщения",
+    noSearchResults = "Ничего не найдено",
+    userNotFound = "Пользователь не найден. Введите существующий @username или HexShard ID."
 )
 
 val LocalStrings = staticCompositionLocalOf { EnglishStrings }
