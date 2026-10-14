@@ -458,13 +458,13 @@ fun SettingsScreen(
                     HorizontalDivider()
 
                     Text(
-                        text = "AI Encrypted Backup",
+                        text = "Cloud E2EE Key Vault (Recovery Passphrase)",
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 14.sp,
                         color = MaterialTheme.colorScheme.primary
                     )
                     Text(
-                        text = "Passphrase-protected backup encrypted with PBKDF2 (100,000 rounds) + AES-256-GCM.",
+                        text = "Zero-Knowledge cloud envelope protected by your secret passphrase (PBKDF2 100k rounds + AES-256-GCM). Allows restoring chat encryption keys and history after device reset.",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -472,8 +472,8 @@ fun SettingsScreen(
                     OutlinedTextField(
                         value = backupPassphrase,
                         onValueChange = { backupPassphrase = it },
-                        label = { Text("Backup Passphrase") },
-                        placeholder = { Text("Enter private passphrase") },
+                        label = { Text("Recovery Passphrase") },
+                        placeholder = { Text("Enter secret recovery passphrase") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -482,9 +482,90 @@ fun SettingsScreen(
                         Text(
                             text = backupStatusMessage ?: "",
                             fontSize = 12.sp,
-                            color = if (backupStatusMessage?.contains("fail", ignoreCase = true) == true || backupStatusMessage?.contains("error", ignoreCase = true) == true) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                            color = if (backupStatusMessage?.contains("fail", ignoreCase = true) == true || backupStatusMessage?.contains("error", ignoreCase = true) == true) MaterialTheme.colorScheme.error else Color(0xFF03A062)
                         )
                     }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                if (backupPassphrase.isBlank()) {
+                                    backupStatusMessage = "Passphrase cannot be empty"
+                                    return@Button
+                                }
+                                isBackupLoading = true
+                                scope.launch {
+                                    try {
+                                        val res = com.example.crypto.CryptoBackupManager.createAndUploadBackup(
+                                            context = context,
+                                            accountId = accountId,
+                                            passphrase = backupPassphrase.toCharArray()
+                                        )
+                                        backupStatusMessage = if (res.isSuccess) {
+                                            "Cloud key envelope encrypted and saved to Supabase!"
+                                        } else {
+                                            "Backup failed: ${res.exceptionOrNull()?.message}"
+                                        }
+                                    } catch (e: Exception) {
+                                        backupStatusMessage = "Backup error: ${e.message}"
+                                    } finally {
+                                        isBackupLoading = false
+                                    }
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            enabled = !isBackupLoading && backupPassphrase.isNotBlank()
+                        ) {
+                            Text("Save Keys", fontSize = 12.sp)
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                if (backupPassphrase.isBlank()) {
+                                    backupStatusMessage = "Passphrase cannot be empty"
+                                    return@OutlinedButton
+                                }
+                                isBackupLoading = true
+                                scope.launch {
+                                    try {
+                                        val res = com.example.crypto.CryptoBackupManager.restoreFromBackup(
+                                            context = context,
+                                            accountId = accountId,
+                                            passphrase = backupPassphrase.toCharArray()
+                                        )
+                                        if (res.isSuccess) {
+                                            backupStatusMessage = "Keys restored successfully! Triggering sync..."
+                                            val db = com.example.data.database.AppDatabase.getDatabase(context)
+                                            val repo = com.example.data.database.ChatRepository(db.chatDao(), context)
+                                            repo.syncManager.triggerCatchUpSync()
+                                        } else {
+                                            backupStatusMessage = "Restore failed: ${res.exceptionOrNull()?.message}"
+                                        }
+                                    } catch (e: Exception) {
+                                        backupStatusMessage = "Restore error: ${e.message}"
+                                    } finally {
+                                        isBackupLoading = false
+                                    }
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            enabled = !isBackupLoading && backupPassphrase.isNotBlank()
+                        ) {
+                            Text("Restore Keys", fontSize = 12.sp)
+                        }
+                    }
+
+                    HorizontalDivider()
+
+                    Text(
+                        text = "Local File Archive (.hexbak)",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -521,7 +602,7 @@ fun SettingsScreen(
                             modifier = Modifier.weight(1f),
                             enabled = !isBackupLoading && backupPassphrase.isNotBlank()
                         ) {
-                            Text("Export", fontSize = 13.sp)
+                            Text("Export File", fontSize = 12.sp)
                         }
 
                         OutlinedButton(
@@ -555,7 +636,7 @@ fun SettingsScreen(
                             modifier = Modifier.weight(1f),
                             enabled = !isBackupLoading && backupPassphrase.isNotBlank()
                         ) {
-                            Text("Restore", fontSize = 13.sp)
+                            Text("Import File", fontSize = 12.sp)
                         }
                     }
                 }

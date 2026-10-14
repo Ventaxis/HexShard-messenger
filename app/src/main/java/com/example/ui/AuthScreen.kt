@@ -205,6 +205,11 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
     // General state
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var showKeyRecoveryDialog by remember { mutableStateOf(false) }
+    var recoveryPassphrase by remember { mutableStateOf("") }
+    var recoveryError by remember { mutableStateOf<String?>(null) }
+    var isRecoveringKeys by remember { mutableStateOf(false) }
+    var signedInAccountId by remember { mutableStateOf("") }
 
     // Auto-detect existing validated user session from SessionManager
     LaunchedEffect(Unit) {
@@ -375,8 +380,16 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
         scope.launch {
             when (val result = SupabaseAuthService.signIn(cleanUsername, passwordInput, context)) {
                 is SignInResult.Success -> {
-                    isLoading = false
-                    onAuthComplete()
+                    val hasCached = com.example.crypto.CryptoBackupManager.loadCachedKeysIfAvailable(context, result.accountId)
+                    val hasRemote = com.example.crypto.CryptoBackupManager.hasRemoteBackup(context)
+                    if (hasRemote && !hasCached) {
+                        signedInAccountId = result.accountId
+                        isLoading = false
+                        showKeyRecoveryDialog = true
+                    } else {
+                        isLoading = false
+                        onAuthComplete()
+                    }
                 }
                 is SignInResult.Error -> {
                     isLoading = false
@@ -1386,5 +1399,91 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
 
             Spacer(modifier = Modifier.height(24.dp))
         }
+    }
+
+    if (showKeyRecoveryDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showKeyRecoveryDialog = false
+                onAuthComplete()
+            },
+            title = {
+                Text(
+                    if (isRussian) "Восстановление ключей E2EE" else "E2EE Key Recovery",
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        if (isRussian)
+                            "Обнаружена резервная копия ключей в облаке. Введите ваш секретный пароль восстановления, чтобы расшифровать историю сообщений."
+                        else
+                            "A cloud backup of your encryption keys was found. Enter your recovery passphrase to restore your chat history.",
+                        fontSize = 13.sp,
+                        color = Color(0xFFA0A5B5)
+                    )
+                    OutlinedTextField(
+                        value = recoveryPassphrase,
+                        onValueChange = {
+                            recoveryPassphrase = it
+                            recoveryError = null
+                        },
+                        label = { Text(if (isRussian) "Парольная фраза" else "Recovery Passphrase") },
+                        singleLine = true,
+                        colors = textFieldColors,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (recoveryError != null) {
+                        Text(recoveryError ?: "", color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (recoveryPassphrase.isBlank()) {
+                            recoveryError = if (isRussian) "Введите парольную фразу" else "Enter passphrase"
+                            return@Button
+                        }
+                        isRecoveringKeys = true
+                        scope.launch {
+                            val res = com.example.crypto.CryptoBackupManager.restoreFromBackup(
+                                context,
+                                signedInAccountId,
+                                recoveryPassphrase.toCharArray()
+                            )
+                            isRecoveringKeys = false
+                            if (res.isSuccess) {
+                                showKeyRecoveryDialog = false
+                                onAuthComplete()
+                            } else {
+                                recoveryError = if (isRussian) "Неверный пароль восстановления" else "Invalid recovery passphrase"
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF03A062)),
+                    enabled = !isRecoveringKeys && recoveryPassphrase.isNotBlank()
+                ) {
+                    if (isRecoveringKeys) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
+                    } else {
+                        Text(if (isRussian) "Восстановить" else "Restore")
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showKeyRecoveryDialog = false
+                        onAuthComplete()
+                    }
+                ) {
+                    Text(if (isRussian) "Пропустить" else "Skip", color = Color(0xFFA0A5B5))
+                }
+            },
+            containerColor = Color(0xFF161820)
+        )
     }
 }

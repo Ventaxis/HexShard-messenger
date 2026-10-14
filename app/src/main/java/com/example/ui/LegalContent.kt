@@ -44,7 +44,7 @@ object LegalContent {
                 "• Cryptographic Identity: When your account is provisioned, public encryption keys (ECDH secp256r1) and digital signing keys (ECDSA) are published to the secure directory. Private cryptographic keys never leave your device's Android KeyStore.",
                 "• End-to-End Encrypted Message Payloads: Peer-to-peer 1-on-1 messages, encrypted voice notes, and media attachments are encrypted on your device prior to transit. HexShard relay servers store encrypted ciphertext blobs solely to facilitate delivery and synchronization.",
                 "• Message Metadata: To deliver messages reliably, our servers process transit metadata including sender UID, recipient UID, deterministic conversation ID, client-generated message ID, timestamps, message status (sent, delivered, read), and delivery confirmations.",
-                "• Push Notification Tokens: Firebase Cloud Messaging (FCM) device registration tokens are associated with your device installation to deliver incoming message wake-ups. Push payloads do not include plaintext message content.",
+                "• Realtime Notifications: Encrypted message synchronization and notifications are streamed directly via secure Supabase Realtime WebSocket connections without third-party push networks.",
                 "• Media & Voice Attachments: Photos, videos, and voice recordings are encrypted with symmetric keys derived from peer key exchanges before upload. Cloud storage only holds encrypted ciphertext blobs."
             )
         ),
@@ -61,7 +61,7 @@ object LegalContent {
                 "• Supabase / PostgreSQL Authentication: Manages credential authentication, directory lookups, username reservations, and account security without reliance on telecom carriers.",
                 "• Telegram Bot Verification: Optional 2FA security gateway allowing account protection and verification codes via the official @HexShardBot.",
                 "• Supabase Storage: Stores public directory records, username reservations, encrypted message queues, and encrypted media attachments.",
-                "• Firebase Cloud Messaging (FCM): Delivers background data-only wake-up notifications to wake the application on incoming traffic.",
+                "• Supabase Realtime: Delivers instant message streaming and presence over secure WebSockets, operating entirely without Google Services.",
                 "• HexShard AI: Powers the optional assistant feature via secure server-side Edge Functions. Standard peer-to-peer encrypted user chats are NEVER transmitted to or processed by AI."
             )
         ),
@@ -119,7 +119,7 @@ object LegalContent {
                 "• Криптографические ключи: При создании аккаунта генерируются открытые ключи шифрования (ECDH secp256r1) и электронной подписи (ECDSA), публикуемые в каталоге. Закрытые (приватные) ключи никогда не покидают Android KeyStore вашего устройства.",
                 "• Сквозное шифрование (E2EE) сообщений: Личные сообщения, голосовые заметки и медиафайлы шифруются на вашем устройстве до отправки в сеть. Серверы хранят исключительно зашифрованный шифротекст для доставки и синхронизации.",
                 "• Метаданные сообщений: Для надежной доставки сервер обрабатывает служебные метаданные: UID отправителя и получателя, детерминированный ID диалога, клиентский ID сообщения, метки времени и статусы доставки (отправлено, доставлено, прочитано).",
-                "• Push-уведомления (FCM): Регистрационные токены устройств Firebase Cloud Messaging используются для фонового пробуждения приложения. Содержимое сообщений в push-уведомления не передается.",
+                "• Уведомления в реальном времени: Синхронизация зашифрованных сообщений и уведомления передаются напрямую через защищенный WebSocket-канал Supabase Realtime без использования сторонних push-сервисов.",
                 "• Медиа и голосовые сообщения: Фотографии, видео и аудиозаписи шифруются симметричными ключами перед загрузкой в облачное хранилище."
             )
         ),
@@ -136,7 +136,7 @@ object LegalContent {
                 "• Supabase / Сервер аутентификации: Управление учетными записями, резервирование логинов и безопасность профилей без зависимости от операторов мобильной связи.",
                 "• Верификация Telegram: Шлюз двухфакторной защиты 2FA для подтверждения доступа через официального бота @HexShardBot.",
                 "• Supabase Storage: Хранение публичного каталога пользователей, очередь зашифрованных сообщений и зашифрованные медиавложения.",
-                "• Firebase Cloud Messaging (FCM): Отправка скрытых сигналов пробуждения при входящих сообщениях.",
+                "• Supabase Realtime: Мгновенная доставка сообщений и статусов присутствия через WebSocket без зависимости от Google Services.",
                 "• HexShard AI: Обеспечивает работу опционального ассистента HexShard AI через защищенные серверные функции. Личные E2EE чаты между пользователями НИКОГДА не передаются и не анализируются сторонними сервисами."
             )
         ),

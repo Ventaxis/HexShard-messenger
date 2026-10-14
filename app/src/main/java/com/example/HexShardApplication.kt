@@ -6,7 +6,6 @@ import android.widget.Toast
 import timber.log.Timber
 import com.example.di.AppComponent
 import com.example.di.DaggerAppComponent
-import com.google.firebase.FirebaseApp
 
 class HexShardApplication : Application() {
     lateinit var appComponent: AppComponent
@@ -23,7 +22,6 @@ class HexShardApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
-        FirebaseApp.initializeApp(this)
 
         if (BuildConfig.DEBUG) {
             Timber.plant(Timber.DebugTree())
@@ -69,7 +67,7 @@ private class ProductionTree : Timber.Tree() {
         
         // Only log errors and warnings in production
         if (priority >= Log.WARN) {
-            // FirebaseCrashlytics.getInstance().log(cleanMessage)
+            // Production warning/error log
         }
     }
 }

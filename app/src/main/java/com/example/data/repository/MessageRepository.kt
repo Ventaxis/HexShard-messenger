@@ -280,14 +280,98 @@ class MessageRepository(
             }
 
             // Cryptographic envelope
-            val encryptedPayload = cryptoRepository.encryptOutboundMessage(
-                currentUserId = currentUserId,
-                recipientId = if (isSelfChat) currentUserId else recipientId,
-                conversationId = conversationId,
-                idempotencyKey = idempotencyKey,
-                plainText = payloadToEncrypt,
-                isSelfOrAi = isSelfChat || isAiChat
-            )
+            val encryptedPayload = try {
+                cryptoRepository.encryptOutboundMessage(
+                    currentUserId = currentUserId,
+                    recipientId = if (isSelfChat) currentUserId else recipientId,
+                    conversationId = conversationId,
+                    idempotencyKey = idempotencyKey,
+                    plainText = payloadToEncrypt,
+                    isSelfOrAi = isSelfChat || isAiChat
+                )
+            } catch (peerKeyEx: PeerKeyUnavailableException) {
+                // Requirement 6: Durable Outbox entry with status WAITING_FOR_PEER_KEY
+                // Plaintext is kept local in SQLCipher vault; no encryption or sending occurs until peer key is verified
+                val message = MessageEntity(
+                    accountId = currentUserId,
+                    chatId = chatId,
+                    sender = if (isMe) currentUserId else sender,
+                    text = text,
+                    time = timeStr,
+                    timestamp = System.currentTimeMillis(),
+                    isMe = isMe,
+                    isAttachment = isAttachment,
+                    type = type,
+                    audioUrl = audioUrl,
+                    duration = duration,
+                    status = "waiting_key",
+                    iv = "",
+                    encryptionVersion = 2,
+                    idempotencyKey = idempotencyKey,
+                    conversationId = conversationId,
+                    serverMessageId = idempotencyKey,
+                    signatureValid = true,
+                    personaId = resolvedPersona
+                )
+                val messageId = chatDao.insertMessage(message)
+                conversationRepository.updateChatPreview(chatId, text, timeStr, message.timestamp)
+
+                if (isMe && idempotencyKey.isNotEmpty()) {
+                    val outboxEntry = OutboxEntity(
+                        accountId = currentUserId,
+                        localMessageId = messageId.toInt(),
+                        chatId = chatId,
+                        conversationId = conversationId,
+                        idempotencyKey = idempotencyKey,
+                        senderId = currentUserId,
+                        recipientId = recipientId,
+                        payload = "", // Plaintext withheld until peer key is retrieved & verified
+                        signature = "",
+                        type = type,
+                        timeStr = timeStr,
+                        attempts = 0,
+                        status = "WAITING_FOR_PEER_KEY",
+                        createdAt = System.currentTimeMillis()
+                    )
+                    val outboxRowId = chatDao.insertOutbox(outboxEntry)
+
+                    backgroundScope.launch {
+                        try {
+                            val pubKey = cryptoRepository.userRepository.getOrFetchUserPublicKey(recipientId)
+                            if (pubKey != null) {
+                                val enc = cryptoRepository.encryptOutboundMessage(
+                                    currentUserId = currentUserId,
+                                    recipientId = recipientId,
+                                    conversationId = conversationId,
+                                    idempotencyKey = idempotencyKey,
+                                    plainText = payloadToEncrypt,
+                                    isSelfOrAi = false
+                                )
+                                chatDao.updateOutboxPayload(outboxRowId, enc.base64Payload, enc.base64Signature, currentUserId)
+                                chatDao.updateMessageStatus(messageId.toInt(), "sending", currentUserId)
+                                val sent = sendRemoteMessage(
+                                    idempotencyKey = idempotencyKey,
+                                    conversationId = conversationId,
+                                    senderId = currentUserId,
+                                    recipientId = recipientId,
+                                    payloadBase64 = enc.base64Payload,
+                                    signatureBase64 = enc.base64Signature,
+                                    type = type,
+                                    timeStr = timeStr,
+                                    personaId = resolvedPersona
+                                )
+                                if (sent) {
+                                    chatDao.deleteOutboxByIdempotencyKey(idempotencyKey, currentUserId)
+                                    updateMessageStatus(messageId.toInt(), "sent", currentUserId)
+                                }
+                            }
+                        } catch (resEx: Exception) {
+                            Timber.d("Peer key deferred resolution: ${resEx.message}")
+                        }
+                    }
+                }
+                return@withContext messageId
+            }
 
             val token = context?.let { SecurePrefsManager.getSupabaseAccessToken(it) }?.takeIf { it.isNotBlank() }
             val isRemoteAuthed = currentUserId.isNotBlank() && token != null

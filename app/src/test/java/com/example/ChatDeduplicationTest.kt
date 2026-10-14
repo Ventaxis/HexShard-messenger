@@ -65,6 +65,13 @@ class FakeChatDao : ChatDao {
     override suspend fun resetStaleOnlineStatuses() {}
     override suspend fun searchMessages(query: String, accountId: String): List<MessageEntity> = emptyList()
     override suspend fun searchChats(query: String, accountId: String): List<ChatEntity> = emptyList()
+    override suspend fun getMessagesForChatForAccountList(chatId: Int, accountId: String): List<MessageEntity> = emptyList()
+    override suspend fun getReadyPendingOutboxEntries(accountId: String): List<OutboxEntity> = emptyList()
+    override suspend fun getMaxSequenceForConversation(conversationId: String, accountId: String): Long? = null
+    override suspend fun updateMessageServerInfoByIdempotencyKey(idempotencyKey: String, serverId: String, sequence: Long, status: String, accountId: String) {}
+    override suspend fun getWaitingKeyOutboxEntries(accountId: String): List<OutboxEntity> = emptyList()
+    override suspend fun updateOutboxPayload(id: Long, payload: String, signature: String, accountId: String) {}
+    override suspend fun updateOutboxStatus(id: Long, status: String, accountId: String) {}
 }
 
 class ChatDeduplicationTest {
@@ -195,11 +202,11 @@ class ChatDeduplicationTest {
         assertEquals("self_user1", selfId)
 
         val hexAi = repository.computeConversationId("user1", "ai_hexagon")
-        assertEquals("ai_hexagon_user1", hexAi)
+        assertEquals("ai_user1", hexAi)
 
-        // All AI assistants map to the canonical unified Hexagon AI conversation ID to prevent duplication
+        // All AI assistants map to the canonical unified AI conversation ID (ai_user1) to prevent duplication
         val ventAi = repository.computeConversationId("user1", "ai_ventaxis")
-        assertEquals("ai_hexagon_user1", ventAi)
+        assertEquals("ai_user1", ventAi)
 
         val direct1 = repository.computeConversationId("userA", "userB")
         val direct2 = repository.computeConversationId("userB", "userA")

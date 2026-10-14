@@ -667,10 +667,15 @@ class ChatViewModel @Inject constructor(
                     )
                 } ?: geminiService.generateFallbackResult(userMsg, history, modelOption)
 
+                val originalMsg = repository.getMessageById(originalMsgId)
+                val userClientId = originalMsg?.idempotencyKey?.ifBlank { originalMsgId.toString() } ?: originalMsgId.toString()
+                val userOriginalText = originalMsg?.text ?: userMsg
+
                 when (result) {
                     is AiResult.Success -> {
                         _aiErrorState.value = null
                         val replyTime = getFormattedTime()
+                        val replyKey = generateIdempotencyKey()
                         repository.sendMessage(
                             chatId = chatId,
                             sender = modelOption.displayName,
@@ -680,8 +685,18 @@ class ChatViewModel @Inject constructor(
                             timeStr = replyTime,
                             status = "delivered",
                             recipientId = "ai_hexagon",
-                            idempotencyKey = generateIdempotencyKey(),
+                            idempotencyKey = replyKey,
                             personaId = activePersonaId
+                        )
+                        persistAiTranscript(
+                            userClientId = userClientId,
+                            userText = userOriginalText,
+                            replyClientId = replyKey,
+                            replyText = result.reply,
+                            personaId = activePersonaId,
+                            timeStr = replyTime,
+                            localMessageId = originalMsgId,
+                            chatId = chatId
                         )
                     }
                     is AiResult.RateLimited -> {
@@ -692,6 +707,7 @@ class ChatViewModel @Inject constructor(
                         _aiErrorState.value = null
                         val replyTime = getFormattedTime()
                         val fallback = geminiService.generateFallbackReply(userMsg, history, modelOption)
+                        val replyKey = generateIdempotencyKey()
                         repository.sendMessage(
                             chatId = chatId,
                             sender = modelOption.displayName,
@@ -701,8 +717,18 @@ class ChatViewModel @Inject constructor(
                             timeStr = replyTime,
                             status = "delivered",
                             recipientId = "ai_hexagon",
-                            idempotencyKey = generateIdempotencyKey(),
+                            idempotencyKey = replyKey,
                             personaId = activePersonaId
+                        )
+                        persistAiTranscript(
+                            userClientId = userClientId,
+                            userText = userOriginalText,
+                            replyClientId = replyKey,
+                            replyText = fallback,
+                            personaId = activePersonaId,
+                            timeStr = replyTime,
+                            localMessageId = originalMsgId,
+                            chatId = chatId
                         )
                     }
                 }
@@ -710,6 +736,7 @@ class ChatViewModel @Inject constructor(
                 timber.log.Timber.e(e, "Error during handleAiReply")
                 val replyTime = getFormattedTime()
                 val fallback = geminiService.generateFallbackReply(userMsg, emptyList(), modelOption)
+                val replyKey = generateIdempotencyKey()
                 repository.sendMessage(
                     chatId = chatId,
                     sender = modelOption.displayName,
@@ -719,12 +746,76 @@ class ChatViewModel @Inject constructor(
                     timeStr = replyTime,
                     status = "delivered",
                     recipientId = "ai_hexagon",
-                    idempotencyKey = generateIdempotencyKey(),
+                    idempotencyKey = replyKey,
                     personaId = activePersonaId
                 )
+                try {
+                    persistAiTranscript(
+                        userClientId = originalMsgId.toString(),
+                        userText = userMsg,
+                        replyClientId = replyKey,
+                        replyText = fallback,
+                        personaId = activePersonaId,
+                        timeStr = replyTime,
+                        localMessageId = originalMsgId,
+                        chatId = chatId
+                    )
+                } catch (_: Exception) {}
             } finally {
                 _typingChatId.value = null
             }
+        }
+    }
+
+    private suspend fun persistAiTranscript(
+        userClientId: String,
+        userText: String,
+        replyClientId: String,
+        replyText: String,
+        personaId: String,
+        timeStr: String,
+        localMessageId: Int,
+        chatId: Int
+    ) {
+        val currentUserId = repository.getCurrentUserId()
+        if (currentUserId.isBlank()) return
+        val aiConvId = "ai_$currentUserId"
+
+        val sentOk = repository.sendAiTranscript(
+            conversationId = aiConvId,
+            userClientId = userClientId,
+            userText = userText,
+            replyClientId = replyClientId,
+            replyText = replyText,
+            personaId = personaId,
+            timeStr = timeStr
+        )
+
+        if (!sentOk) {
+            val payloadObj = org.json.JSONObject().apply {
+                put("userClientId", userClientId)
+                put("userText", userText)
+                put("replyClientId", replyClientId)
+                put("replyText", replyText)
+                put("personaId", personaId)
+            }
+            val outboxEntry = com.example.data.database.OutboxEntity(
+                accountId = currentUserId,
+                localMessageId = localMessageId,
+                chatId = chatId,
+                conversationId = aiConvId,
+                idempotencyKey = replyClientId,
+                senderId = currentUserId,
+                recipientId = "ai_$personaId",
+                payload = payloadObj.toString(),
+                signature = "",
+                type = "ai_transcript",
+                timeStr = timeStr,
+                attempts = 0,
+                status = "pending",
+                createdAt = System.currentTimeMillis()
+            )
+            repository.insertOutbox(outboxEntry)
         }
     }
 

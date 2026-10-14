@@ -5,6 +5,7 @@ import com.example.data.SecurePrefsManager
 import com.example.data.database.ChatDao
 import com.example.data.database.ChatEntity
 import com.example.data.database.MessageEntity
+import com.example.data.database.isSavedMessages
 import com.example.network.supabase.RealtimeConnectionState
 import com.example.network.supabase.SupabaseConfig
 import kotlinx.coroutines.CoroutineScope
@@ -164,52 +165,92 @@ class SyncManager(
             ?: return@withContext
         if (anonKey.isBlank()) return@withContext
 
-        var currentCursor = SecurePrefsManager.getSyncCursor(ctx, currentUserId)
-        val filter = "or=(recipient_id.eq.$currentUserId,sender_id.eq.$currentUserId)"
+        // 1. Authoritative per-conversation sequence sync (prevents cross-conversation cursor starvation)
+        val userChats = try {
+            chatDao.getAllChatsListForAccount(currentUserId)
+        } catch (_: Exception) {
+            emptyList()
+        }
 
-        // Pagination loop to fetch all messages until fewer than 50 are returned
-        while (true) {
-            val url = if (currentCursor > 0L) {
-                "$baseUrl/rest/v1/messages?$filter&sequence=gt.$currentCursor&order=sequence.asc&limit=50"
-            } else {
-                "$baseUrl/rest/v1/messages?$filter&order=sequence.asc,created_at.asc&limit=50"
+        for (chat in userChats) {
+            val convId = chat.conversationId.ifBlank {
+                if (chat.isSavedMessages) "self_$currentUserId"
+                else conversationRepository.computeConversationId(currentUserId, chat.recipientId)
             }
+            if (convId.isBlank()) continue
 
+            var maxSeq = chatDao.getMaxSequenceForConversation(convId, currentUserId) ?: 0L
+
+            while (true) {
+                val url = "$baseUrl/rest/v1/messages?conversation_id=eq.$convId&sequence=gt.$maxSeq&order=sequence.asc&limit=50"
+                val req = Request.Builder()
+                    .url(url)
+                    .header("apikey", anonKey)
+                    .header("Authorization", "Bearer $token")
+                    .get()
+                    .build()
+
+                val resp = try { httpClient.newCall(req).execute() } catch (_: Exception) { null } ?: break
+                val body = resp.body?.string().orEmpty()
+                val ok = resp.isSuccessful
+                resp.close()
+
+                if (!ok || body.isBlank() || body == "[]") break
+
+                val arr = try { JSONArray(body) } catch (_: Exception) { JSONArray() }
+                if (arr.length() == 0) break
+
+                var highestInBatch = maxSeq
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    val s = obj.optLong("sequence", 0L)
+                    processSingleMessageRecord(obj, currentUserId)
+                    if (s > highestInBatch) highestInBatch = s
+                }
+
+                if (highestInBatch > maxSeq) {
+                    maxSeq = highestInBatch
+                }
+
+                if (arr.length() < 50) break
+            }
+        }
+
+        // 2. Global stream catch-up using global_sequence for new conversations or missed events
+        var globalCursor = SecurePrefsManager.getSyncCursor(ctx, currentUserId)
+        val filter = "or=(recipient_id.eq.$currentUserId,sender_id.eq.$currentUserId)"
+        val globalUrl = if (globalCursor > 0L) {
+            "$baseUrl/rest/v1/messages?$filter&global_sequence=gt.$globalCursor&order=global_sequence.asc&limit=50"
+        } else {
+            "$baseUrl/rest/v1/messages?$filter&order=global_sequence.asc&limit=50"
+        }
+
+        try {
             val req = Request.Builder()
-                .url(url)
+                .url(globalUrl)
                 .header("apikey", anonKey)
                 .header("Authorization", "Bearer $token")
                 .get()
                 .build()
 
-            val resp = try {
-                httpClient.newCall(req).execute()
-            } catch (e: Exception) {
-                null
-            } ?: break
-
-            val body = resp.body?.string() ?: "[]"
-            if (!resp.isSuccessful) break
-
-            val arr = JSONArray(body)
-            if (arr.length() == 0) break
-
-            var batchHighestSeq = currentCursor
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                val seq = obj.optLong("sequence", 0L)
-                processSingleMessageRecord(obj, currentUserId)
-                if (seq > batchHighestSeq) {
-                    batchHighestSeq = seq
+            val resp = httpClient.newCall(req).execute()
+            if (resp.isSuccessful) {
+                val body = resp.body?.string().orEmpty()
+                val arr = JSONArray(body)
+                var maxGlob = globalCursor
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    val gSeq = obj.optLong("global_sequence", 0L)
+                    processSingleMessageRecord(obj, currentUserId)
+                    if (gSeq > maxGlob) maxGlob = gSeq
+                }
+                if (maxGlob > globalCursor) {
+                    SecurePrefsManager.setSyncCursor(ctx, currentUserId, maxGlob)
                 }
             }
-
-            if (batchHighestSeq > currentCursor) {
-                currentCursor = batchHighestSeq
-                SecurePrefsManager.setSyncCursor(ctx, currentUserId, currentCursor)
-            }
-
-            if (arr.length() < 50) break
+            resp.close()
+        } catch (_: Exception) {
+            // Graceful fallback if global_sequence is temporarily unavailable
         }
     }
 
@@ -225,10 +266,6 @@ class SyncManager(
         val sequence = obj.optLong("sequence", 0L)
         if (sender.isBlank()) return@withContext
 
-        val isSelfMessage = (sender == currentUserId && (recipient == currentUserId || recipient == "self" || recipient.isBlank()))
-        val isOutboundFromAnotherDevice = (sender == currentUserId && recipient != currentUserId && recipient.isNotBlank())
-        val isMe = sender == currentUserId
-
         val payloadString = obj.optString("payload")
         if (payloadString.isBlank()) return@withContext
 
@@ -241,55 +278,80 @@ class SyncManager(
         val type = obj.optString("type", "text")
         val timeStr = obj.optString("time_str", "")
         val idempotencyKey = obj.optString("client_message_id", obj.optString("idempotency_key", docId)).ifBlank { docId }
+        val personaId = obj.optString("persona_id").takeIf { it.isNotBlank() && it != "null" }
+
+        val isSelfMessage = (sender == currentUserId && (recipient == currentUserId || recipient == "self" || recipient.isBlank()))
+        val isOutboundFromAnotherDevice = (sender == currentUserId && recipient != currentUserId && recipient.isNotBlank())
+        val isAiConversation = recipient.startsWith("ai_") || recipient == "ai_assistant" || personaId != null || obj.optString("conversation_id").startsWith("ai_")
 
         val peerId = when {
             isSelfMessage -> "self"
+            isAiConversation -> "ai_assistant"
             isOutboundFromAnotherDevice -> recipient
             else -> sender
         }
 
         val conversationId = obj.optString("conversation_id").ifBlank {
-            if (isSelfMessage) "self_$currentUserId" else conversationRepository.computeConversationId(currentUserId, peerId)
+            when {
+                isSelfMessage -> "self_$currentUserId"
+                isAiConversation -> "ai_$currentUserId"
+                else -> conversationRepository.computeConversationId(currentUserId, peerId)
+            }
         }
 
         // Fast-path duplicate check
         if (chatDao.getMessageByIdempotencyKey(idempotencyKey, currentUserId) != null) return@withContext
         if (chatDao.getMessageByServerId(docId, currentUserId) != null) return@withContext
 
-        val signatureStr = obj.optString("signature").takeIf { it.isNotBlank() }
-
-        // Decrypt and verify message using CryptoRepository outside the database mutex
-        val decryptedResult = cryptoRepository.decryptInboundMessage(
-            senderId = if (isSelfMessage) currentUserId else sender,
-            recipientId = currentUserId,
-            conversationId = conversationId,
-            idempotencyKey = idempotencyKey,
-            base64Payload = payloadString,
-            base64Signature = signatureStr
-        )
-
-        val isDecryptionError = decryptedResult.plainText.startsWith("[E2EE Error") || 
-                               decryptedResult.plainText.startsWith("[Decryption Error")
-
-        var resolvedText = if (isDecryptionError) "[Encrypted message - decryption failed]" else decryptedResult.plainText
+        var isMe = sender == currentUserId
+        var resolvedSender = sender
+        var resolvedText = payloadString
         var resolvedAudioUrl: String? = null
         var resolvedDuration: Int? = null
         var resolvedType = type
+        var signatureValid = true
+        var isDecryptionError = false
 
-        if (!isDecryptionError && decryptedResult.plainText.startsWith("{") && decryptedResult.plainText.endsWith("}")) {
-            try {
-                val json = JSONObject(decryptedResult.plainText)
-                if (json.has("audioUrl") || json.has("type")) {
-                    resolvedText = json.optString("text", resolvedText)
-                    resolvedAudioUrl = json.optString("audioUrl").takeIf { it.isNotBlank() }
-                    if (json.has("duration")) resolvedDuration = json.optInt("duration")
-                    resolvedType = json.optString("type", type)
-                }
-            } catch (_: Exception) {}
+        if (isAiConversation) {
+            if (recipient.startsWith("ai_") || recipient == "ai_assistant") {
+                isMe = true
+                resolvedSender = "me"
+            } else {
+                isMe = false
+                resolvedSender = if (personaId?.lowercase() == "ventaxis") "Ventaxis AI" else "Hexagon AI"
+            }
+        } else {
+            // E2EE message decryption
+            val signatureStr = obj.optString("signature").takeIf { it.isNotBlank() }
+            val decryptedResult = cryptoRepository.decryptInboundMessage(
+                senderId = if (isSelfMessage) currentUserId else sender,
+                recipientId = currentUserId,
+                conversationId = conversationId,
+                idempotencyKey = idempotencyKey,
+                base64Payload = payloadString,
+                base64Signature = signatureStr
+            )
+
+            isDecryptionError = decryptedResult.plainText.startsWith("[E2EE Error") ||
+                                decryptedResult.plainText.startsWith("[Decryption Error")
+            resolvedText = if (isDecryptionError) "[Encrypted message - decryption failed]" else decryptedResult.plainText
+            signatureValid = !isDecryptionError && decryptedResult.isSignatureValid
+
+            if (!isDecryptionError && decryptedResult.plainText.startsWith("{") && decryptedResult.plainText.endsWith("}")) {
+                try {
+                    val json = JSONObject(decryptedResult.plainText)
+                    if (json.has("audioUrl") || json.has("type")) {
+                        resolvedText = json.optString("text", resolvedText)
+                        resolvedAudioUrl = json.optString("audioUrl").takeIf { it.isNotBlank() }
+                        if (json.has("duration")) resolvedDuration = json.optInt("duration")
+                        resolvedType = json.optString("type", type)
+                    }
+                } catch (_: Exception) {}
+            }
         }
 
         val messageStatus = when {
-            isDecryptionError || !decryptedResult.isSignatureValid -> "integrity_error"
+            isDecryptionError || !signatureValid -> "integrity_error"
             isMe -> "sent"
             else -> "delivered"
         }
@@ -299,15 +361,15 @@ class SyncManager(
             if (chatDao.getMessageByIdempotencyKey(idempotencyKey, currentUserId) != null) return@withContext
             if (chatDao.getMessageByServerId(docId, currentUserId) != null) return@withContext
 
-            var chat = if (isSelfMessage) {
-                chatDao.getSavedMessagesChat(currentUserId)
-            } else {
-                chatDao.getChatByConversationId(conversationId, currentUserId) ?: chatDao.getChatByRecipientId(peerId, currentUserId)
+            var chat = when {
+                isSelfMessage -> chatDao.getSavedMessagesChat(currentUserId)
+                isAiConversation -> chatDao.getAiAssistantChat(currentUserId)
+                else -> chatDao.getChatByConversationId(conversationId, currentUserId) ?: chatDao.getChatByRecipientId(peerId, currentUserId)
             }
 
             if (chat == null) {
-                val newChat = if (isSelfMessage) {
-                    ChatEntity(
+                val newChat = when {
+                    isSelfMessage -> ChatEntity(
                         accountId = currentUserId,
                         name = "Saved Messages",
                         ava = "🔖",
@@ -318,8 +380,18 @@ class SyncManager(
                         conversationId = "self_$currentUserId",
                         conversationType = com.example.data.ConversationType.SAVED_MESSAGES.name
                     )
-                } else {
-                    ChatEntity(
+                    isAiConversation -> ChatEntity(
+                        accountId = currentUserId,
+                        name = "HexShard AI",
+                        ava = "HX",
+                        status = "online",
+                        preview = resolvedText,
+                        time = timeStr,
+                        recipientId = "ai_assistant",
+                        conversationId = "ai_$currentUserId",
+                        conversationType = com.example.data.ConversationType.AI_ASSISTANT.name
+                    )
+                    else -> ChatEntity(
                         accountId = currentUserId,
                         name = peerId,
                         ava = peerId.take(2).uppercase(),
@@ -339,7 +411,7 @@ class SyncManager(
             val msg = MessageEntity(
                 accountId = currentUserId,
                 chatId = resolvedChatId,
-                sender = sender,
+                sender = if (isMe) "me" else resolvedSender,
                 text = resolvedText,
                 time = timeStr,
                 timestamp = System.currentTimeMillis(),
@@ -352,8 +424,10 @@ class SyncManager(
                 idempotencyKey = idempotencyKey,
                 conversationId = conversationId,
                 serverMessageId = docId,
-                signatureValid = !isDecryptionError && decryptedResult.isSignatureValid,
-                encryptionVersion = 2
+                signatureValid = signatureValid,
+                encryptionVersion = 2,
+                personaId = personaId,
+                serverSequence = sequence
             )
             val rowId = chatDao.insertMessageIfNotExists(msg)
             if (rowId > 0) {
@@ -364,7 +438,7 @@ class SyncManager(
                     else -> if (isDecryptionError) "⚠️ Corrupted message" else resolvedText
                 }
                 chatDao.updateChatPreview(resolvedChatId, previewText, timeStr, System.currentTimeMillis(), currentUserId)
-                if (token.isNotBlank() && !isMe && !isDecryptionError && decryptedResult.isSignatureValid) {
+                if (token.isNotBlank() && !isMe && !isDecryptionError && signatureValid && !isAiConversation) {
                     markDeliveredOnRemote(docId, baseUrl, anonKey, token)
                 }
             }
@@ -429,9 +503,46 @@ class SyncManager(
         }
     }
 
+    private suspend fun resolveWaitingKeyOutboxEntries(currentUserId: String) = withContext(Dispatchers.IO) {
+        val waiting = try {
+            chatDao.getWaitingKeyOutboxEntries(currentUserId)
+        } catch (_: Exception) {
+            emptyList()
+        }
+        if (waiting.isEmpty()) return@withContext
+
+        for (entry in waiting) {
+            try {
+                val pubKey = cryptoRepository.userRepository.getOrFetchUserPublicKey(entry.recipientId)
+                if (pubKey != null) {
+                    val localMsg = chatDao.getMessageByIdempotencyKey(entry.idempotencyKey, currentUserId)
+                    if (localMsg != null && localMsg.text.isNotBlank()) {
+                        val enc = cryptoRepository.encryptOutboundMessage(
+                            currentUserId = currentUserId,
+                            recipientId = entry.recipientId,
+                            conversationId = entry.conversationId,
+                            idempotencyKey = entry.idempotencyKey,
+                            plainText = localMsg.text,
+                            isSelfOrAi = false
+                        )
+                        chatDao.updateOutboxPayload(entry.id, enc.base64Payload, enc.base64Signature, currentUserId)
+                        chatDao.updateMessageStatus(localMsg.id, "sending", currentUserId)
+                        Timber.i("Resolved peer key for waiting outbox entry ${entry.idempotencyKey}")
+                    }
+                }
+            } catch (e: Exception) {
+                Timber.d("Waiting peer key resolution check: ${e.message}")
+            }
+        }
+    }
+
     private suspend fun flushOutbox(currentUserId: String) = withContext(Dispatchers.IO) {
+        // 1. Resolve any outbox entries waiting for recipient's public key
+        resolveWaitingKeyOutboxEntries(currentUserId)
+
+        // 2. Fetch pending entries ready for delivery (excluding unencrypted WAITING_FOR_PEER_KEY)
         val pendingEntries = try {
-            chatDao.getPendingOutboxEntries(currentUserId)
+            chatDao.getReadyPendingOutboxEntries(currentUserId)
         } catch (e: Exception) {
             emptyList()
         }
@@ -439,7 +550,7 @@ class SyncManager(
 
         val now = System.currentTimeMillis()
         for (entry in pendingEntries) {
-            if (entry.status == "failed") continue
+            if (entry.status == "failed" || entry.status == "WAITING_FOR_PEER_KEY") continue
 
             if (entry.attempts >= 5) {
                 chatDao.updateOutboxAttempt(entry.id, "failed", now, "Max retry attempts reached", currentUserId)
@@ -454,17 +565,50 @@ class SyncManager(
             }
 
             chatDao.updateOutboxAttempt(entry.id, "sending", now, "", currentUserId)
+
             val success = try {
-                messageRepository.sendRemoteMessage(
-                    idempotencyKey = entry.idempotencyKey,
-                    conversationId = entry.conversationId,
-                    senderId = entry.senderId,
-                    recipientId = entry.recipientId,
-                    payloadBase64 = entry.payload,
-                    signatureBase64 = entry.signature,
-                    type = entry.type,
-                    timeStr = entry.timeStr
-                )
+                when (entry.type) {
+                    "ai_transcript" -> {
+                        val json = JSONObject(entry.payload)
+                        messageRepository.sendAiTranscript(
+                            conversationId = entry.conversationId,
+                            userClientId = json.optString("userClientId"),
+                            userText = json.optString("userText"),
+                            replyClientId = json.optString("replyClientId"),
+                            replyText = json.optString("replyText"),
+                            personaId = json.optString("personaId", "hexagon"),
+                            timeStr = entry.timeStr
+                        )
+                    }
+                    "create_conversation" -> {
+                        val json = JSONObject(entry.payload)
+                        val pType = json.optString("p_type", "DIRECT")
+                        val pRecipientId = json.optString("p_recipient_id", entry.recipientId)
+                        val pTitle = json.optString("p_title", "")
+                        val convId = conversationRepository.createOrGetConversationRemote(pType, pRecipientId, pTitle)
+                        if (convId != null) {
+                            val localChat = chatDao.getChatById(entry.chatId, currentUserId)
+                            if (localChat != null && localChat.conversationId != convId) {
+                                chatDao.updateChat(localChat.copy(conversationId = convId))
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    else -> {
+                        messageRepository.sendRemoteMessage(
+                            idempotencyKey = entry.idempotencyKey,
+                            conversationId = entry.conversationId,
+                            senderId = entry.senderId,
+                            recipientId = entry.recipientId,
+                            payloadBase64 = entry.payload,
+                            signatureBase64 = entry.signature,
+                            type = entry.type,
+                            timeStr = entry.timeStr
+                        )
+                    }
+                }
             } catch (e: Exception) {
                 Timber.w(e, "Outbox delivery failed for key ${entry.idempotencyKey}")
                 false

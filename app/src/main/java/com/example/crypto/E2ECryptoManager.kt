@@ -119,7 +119,54 @@ object E2ECryptoManager {
         }
     }
 
+    // In-memory / restored keys cache for recovery support
+    private val restoredEcdhPrivateKeys = java.util.concurrent.ConcurrentHashMap<String, PrivateKey>()
+    private val restoredEcdhPublicKeys = java.util.concurrent.ConcurrentHashMap<String, PublicKey>()
+    private val restoredSigningPrivateKeys = java.util.concurrent.ConcurrentHashMap<String, PrivateKey>()
+    private val restoredSigningPublicKeys = java.util.concurrent.ConcurrentHashMap<String, PublicKey>()
+    private val restoredSelfStorageSecrets = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
+
+    fun setRestoredKeys(
+        accountId: String,
+        ecdhPrivate: PrivateKey,
+        ecdhPublic: PublicKey,
+        signingPrivate: PrivateKey,
+        signingPublic: PublicKey,
+        selfStorageSecret: ByteArray
+    ) {
+        val clean = accountId.trim().ifBlank { return }
+        restoredEcdhPrivateKeys[clean] = ecdhPrivate
+        restoredEcdhPublicKeys[clean] = ecdhPublic
+        restoredSigningPrivateKeys[clean] = signingPrivate
+        restoredSigningPublicKeys[clean] = signingPublic
+        restoredSelfStorageSecrets[clean] = selfStorageSecret.copyOf()
+    }
+
+    fun hasRestoredKeys(accountId: String): Boolean {
+        val clean = accountId.trim()
+        return clean.isNotBlank() && restoredEcdhPrivateKeys.containsKey(clean)
+    }
+
+    fun getExportableEcdhPrivateKey(accountId: String? = null): PrivateKey? {
+        val clean = accountId?.trim().orEmpty()
+        return if (clean.isNotBlank()) restoredEcdhPrivateKeys[clean] else null
+    }
+
+    fun getExportableSigningPrivateKey(accountId: String? = null): PrivateKey? {
+        val clean = accountId?.trim().orEmpty()
+        return if (clean.isNotBlank()) restoredSigningPrivateKeys[clean] else null
+    }
+
+    fun getExportableSelfStorageSecret(accountId: String? = null): ByteArray? {
+        val clean = accountId?.trim().orEmpty()
+        return if (clean.isNotBlank()) restoredSelfStorageSecrets[clean]?.copyOf() else null
+    }
+
     fun getMyPublicKey(accountId: String? = null): PublicKey {
+        val clean = accountId?.trim().orEmpty()
+        if (clean.isNotBlank() && restoredEcdhPublicKeys.containsKey(clean)) {
+            return restoredEcdhPublicKeys[clean]!!
+        }
         generateKeyPairIfNeeded(accountId)
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
         val alias = getKeyAlias(accountId)
@@ -130,6 +177,10 @@ object E2ECryptoManager {
     }
 
     fun getMySigningPublicKey(accountId: String? = null): PublicKey {
+        val clean = accountId?.trim().orEmpty()
+        if (clean.isNotBlank() && restoredSigningPublicKeys.containsKey(clean)) {
+            return restoredSigningPublicKeys[clean]!!
+        }
         generateKeyPairIfNeeded(accountId)
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
         val alias = getSigningKeyAlias(accountId)
@@ -140,6 +191,10 @@ object E2ECryptoManager {
     }
 
     private fun getMyPrivateKey(accountId: String? = null): PrivateKey {
+        val clean = accountId?.trim().orEmpty()
+        if (clean.isNotBlank() && restoredEcdhPrivateKeys.containsKey(clean)) {
+            return restoredEcdhPrivateKeys[clean]!!
+        }
         generateKeyPairIfNeeded(accountId)
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
         val alias = getKeyAlias(accountId)
@@ -150,6 +205,10 @@ object E2ECryptoManager {
     }
 
     private fun getMySigningPrivateKey(accountId: String? = null): PrivateKey {
+        val clean = accountId?.trim().orEmpty()
+        if (clean.isNotBlank() && restoredSigningPrivateKeys.containsKey(clean)) {
+            return restoredSigningPrivateKeys[clean]!!
+        }
         generateKeyPairIfNeeded(accountId)
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
         val alias = getSigningKeyAlias(accountId)
@@ -174,6 +233,10 @@ object E2ECryptoManager {
      * Strictly isolated per-account using hardware-backed Android KeyStore alias.
      */
     fun deriveSelfStorageSecret(accountId: String? = null): ByteArray {
+        val clean = accountId?.trim().orEmpty()
+        if (clean.isNotBlank() && restoredSelfStorageSecrets.containsKey(clean)) {
+            return restoredSelfStorageSecrets[clean]!!.copyOf()
+        }
         generateKeyPairIfNeeded(accountId)
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
         val alias = getSelfHmacAlias(accountId)
@@ -185,18 +248,6 @@ object E2ECryptoManager {
         mac.init(secretKey)
         val domainSeparator = "HEXSHARD_DETERMINISTIC_SELF_STORAGE_V3".toByteArray(Charsets.UTF_8)
         return mac.doFinal(domainSeparator)
-    }
-
-    /**
-     * Derives a deterministic symmetric key for local / peer chats when the peer's public key
-     * is not yet registered or available on the remote server.
-     */
-    fun deriveFallbackConversationSecret(accountId: String? = null, conversationId: String): ByteArray {
-        val baseSecret = deriveSelfStorageSecret(accountId)
-        val mac = Mac.getInstance("HmacSHA256")
-        mac.init(SecretKeySpec(baseSecret, "HmacSHA256"))
-        mac.update("HEXSHARD_CONVERSATION_FALLBACK_V1".toByteArray(Charsets.UTF_8))
-        return mac.doFinal(conversationId.toByteArray(Charsets.UTF_8))
     }
 
     /**

@@ -30,7 +30,11 @@ open class ChatRepository(
 
     init {
         try {
-            E2ECryptoManager.generateKeyPairIfNeeded()
+            val uid = getCurrentUserId()
+            if (uid.isNotBlank() && context != null) {
+                com.example.crypto.CryptoBackupManager.loadCachedKeysIfAvailable(context, uid)
+            }
+            E2ECryptoManager.generateKeyPairIfNeeded(uid)
             syncManager.startRealtimeSync()
         } catch (e: Throwable) {
             Timber.e(e, "ChatRepository initialization: crypto or sync error")
@@ -192,8 +196,11 @@ open class ChatRepository(
     }
 
     fun refreshAccount() {
-        conversationRepository.refreshAccount()
         val uid = getCurrentUserId()
+        if (uid.isNotBlank() && context != null) {
+            com.example.crypto.CryptoBackupManager.loadCachedKeysIfAvailable(context, uid)
+        }
+        conversationRepository.refreshAccount()
         if (uid.isNotBlank()) {
             syncManager.stopRealtimeSync()
             syncManager.startRealtimeSync()
@@ -201,6 +208,26 @@ open class ChatRepository(
             syncManager.stopRealtimeSync()
         }
     }
+
+    suspend fun insertOutbox(entry: OutboxEntity): Long = chatDao.insertOutbox(entry)
+
+    suspend fun sendAiTranscript(
+        conversationId: String,
+        userClientId: String,
+        userText: String,
+        replyClientId: String,
+        replyText: String,
+        personaId: String,
+        timeStr: String
+    ): Boolean = messageRepository.sendAiTranscript(
+        conversationId = conversationId,
+        userClientId = userClientId,
+        userText = userText,
+        replyClientId = replyClientId,
+        replyText = replyText,
+        personaId = personaId,
+        timeStr = timeStr
+    )
 
     open suspend fun populateInitialDataIfNeeded() =
         conversationRepository.populateInitialDataIfNeeded()
@@ -235,7 +262,6 @@ open class ChatRepository(
     suspend fun logout(context: Context) {
         stopRealtimeSync()
         userRepository.clearCache()
-        com.example.service.HexShardMessagingService.clearFcmTokenOnLogout(context)
         com.example.network.supabase.SessionManager.clearSessionHard(context)
         refreshAccount()
     }
@@ -244,7 +270,6 @@ open class ChatRepository(
         stopRealtimeSync()
         val currentAccount = getCurrentUserId()
         userRepository.clearCache()
-        com.example.service.HexShardMessagingService.clearFcmTokenOnLogout(context)
         val result = com.example.network.supabase.SupabaseAuthService.deleteAccount(context)
         if (currentAccount.isNotBlank()) {
             E2ECryptoManager.deleteKeys(currentAccount)

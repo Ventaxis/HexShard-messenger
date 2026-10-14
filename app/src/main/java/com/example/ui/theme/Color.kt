@@ -20,6 +20,8 @@ val HexShardOnTealContainer = Color(0xFF4EE2A0)
 // Compatibility aliases for legacy references
 val SpotifyGreen = HexShardTeal
 val SpotifyGreenHover = HexShardTealHover
+val DarkBgCard = Color(0xFF17202A)
+val LightBgCard = Color(0xFFF8FAFC)
 
 // Dark Cinematic Surface Layers (Deep charcoal/slate with warm subtle undertones)
 val HexDarkBg = Color(0xFF0A0E12)              // Root background canvas

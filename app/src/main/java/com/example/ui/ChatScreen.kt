@@ -1690,10 +1690,11 @@ fun MessageBubble(
                             }
                             if (message.text.isNotBlank() && (!message.isAttachment || message.text != "📎 Sent an attachment")) {
                                 val rawText = message.text
-                                val displayText = if (message.idempotencyKey.startsWith("init_saved_msg_")) {
-                                    strings.welcomeSavedMessages
-                                } else {
-                                    rawText
+                                val displayText = when {
+                                    message.idempotencyKey.startsWith("init_saved_msg_") -> strings.welcomeSavedMessages
+                                    message.idempotencyKey.startsWith("init_ai_welcome_hexagon_") -> strings.welcomeAiHexagon
+                                    message.idempotencyKey.startsWith("init_ai_welcome_ventaxis_") -> strings.welcomeAiVentaxis
+                                    else -> rawText
                                 }
                                 if (searchQuery.isNotBlank() && displayText.contains(searchQuery, ignoreCase = true)) {
                                     val startIndex = displayText.indexOf(searchQuery, ignoreCase = true)

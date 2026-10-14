@@ -18,6 +18,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
+import com.example.ui.LocalizationManager
+import com.example.ui.AppLanguage
 
 sealed class AiResult {
     data class Success(val reply: String, val persona: String = "") : AiResult()
@@ -344,111 +346,68 @@ Behavior:
 
     fun generateFallbackResult(
         prompt: String,
-        imageBytes: ByteArray? = null,
         history: List<Pair<String, String>> = emptyList(),
-        modelOption: AiModelOption = AiModelOption.DEFAULT
-    ): AiResult {
-        val reply = generateFallbackReply(prompt, imageBytes, history, modelOption)
-        return AiResult.Success(reply = reply, persona = modelOption.personaId)
-    }
-
-    fun generateFallbackResult(
-        prompt: String,
-        history: List<Pair<String, String>>,
         modelOption: AiModelOption
     ): AiResult {
-        return generateFallbackResult(prompt, null, history, modelOption)
+        val reply = generateFallbackReply(prompt, history, modelOption)
+        return AiResult.Success(reply, modelOption.personaId)
     }
 
     fun generateFallbackReply(
         prompt: String,
-        history: List<Pair<String, String>>,
+        history: List<Pair<String, String>> = emptyList(),
         modelOption: AiModelOption
     ): String {
-        return generateFallbackReply(prompt, null, history, modelOption)
-    }
-
-    fun generateFallbackReply(
-        prompt: String,
-        imageBytes: ByteArray? = null,
-        history: List<Pair<String, String>> = emptyList(),
-        modelOption: AiModelOption = AiModelOption.DEFAULT
-    ): String {
-        val isRussian = prompt.any { it in 'а'..'я' || it in 'А'..'Я' } ||
-                com.example.ui.LocalizationManager.currentLanguage.value == com.example.ui.AppLanguage.RUSSIAN
-
         val isVentaxis = modelOption.persona == com.example.data.AiPersona.VENTAXIS
+        val isRussian = LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN ||
+                prompt.any { it in '\u0400'..'\u04FF' }
 
-        if (imageBytes != null && imageBytes.isNotEmpty()) {
-            return if (isRussian) {
-                if (isVentaxis) {
-                    "Изображение получено. В настоящий момент нейросетевой модуль выполняет детальный оптический анализ. Уточните, что именно вы хотите узнать или проверить на этом фото (распознавание текста, поиск деталей или код)?"
-                } else {
-                    "Фото прикрепилось! Я готов его разобрать — напиши, на чём именно сделать акцент (текст, код, объект на фото)!"
+        val pLower = prompt.lowercase()
+
+        if (isRussian) {
+            if (pLower.contains("+999") || pLower.contains("номер") || pLower.contains("hexshard")) {
+                return "В HexShard анонимный виртуальный номер формата +999 выдается при первой авторизации. Он обеспечивает приватность и сквозную защиту вашей личности."
+            }
+            if (isVentaxis) {
+                return when {
+                    pLower.contains("привет") || pLower.contains("здравствуй") ->
+                        "Здравствуйте! Я Ventaxis AI — ваш интеллектуальный помощник по стратегическим и техническим вопросам. Чем могу помочь?"
+                    pLower.contains("как дела") ->
+                        "Здравствуйте! Системы Ventaxis работают в штатном режиме. Готов анализировать данные и решать ваши задачи."
+                    else ->
+                        "Ventaxis AI готов к анализу. Я помогу структурировать задачу, провести аудит или предоставить развернутый технический ответ."
                 }
             } else {
-                if (isVentaxis) {
-                    "Image received. The analytical vision module is inspecting the contents. Please let me know what specific element or text you would like me to focus on."
-                } else {
-                    "Photo received! Ready to analyze — tell me what you'd like me to focus on in this picture!"
+                return when {
+                    pLower.contains("привет") || pLower.contains("здравствуй") ->
+                        "Привет! Я Hexagon AI в HexShard Messenger. Готов ответить на любые вопросы и помочь в чате!"
+                    pLower.contains("что умеешь") || pLower.contains("помощь") ->
+                        "Привет! Hexagon AI умеет мгновенно отвечать на вопросы, генерировать тексты и идеи, помогать в переписке HexShard."
+                    else ->
+                        "Hexagon AI на связи! Чем могу помочь вам в HexShard прямо сейчас?"
                 }
             }
-        }
-
-        val lower = prompt.lowercase().trim()
-
-        return when {
-            lower.contains("hexshard") || lower.contains("хексшард") || lower.contains("+999") || lower.contains("номер") -> {
-                if (isRussian) {
-                    "**HexShard Messenger** — это защищённый приватный мессенджер с криптографической виртуальной идентичностью (+999) и сквозным шифрованием (E2EE).\n\n" +
-                    "• **Виртуальный номер +999**: уникальный 8-значный ID (например, +999 1234 5678) без раскрытия вашего реального номера телефона и SIM-карты.\n" +
-                    "• **Приватность и безопасность**: закрытые ключи генерируются на вашем устройстве в Android Keystore и никогда не покидают его. Локальная база защищена 256-битным шифрованием SQLCipher.\n" +
-                    "• **Встроенный ИИ**: Ventaxis (глубокий структурированный анализ, код) и Hexagon (мгновенная скорость и лаконичность). Мы оба умеем анализировать как текст, так и фотографии!"
-                } else {
-                    "**HexShard Messenger** is an encrypted private messenger featuring virtual identity (+999) and End-to-End Encryption (E2EE).\n\n" +
-                    "• **Virtual Number (+999)**: Unique 8-digit identity without revealing real phone numbers or SIM data.\n" +
-                    "• **Privacy & Security**: Private cryptographic keys stay strictly on your device inside Android Keystore. Local database is encrypted with 256-bit AES SQLCipher.\n" +
-                    "• **Built-in AI**: Ventaxis (deep analytical reasoning, coding) and Hexagon (high-speed direct answers). Both of us support text and photo analysis!"
-                }
+        } else {
+            if (pLower.contains("+999") || pLower.contains("virtual number") || pLower.contains("hexshard")) {
+                return "In HexShard, your +999 virtual number is assigned automatically during registration to guarantee complete cryptographic anonymity."
             }
-
-            lower.contains("шифрован") || lower.contains("безопасн") || lower.contains("e2ee") || lower.contains("security") -> {
-                if (isRussian) {
-                    "Безопасность в HexShard основана на протоколе сквозного шифрования (E2EE). Сообщения подписываются цифровой подписью на устройстве отправителя и расшифровываются исключительно на устройстве получателя. Серверная часть Supabase выполняет роль слепого защищённого релея и не имеет ключей для расшифровки ваших переписок."
-                } else {
-                    "Security in HexShard is built upon full End-to-End Encryption (E2EE). Messages are digitally signed on the sender device and decrypted strictly on recipient devices. The Supabase cloud infrastructure acts purely as a blind encrypted relay without access to your plaintext."
+            if (isVentaxis) {
+                return when {
+                    pLower.contains("hello") || pLower.contains("hi") ->
+                        "Hello! I am Ventaxis AI, your strategic and technical intelligence assistant. How can I direct my analysis to assist you today?"
+                    else ->
+                        "Ventaxis AI is ready. I can assist with analytical thinking, cryptographic architectures, and software engineering inquiries."
                 }
-            }
-
-            lower.contains("фото") || lower.contains("картинк") || lower.contains("photo") || lower.contains("image") -> {
-                if (isRussian) {
-                    "Вы можете отправить мне любую фотографию или скриншот прямо в этот диалог с помощью значка скрепки (+). Я внимательно изучу изображение, распознаю текст, помогу решить задачу или объясню, что на нём находится."
-                } else {
-                    "You can attach and send any photo or screenshot directly to this chat using the (+) attachment button. I will inspect the image, extract text, solve equations, or describe what's inside!"
-                }
-            }
-
-            else -> {
-                if (isRussian) {
-                    if (isVentaxis) {
-                        "Я внимательно изучил ваш запрос касательно: $prompt.\n\n" +
-                        "В экосистеме HexShard мы уделяем первостепенное внимание надёжности данных, криптографической изоляции и архитектурной чистоте. " +
-                        "Если вам необходима конкретная реализация, аналитический разбор или техническая консультация, напишите, какие дополнительные параметры или контекст мы рассматриваем."
-                    } else {
-                        "Понял твою мысль по поводу: $prompt.\n\n" +
-                        "Всё готово к работе. Если нужно быстро составить план, решить задачу или написать конкретный код — давай сразу перейдём к делу!"
-                    }
-                } else {
-                    if (isVentaxis) {
-                        "I have analyzed your inquiry regarding: $prompt.\n\n" +
-                        "Within the HexShard architecture, we emphasize data sovereignty, cryptographic integrity, and precise engineering. " +
-                        "Feel free to specify the exact parameters or next steps you would like to proceed with."
-                    } else {
-                        "Got your point on: $prompt.\n\n" +
-                        "Ready to execute. If you need a fast breakdown, technical steps, or code, let me know and let's make it happen!"
-                    }
+            } else {
+                return when {
+                    pLower.contains("hello") || pLower.contains("hi") ->
+                        "Hi there! I am Hexagon AI inside HexShard Messenger. Ask me anything for a rapid and helpful answer!"
+                    else ->
+                        "Hexagon AI is active and ready to assist you inside HexShard. What would you like to explore?"
                 }
             }
         }
     }
 }
+
+

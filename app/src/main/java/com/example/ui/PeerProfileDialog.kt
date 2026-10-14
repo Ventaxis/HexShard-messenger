@@ -44,7 +44,7 @@ fun PeerProfileDialog(
     val bg = if (isDark) DarkBgSurface else LightBgSurface
     val txtMain = if (isDark) DarkTxtMain else LightTxtMain
     val txtSec = if (isDark) DarkTxtSec else LightTxtSec
-    val cardBg = if (isDark) DarkBgCard else LightBgCard
+    val cardBg = if (isDark) DarkBgActive else LightBgActive
 
     Dialog(
         onDismissRequest = onDismiss,

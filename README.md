@@ -16,9 +16,9 @@ HexShard Messenger is an Android messaging application focused on:
 - ⚡ Fast, reliable message delivery via Durable Outbox
 - 🎨 Modern Material Design 3 UI with Dark Premium Theme
 - 🔐 Encrypted local database via SQLCipher
-- ☁ Supabase PostgreSQL & Auth Backend
+- ☁ Supabase PostgreSQL, Auth & Realtime Backend
 - 🤖 HexShard AI with isolated Ventaxis AI & Hexagon AI personas
-- 🔔 Firebase Cloud Messaging (FCM) background wakeups
+- ⚡ Instant real-time message sync via Supabase WebSockets
 
 ---
 
@@ -29,6 +29,6 @@ HexShard Messenger is an Android messaging application focused on:
 - SQLCipher 256-bit AES encrypted local Room database with account scoping
 - HexShard AI Assistant (Server-governed Edge Functions)
 - Durable Local Outbox queue with retry mechanism
-- Real-time message synchronization with idempotent deduplication
+- Real-time message synchronization with idempotent deduplication via Supabase Realtime
 - Private Virtual Numbers (+999 format)
-- Background Wake-Up Push Notifications
+- Zero Google Services dependency (pure Supabase backend)

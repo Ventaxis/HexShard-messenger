@@ -89,7 +89,8 @@ val ChatEntity.isAiAssistant: Boolean
         Index(value = ["accountId", "conversationId"]),
         Index(value = ["accountId", "serverMessageId"]),
         Index(value = ["accountId", "idempotencyKey"]),
-        Index(value = ["accountId", "personaId", "timestamp"])
+        Index(value = ["accountId", "personaId", "timestamp"]),
+        Index(value = ["accountId", "conversationId", "serverSequence"])
     ]
 )
 data class MessageEntity(
@@ -105,7 +106,7 @@ data class MessageEntity(
     val type: String = "text", // "text", "voice", "attachment", "image", "video"
     val audioUrl: String? = null,
     val duration: Int? = null,
-    val status: String = "sent", // "sending", "sent", "delivered", "read", "error", "tampered"
+    val status: String = "sent", // "sending", "sent", "delivered", "read", "error", "tampered", "waiting_key"
     val reactions: String = "", // e.g. "❤️:3,😂:1"
     val iv: String = "", // Store IV separately for each encrypted message
     val encryptionVersion: Int = 2,
@@ -113,7 +114,8 @@ data class MessageEntity(
     val conversationId: String = "", // Stable conversation UUID / deterministic ID
     val serverMessageId: String = "", // Server message UUID
     val signatureValid: Boolean = true, // ECDSA digital signature verification status
-    val personaId: String? = null // "VENTAXIS", "HEXAGON", or null for peer-to-peer chats
+    val personaId: String? = null, // "VENTAXIS", "HEXAGON", or null for peer-to-peer chats
+    val serverSequence: Long = 0L // Canonical per-conversation server sequence counter
 )
 
 @Entity(
@@ -230,7 +232,7 @@ interface ChatDao {
     @Query("SELECT * FROM messages WHERE personaId IS NOT NULL AND accountId = :accountId ORDER BY timestamp ASC")
     suspend fun getAllAiMessagesForAccount(accountId: String): List<MessageEntity>
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun insertMessage(message: MessageEntity): Long
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
@@ -282,11 +284,22 @@ interface ChatDao {
     suspend fun clearAllMessagesForAccount(accountId: String)
 
     // Durable Outbox Operations
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun insertOutbox(outbox: OutboxEntity): Long
+
+    @Transaction
+    suspend fun insertMessageAndOutbox(message: MessageEntity, outbox: OutboxEntity): Pair<Long, Long> {
+        val msgId = insertMessage(message)
+        val outboxToInsert = if (outbox.localMessageId == 0) outbox.copy(localMessageId = msgId.toInt()) else outbox
+        val outboxId = insertOutbox(outboxToInsert)
+        return Pair(msgId, outboxId)
+    }
 
     @Query("SELECT * FROM outbox WHERE accountId = :accountId AND status != 'failed' ORDER BY createdAt ASC")
     suspend fun getPendingOutboxEntries(accountId: String): List<OutboxEntity>
+
+    @Query("SELECT * FROM outbox WHERE accountId = :accountId AND status IN ('pending', 'sending') ORDER BY createdAt ASC")
+    suspend fun getReadyPendingOutboxEntries(accountId: String): List<OutboxEntity>
 
     @Query("DELETE FROM outbox WHERE idempotencyKey = :idempotencyKey AND accountId = :accountId")
     suspend fun deleteOutboxByIdempotencyKey(idempotencyKey: String, accountId: String)
@@ -312,11 +325,26 @@ interface ChatDao {
     @Query("UPDATE messages SET accountId = :targetAccountId WHERE accountId = ''")
     suspend fun backfillLegacyMessagesAccountId(targetAccountId: String): Int
 
+    @Query("SELECT MAX(serverSequence) FROM messages WHERE conversationId = :conversationId AND accountId = :accountId")
+    suspend fun getMaxSequenceForConversation(conversationId: String, accountId: String): Long?
+
+    @Query("UPDATE messages SET serverMessageId = :serverId, serverSequence = :sequence, status = :status WHERE idempotencyKey = :idempotencyKey AND accountId = :accountId")
+    suspend fun updateMessageServerInfoByIdempotencyKey(idempotencyKey: String, serverId: String, sequence: Long, status: String, accountId: String)
+
+    @Query("SELECT * FROM outbox WHERE accountId = :accountId AND status = 'WAITING_FOR_PEER_KEY'")
+    suspend fun getWaitingKeyOutboxEntries(accountId: String): List<OutboxEntity>
+
+    @Query("UPDATE outbox SET status = 'pending', payload = :payload, signature = :signature WHERE id = :id AND accountId = :accountId")
+    suspend fun updateOutboxPayload(id: Long, payload: String, signature: String, accountId: String)
+
+    @Query("UPDATE outbox SET status = :status WHERE id = :id AND accountId = :accountId")
+    suspend fun updateOutboxStatus(id: Long, status: String, accountId: String)
+
     @Query("UPDATE outbox SET accountId = :targetAccountId WHERE accountId = ''")
     suspend fun backfillLegacyOutboxAccountId(targetAccountId: String): Int
 }
 
-@Database(entities = [ChatEntity::class, MessageEntity::class, OutboxEntity::class], version = 14, exportSchema = false)
+@Database(entities = [ChatEntity::class, MessageEntity::class, OutboxEntity::class], version = 15, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
 
@@ -435,6 +463,13 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE messages ADD COLUMN serverSequence INTEGER NOT NULL DEFAULT 0")
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_messages_accountId_conversationId_serverSequence ON messages(accountId, conversationId, serverSequence)")
+            }
+        }
+
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val factory = SQLCipherUtils.createSupportFactory(context)
@@ -453,7 +488,8 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_10_11,
                     MIGRATION_11_12,
                     MIGRATION_12_13,
-                    MIGRATION_13_14
+                    MIGRATION_13_14,
+                    MIGRATION_14_15
                 )
                 .build()
                 INSTANCE = instance

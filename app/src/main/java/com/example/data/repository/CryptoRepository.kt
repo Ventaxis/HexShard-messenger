@@ -17,8 +17,10 @@ data class DecryptedResult(
     val isSignatureValid: Boolean
 )
 
+class PeerKeyUnavailableException(val recipientId: String) : Exception("Recipient $recipientId public key is not available")
+
 class CryptoRepository(
-    private val userRepository: UserRepository
+    val userRepository: UserRepository
 ) {
 
     fun createCanonicalEnvelope(
@@ -58,7 +60,7 @@ class CryptoRepository(
             if (recipientPubKey != null) {
                 E2ECryptoManager.deriveSharedSecret(recipientPubKey, currentUserId)
             } else {
-                E2ECryptoManager.deriveFallbackConversationSecret(currentUserId, conversationId)
+                throw PeerKeyUnavailableException(recipientId)
             }
         }
 
@@ -122,7 +124,7 @@ class CryptoRepository(
             if (senderPubKey != null) {
                 E2ECryptoManager.deriveSharedSecret(senderPubKey, recipientId)
             } else {
-                E2ECryptoManager.deriveFallbackConversationSecret(recipientId, conversationId)
+                return DecryptedResult("[E2EE Error: Sender public key unavailable]", false)
             }
         }
 

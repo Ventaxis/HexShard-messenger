@@ -7,8 +7,7 @@
 
 # HexShard ProGuard Rules
 
-# Keep Firebase classes
--keep class com.google.firebase.** { *; }
+# Keep Google Play Services classes
 -keep class com.google.android.gms.** { *; }
 
 # Keep Crypto classes (needed for reflection)
