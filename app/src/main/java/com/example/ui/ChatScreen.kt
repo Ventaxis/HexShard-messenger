@@ -66,6 +66,11 @@ import com.example.data.database.MessageEntity
 import com.example.data.database.getConversationType
 import com.example.data.database.isAiAssistant
 import com.example.data.database.isSavedMessages
+import androidx.compose.ui.platform.LocalContext
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
 import kotlinx.coroutines.launch
 
 // Custom Theme colors matching HexShard specs (#03A062 teal + Dark Cinematic)
@@ -133,6 +138,10 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
     // Choose active palette
     val bg = if (isDark) DarkBg else LightBg
     val txtMain = if (isDark) DarkTxtMain else LightTxtMain
+
+    LaunchedEffect(Unit) {
+        viewModel.onAccountChanged()
+    }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -203,7 +212,11 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
                                     selectedAiModel = selectedAiModel,
                                     onSwitchAiModel = { model -> viewModel.switchToAiChat(model) },
                                     aiError = aiErrorState,
-                                    onDismissAiError = { viewModel.dismissAiError() }
+                                    onDismissAiError = { viewModel.dismissAiError() },
+                                    onEditMessage = { msgId, text -> viewModel.editMessage(msgId, text) },
+                                    onDeleteMessage = { msgId -> viewModel.deleteMessage(msgId) },
+                                    onForwardMessage = { targetId, msg -> viewModel.forwardMessage(targetId, msg) },
+                                    allChats = chats
                                 )
                             }
                         } else {
@@ -272,7 +285,11 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
                                 selectedAiModel = selectedAiModel,
                                 onSwitchAiModel = { model -> viewModel.switchToAiChat(model) },
                                 aiError = aiErrorState,
-                                onDismissAiError = { viewModel.dismissAiError() }
+                                onDismissAiError = { viewModel.dismissAiError() },
+                                onEditMessage = { msgId, text -> viewModel.editMessage(msgId, text) },
+                                onDeleteMessage = { msgId -> viewModel.deleteMessage(msgId) },
+                                onForwardMessage = { targetId, msg -> viewModel.forwardMessage(targetId, msg) },
+                                allChats = chats
                             )
                         }
                     }
@@ -1079,8 +1096,17 @@ fun ChatArea(
     selectedAiModel: com.example.network.AiModelOption = com.example.network.AiModelOption.DEFAULT,
     onSwitchAiModel: (com.example.network.AiModelOption) -> Unit = {},
     aiError: AiUiError? = null,
-    onDismissAiError: () -> Unit = {}
+    onDismissAiError: () -> Unit = {},
+    onEditMessage: (Int, String) -> Unit = { _, _ -> },
+    onDeleteMessage: (Int) -> Unit = {},
+    onForwardMessage: (Int, MessageEntity) -> Unit = { _, _ -> },
+    allChats: List<ChatEntity> = emptyList()
 ) {
+    var replyingToMessage by remember { mutableStateOf<MessageEntity?>(null) }
+    var editingMessage by remember { mutableStateOf<MessageEntity?>(null) }
+    var messageToDelete by remember { mutableStateOf<MessageEntity?>(null) }
+    var messageToForward by remember { mutableStateOf<MessageEntity?>(null) }
+
     val bg = if (isDark) Color(0xFF0F0F0F) else Color(0xFFF9F9F9)
     val headBg = if (isDark) DarkBgSurface else LightBgSurface
     val border = if (isDark) DarkBorder else LightBorder
@@ -1466,7 +1492,11 @@ fun ChatArea(
                             senderAva = chat.ava,
                             onDownloadVoice = onDownloadVoice,
                             onDownloadMedia = onDownloadMedia,
-                            onRetry = { onRetryMessage(msg.id, msg.chatId, msg.text) }
+                            onRetry = { onRetryMessage(msg.id, msg.chatId, msg.text) },
+                            onReply = { replyingToMessage = it },
+                            onEdit = { editingMessage = it },
+                            onDelete = { messageToDelete = it },
+                            onForward = { messageToForward = it }
                         )
                     }
                 }
@@ -1528,6 +1558,98 @@ fun ChatArea(
             }
         }
 
+        // Replying quote bar preview
+        if (replyingToMessage != null) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                color = if (isDark) Color(0xFF1B2028) else Color(0xFFE8EEF5),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .width(3.dp)
+                            .height(28.dp)
+                            .background(SpotifyGreen, RoundedCornerShape(2.dp))
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = replyingToMessage?.sender.orEmpty(),
+                            color = SpotifyGreen,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = replyingToMessage?.text?.take(60).orEmpty(),
+                            color = txtSec,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    IconButton(
+                        onClick = { replyingToMessage = null },
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "Cancel reply",
+                            tint = txtSec,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // Editing banner preview
+        if (editingMessage != null) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                color = if (isDark) Color(0xFF1E281E) else Color(0xFFE8F5E9),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.Edit,
+                        contentDescription = "Editing",
+                        tint = SpotifyGreen,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = if (isRussian) "Редактирование сообщения" else "Editing message",
+                        color = SpotifyGreen,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(
+                        onClick = { editingMessage = null },
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "Cancel edit",
+                            tint = txtSec,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
+        }
+
         val isImeVisible = WindowInsets.isImeVisible
         val bottomBarModifier = if (!isImeVisible) Modifier.navigationBarsPadding() else Modifier
 
@@ -1537,11 +1659,109 @@ fun ChatArea(
             isSending = isSending,
             isDark = isDark,
             chatId = chat.id,
-            onSend = onMessageSent,
+            onSend = { sentText ->
+                val editMsg = editingMessage
+                if (editMsg != null) {
+                    onEditMessage(editMsg.id, sentText)
+                    editingMessage = null
+                } else {
+                    val replyMsg = replyingToMessage
+                    if (replyMsg != null) {
+                        val quoted = "> @${replyMsg.sender}: ${replyMsg.text.take(80)}\n\n$sentText"
+                        onMessageSent(quoted)
+                        replyingToMessage = null
+                    } else {
+                        onMessageSent(sentText)
+                    }
+                }
+            },
             onAttachment = onAttachmentSent,
             onSendVoice = onSendVoiceMessage,
             onSendMedia = onSendMediaMessage,
-            onSendLocation = onSendLocation
+            onSendLocation = onSendLocation,
+            initialText = editingMessage?.text.orEmpty()
+        )
+    }
+
+    if (messageToDelete != null) {
+        AlertDialog(
+            onDismissRequest = { messageToDelete = null },
+            title = { Text(strings.delete) },
+            text = { Text(if (isRussian) "Удалить это сообщение?" else "Delete this message?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    messageToDelete?.let { onDeleteMessage(it.id) }
+                    messageToDelete = null
+                }) {
+                    Text(strings.delete, color = Color.Red)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { messageToDelete = null }) {
+                    Text(strings.cancel)
+                }
+            }
+        )
+    }
+
+    if (messageToForward != null) {
+        AlertDialog(
+            onDismissRequest = { messageToForward = null },
+            title = { Text(strings.forward) },
+            text = {
+                val forwardableChats = allChats.filter { it.id != chat.id }
+                if (forwardableChats.isEmpty()) {
+                    Text(if (isRussian) "Нет других доступных чатов" else "No other chats available")
+                } else {
+                    LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 280.dp)) {
+                        items(forwardableChats, key = { it.id }) { targetChat ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        val msg = messageToForward ?: return@clickable
+                                        onForwardMessage(targetChat.id, msg)
+                                        Toast.makeText(
+                                            context,
+                                            "${strings.forward}: ${targetChat.name}",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                        messageToForward = null
+                                    }
+                                    .padding(vertical = 10.dp, horizontal = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .background(SpotifyGreen, CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = targetChat.name.take(2).uppercase(),
+                                        color = Color.White,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text(
+                                    text = targetChat.name,
+                                    color = txtMain,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { messageToForward = null }) {
+                    Text(strings.cancel)
+                }
+            }
         )
     }
 }
@@ -1555,11 +1775,17 @@ fun MessageBubble(
     senderAva: String = "",
     onDownloadVoice: suspend (String, String) -> ByteArray? = { _, _ -> null },
     onDownloadMedia: suspend (String, String) -> ByteArray? = { _, _ -> null },
-    onRetry: () -> Unit = {}
+    onRetry: () -> Unit = {},
+    onReply: (MessageEntity) -> Unit = {},
+    onCopy: (MessageEntity) -> Unit = {},
+    onForward: (MessageEntity) -> Unit = {},
+    onEdit: (MessageEntity) -> Unit = {},
+    onDelete: (MessageEntity) -> Unit = {}
 ) {
     var expanded by remember { mutableStateOf(false) }
     val haptic = LocalHapticFeedback.current
     val strings = LocalStrings.current
+    val context = LocalContext.current
 
     val bubbleColor = if (message.isMe) {
         if (isDark) DarkBubbleMe else LightBubbleMe
@@ -1713,11 +1939,10 @@ fun MessageBubble(
                                         lineHeight = 19.sp
                                     )
                                 } else {
-                                    Text(
+                                    MarkdownText(
                                         text = displayText,
                                         color = txtColor,
-                                        fontSize = 14.sp,
-                                        lineHeight = 19.sp
+                                        isDark = isDark
                                     )
                                 }
                             }
@@ -1730,12 +1955,51 @@ fun MessageBubble(
                     onDismissRequest = { expanded = false },
                     modifier = Modifier.background(if (isDark) Color(0xFF1E1E1E) else Color.White)
                 ) {
-                    DropdownMenuItem(text = { Text(strings.reply) }, onClick = { expanded = false }, leadingIcon = { Icon(Icons.Default.Reply, null) })
-                    DropdownMenuItem(text = { Text(strings.copy) }, onClick = { expanded = false }, leadingIcon = { Icon(Icons.Default.ContentCopy, null) })
-                    DropdownMenuItem(text = { Text(strings.forward) }, onClick = { expanded = false }, leadingIcon = { Icon(Icons.Default.ArrowForward, null) })
+                    DropdownMenuItem(
+                        text = { Text(strings.reply) },
+                        onClick = {
+                            expanded = false
+                            onReply(message)
+                        },
+                        leadingIcon = { Icon(Icons.Default.Reply, null) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(strings.copy) },
+                        onClick = {
+                            expanded = false
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            val clip = ClipData.newPlainText("HexShard message", message.text)
+                            clipboard.setPrimaryClip(clip)
+                            Toast.makeText(context, strings.copy, Toast.LENGTH_SHORT).show()
+                            onCopy(message)
+                        },
+                        leadingIcon = { Icon(Icons.Default.ContentCopy, null) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(strings.forward) },
+                        onClick = {
+                            expanded = false
+                            onForward(message)
+                        },
+                        leadingIcon = { Icon(Icons.Default.ArrowForward, null) }
+                    )
                     if (message.isMe) {
-                        DropdownMenuItem(text = { Text(strings.edit) }, onClick = { expanded = false }, leadingIcon = { Icon(Icons.Default.Edit, null) })
-                        DropdownMenuItem(text = { Text(strings.delete, color = Color.Red) }, onClick = { expanded = false }, leadingIcon = { Icon(Icons.Default.Delete, null, tint = Color.Red) })
+                        DropdownMenuItem(
+                            text = { Text(strings.edit) },
+                            onClick = {
+                                expanded = false
+                                onEdit(message)
+                            },
+                            leadingIcon = { Icon(Icons.Default.Edit, null) }
+                        )
+                        DropdownMenuItem(
+                            text = { Text(strings.delete, color = Color.Red) },
+                            onClick = {
+                                expanded = false
+                                onDelete(message)
+                            },
+                            leadingIcon = { Icon(Icons.Default.Delete, null, tint = Color.Red) }
+                        )
                     }
                 }
             }
@@ -1960,9 +2224,15 @@ fun InputBarLayout(
     onAttachment: () -> Unit,
     onSendVoice: (java.io.File, Int) -> Unit,
     onSendMedia: (android.net.Uri, String) -> Unit = { _, _ -> },
-    onSendLocation: () -> Unit = {}
+    onSendLocation: () -> Unit = {},
+    initialText: String = ""
 ) {
     var text by remember { mutableStateOf("") }
+    LaunchedEffect(initialText) {
+        if (initialText.isNotBlank()) {
+            text = initialText
+        }
+    }
     val strings = LocalStrings.current
     val txtMain = if (isDark) DarkTxtMain else LightTxtMain
     val txtSec = if (isDark) DarkTxtSec else LightTxtSec

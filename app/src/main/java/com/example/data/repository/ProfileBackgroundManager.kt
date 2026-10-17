@@ -319,35 +319,31 @@ object ProfileBackgroundManager {
             }
         }
 
-        val persistentPath = if (uploadSuccess && dbUpdated) newPath else effectiveLocalPath
-
-        // 4. Always persist profile background in Supabase Auth server metadata (survives app reinstallation)
-        try {
-            val authMeta = JSONObject().apply {
-                put("data", JSONObject().apply {
-                    put("profile_background_path", if (uploadSuccess) newPath else persistentPath)
-                    put("profile_background_type", validation.mimeType)
-                    put("profile_background_updated_at", java.time.Instant.now().toString())
-                })
+        if (!uploadSuccess || !dbUpdated) {
+            if (uploadSuccess) {
+                try {
+                    deleteStorageObject(baseUrl, anonKey, accessToken, newPath)
+                } catch (delEx: Exception) {
+                    Timber.w(delEx, "Failed to rollback uploaded background: $newPath")
+                }
             }
-            val authReq = Request.Builder()
-                .url("$baseUrl/auth/v1/user")
-                .header("apikey", anonKey)
-                .header("Authorization", "Bearer $accessToken")
-                .header("Content-Type", "application/json")
-                .put(authMeta.toString().toRequestBody(JSON_MEDIA))
-                .build()
-            httpClient.newCall(authReq).execute().close()
-        } catch (authEx: Exception) {
-            Timber.w(authEx, "Non-fatal: could not update profile background in Supabase auth metadata")
+            return@withContext Result.failure(IllegalStateException("Failed to update profile background on server"))
         }
 
-        SecurePrefsManager.setProfileBackground(context, userId, persistentPath, validation.mimeType)
+        if (!oldPath.isNullOrBlank() && oldPath != newPath && !oldPath.startsWith("/")) {
+            try {
+                deleteStorageObject(baseUrl, anonKey, accessToken, oldPath)
+            } catch (delOldEx: Exception) {
+                Timber.w(delOldEx, "Non-fatal: could not delete previous remote background")
+            }
+        }
+
+        SecurePrefsManager.setProfileBackground(context, userId, newPath, validation.mimeType)
 
         val info = ProfileBackgroundInfo(
-            storagePath = persistentPath,
+            storagePath = newPath,
             mimeType = validation.mimeType,
-            publicUrl = if (uploadSuccess && dbUpdated) getPublicUrl(newPath) else persistentPath,
+            publicUrl = getPublicUrl(newPath),
             isVideo = validation.isVideo
         )
         Result.success(info)

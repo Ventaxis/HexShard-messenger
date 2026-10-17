@@ -71,6 +71,15 @@ open class ChatRepository(
     open suspend fun getChatByRecipientId(recipientId: String): ChatEntity? =
         conversationRepository.getChatByRecipientId(recipientId)
 
+    open suspend fun getOrCreateDirectConversation(peerId: String, title: String = ""): Result<ChatEntity> =
+        conversationRepository.getOrCreateDirectConversation(peerId, title)
+
+    open suspend fun getOrCreateSavedMessagesConversation(): Result<ChatEntity> =
+        conversationRepository.getOrCreateSavedMessagesConversation()
+
+    open suspend fun getOrCreateAiConversation(): Result<ChatEntity> =
+        conversationRepository.getOrCreateAiConversation()
+
     open suspend fun insertChat(chat: ChatEntity): Long =
         conversationRepository.insertChat(chat)
 
@@ -147,12 +156,8 @@ open class ChatRepository(
     )
 
     suspend fun uploadVoiceMessage(file: File, chatId: Int, idempotencyKey: String = "", recipientId: String): String? {
-        val isSelfOrAi = isSelfConversation(recipientId = recipientId, id = chatId) || isAiConversation(recipientId = recipientId)
         val conversationId = computeConversationId(getCurrentUserId(), recipientId)
-
-        val result = attachmentRepository.uploadVoiceFile(file, conversationId, idempotencyKey, recipientId)
-        if (result != null) return result
-        return if (isSelfOrAi) file.toURI().toString() else null
+        return attachmentRepository.uploadVoiceFile(file, conversationId, idempotencyKey, recipientId)
     }
 
     suspend fun uploadMediaMessage(
@@ -163,18 +168,14 @@ open class ChatRepository(
         idempotencyKey: String,
         recipientId: String
     ): String? {
-        val isSelfOrAi = isSelfConversation(recipientId = recipientId, id = chatId) || isAiConversation(recipientId = recipientId)
         val conversationId = computeConversationId(getCurrentUserId(), recipientId)
-
-        val result = attachmentRepository.uploadAttachment(
+        return attachmentRepository.uploadAttachment(
             inputUri = uri,
             conversationId = conversationId,
             fileType = type,
             idempotencyKey = idempotencyKey,
             recipientId = recipientId
         )
-        if (result != null) return result
-        return if (isSelfOrAi) uri.toString() else null
     }
 
     suspend fun downloadMediaMessage(url: String, partnerId: String, idempotencyKey: String = ""): ByteArray? =

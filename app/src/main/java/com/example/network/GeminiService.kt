@@ -110,134 +110,13 @@ Behavior:
         }
         lastRequestTimestamp.set(now)
 
-        // 1. If user is authenticated, call Supabase Edge Function (server-side Gemini in Supabase secrets)
+        // Cloud-first: call Supabase Edge Function (server-side Gemini in Supabase secrets)
         val userToken = SecurePrefsManager.getSupabaseAccessToken(context)
-        if (userToken.isNotBlank()) {
-            val edgeResult = callSupabaseEdgeFunction(effectivePrompt, imageBytes, imageMimeType, history, modelOption)
-            if (edgeResult is AiResult.Success) {
-                return@withContext edgeResult
-            }
-            if (edgeResult is AiResult.RateLimited) return@withContext edgeResult
+        if (userToken.isBlank()) {
+            return@withContext AiResult.Unauthorized
         }
 
-        // 2. Direct Gemini REST API call with full multimodal vision support
-        val directResult = callDirectGemini(effectivePrompt, imageBytes, imageMimeType, history, modelOption)
-        if (directResult is AiResult.Success) {
-            return@withContext directResult
-        }
-
-        if (directResult is AiResult.RateLimited) return@withContext directResult
-        directResult
-    }
-
-    private suspend fun callDirectGemini(
-        prompt: String,
-        imageBytes: ByteArray?,
-        imageMimeType: String?,
-        history: List<Pair<String, String>>,
-        modelOption: AiModelOption
-    ): AiResult = withContext(Dispatchers.IO) {
-        val apiKey = try {
-            val field = com.example.BuildConfig::class.java.getField("GEMINI_API_KEY")
-            val key = field.get(null) as? String
-            key?.ifBlank { null }
-        } catch (_: Throwable) {
-            null
-        }
-
-        if (apiKey.isNullOrBlank()) {
-            // Gemini API key is kept in Supabase secrets; direct fallback is bypassed
-            return@withContext AiResult.ConfigurationError
-        }
-
-        val isVentaxis = modelOption.persona == com.example.data.AiPersona.VENTAXIS
-        val model = "gemini-3.5-flash-lite"
-        val systemPrompt = if (isVentaxis) VENTAXIS_SYSTEM_PROMPT else HEXAGON_SYSTEM_PROMPT
-
-        val contentsArray = JSONArray()
-
-        // Recent history
-        val recentHistory = history.takeLast(8)
-        for ((role, text) in recentHistory) {
-            if (text.isBlank()) continue
-            val roleStr = if (role.equals("model", ignoreCase = true) || role.equals("assistant", ignoreCase = true)) "model" else "user"
-            val partsArr = JSONArray().apply {
-                put(JSONObject().apply { put("text", text.take(MAX_PROMPT_LENGTH)) })
-            }
-            contentsArray.put(JSONObject().apply {
-                put("role", roleStr)
-                put("parts", partsArr)
-            })
-        }
-
-        // Current message with optional image
-        val currentParts = JSONArray()
-        currentParts.put(JSONObject().apply { put("text", prompt) })
-        if (imageBytes != null && imageBytes.isNotEmpty()) {
-            val b64 = android.util.Base64.encodeToString(imageBytes, android.util.Base64.NO_WRAP)
-            val mime = imageMimeType?.ifBlank { "image/jpeg" } ?: "image/jpeg"
-            val inlineData = JSONObject().apply {
-                put("mimeType", mime)
-                put("data", b64)
-            }
-            currentParts.put(JSONObject().apply { put("inlineData", inlineData) })
-        }
-        contentsArray.put(JSONObject().apply {
-            put("role", "user")
-            put("parts", currentParts)
-        })
-
-        val reqPayload = JSONObject().apply {
-            put("contents", contentsArray)
-            put("systemInstruction", JSONObject().apply {
-                put("parts", JSONArray().apply {
-                    put(JSONObject().apply { put("text", systemPrompt) })
-                })
-            })
-            put("generationConfig", JSONObject().apply {
-                put("maxOutputTokens", 1536)
-                put("temperature", if (isVentaxis) 0.7 else 0.3)
-            })
-        }
-
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
-        val request = Request.Builder()
-            .url(url)
-            .header("Content-Type", "application/json")
-            .post(reqPayload.toString().toRequestBody(JSON_MEDIA))
-            .build()
-
-        try {
-            httpClient.newCall(request).execute().use { response ->
-                val bodyStr = response.body?.string().orEmpty()
-                if (response.isSuccessful && bodyStr.isNotBlank()) {
-                    val root = JSONObject(bodyStr)
-                    val candidates = root.optJSONArray("candidates")
-                    if (candidates != null && candidates.length() > 0) {
-                        val firstCandidate = candidates.getJSONObject(0)
-                        val contentObj = firstCandidate.optJSONObject("content")
-                        val parts = contentObj?.optJSONArray("parts")
-                        if (parts != null && parts.length() > 0) {
-                            val replyText = parts.getJSONObject(0).optString("text", "")
-                            if (replyText.isNotBlank()) {
-                                return@withContext AiResult.Success(replyText.trim(), modelOption.personaId)
-                            }
-                        }
-                    }
-                }
-                Timber.w("Direct Gemini call returned code ${response.code}: $bodyStr")
-                val errJson = try { JSONObject(bodyStr) } catch (_: Exception) { null }
-                val errMsg = errJson?.optJSONObject("error")?.optString("message", "API error ${response.code}") ?: "HTTP ${response.code}"
-                if (response.code == 429) {
-                    AiResult.RateLimited(2)
-                } else {
-                    AiResult.Error("HTTP_${response.code}", errMsg)
-                }
-            }
-        } catch (e: Exception) {
-            Timber.e(e, "Exception in callDirectGemini")
-            AiResult.NetworkError
-        }
+        callSupabaseEdgeFunction(effectivePrompt, imageBytes, imageMimeType, history, modelOption)
     }
 
     private suspend fun callSupabaseEdgeFunction(
@@ -323,8 +202,8 @@ Behavior:
                 when {
                     code == 404 || errorCode == "NOT_FOUND" -> AiResult.FunctionNotFound
                     code == 401 || errorCode == "AI_UNAUTHORIZED" -> AiResult.Unauthorized
-                    code == 429 || errorCode == "AI_RATE_LIMITED" -> {
-                        val retrySec = jsonError?.optLong("retry_after_seconds", 2L) ?: 2L
+                    code == 429 || errorCode == "AI_RATE_LIMITED" || errorCode == "AI_QUOTA_EXCEEDED" -> {
+                        val retrySec = jsonError?.optLong("retry_after_seconds", 5L) ?: 5L
                         AiResult.RateLimited(retrySec)
                     }
                     errorCode == "AI_MODEL_UNAVAILABLE" -> AiResult.ModelUnavailable
@@ -347,7 +226,7 @@ Behavior:
     fun generateFallbackResult(
         prompt: String,
         history: List<Pair<String, String>> = emptyList(),
-        modelOption: AiModelOption
+        modelOption: AiModelOption = AiModelOption.DEFAULT
     ): AiResult {
         val reply = generateFallbackReply(prompt, history, modelOption)
         return AiResult.Success(reply, modelOption.personaId)
@@ -356,58 +235,52 @@ Behavior:
     fun generateFallbackReply(
         prompt: String,
         history: List<Pair<String, String>> = emptyList(),
-        modelOption: AiModelOption
+        modelOption: AiModelOption = AiModelOption.DEFAULT
     ): String {
         val isVentaxis = modelOption.persona == com.example.data.AiPersona.VENTAXIS
-        val isRussian = LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN ||
+        val isRussian = com.example.ui.LocalizationManager.currentLanguage.value == com.example.ui.AppLanguage.RUSSIAN ||
                 prompt.any { it in '\u0400'..'\u04FF' }
-
-        val pLower = prompt.lowercase()
+        val lower = prompt.lowercase(java.util.Locale.ROOT)
 
         if (isRussian) {
-            if (pLower.contains("+999") || pLower.contains("номер") || pLower.contains("hexshard")) {
+            if (lower.contains("+999") || lower.contains("номер") || lower.contains("hexshard")) {
                 return "В HexShard анонимный виртуальный номер формата +999 выдается при первой авторизации. Он обеспечивает приватность и сквозную защиту вашей личности."
             }
             if (isVentaxis) {
-                return when {
-                    pLower.contains("привет") || pLower.contains("здравствуй") ->
-                        "Здравствуйте! Я Ventaxis AI — ваш интеллектуальный помощник по стратегическим и техническим вопросам. Чем могу помочь?"
-                    pLower.contains("как дела") ->
-                        "Здравствуйте! Системы Ventaxis работают в штатном режиме. Готов анализировать данные и решать ваши задачи."
-                    else ->
-                        "Ventaxis AI готов к анализу. Я помогу структурировать задачу, провести аудит или предоставить развернутый технический ответ."
+                if (lower.contains("привет") || lower.contains("здравствуй")) {
+                    return "Здравствуйте! Я Ventaxis AI — ваш интеллектуальный помощник по стратегическим и техническим вопросам. Чем могу помочь?"
                 }
+                if (lower.contains("как дела")) {
+                    return "Здравствуйте! Системы Ventaxis работают в штатном режиме. Готов анализировать данные и решать ваши задачи."
+                }
+                return "Ventaxis AI готов к анализу. Я помогу структурировать задачу, провести аудит или предоставить развернутый технический ответ."
             } else {
-                return when {
-                    pLower.contains("привет") || pLower.contains("здравствуй") ->
-                        "Привет! Я Hexagon AI в HexShard Messenger. Готов ответить на любые вопросы и помочь в чате!"
-                    pLower.contains("что умеешь") || pLower.contains("помощь") ->
-                        "Привет! Hexagon AI умеет мгновенно отвечать на вопросы, генерировать тексты и идеи, помогать в переписке HexShard."
-                    else ->
-                        "Hexagon AI на связи! Чем могу помочь вам в HexShard прямо сейчас?"
+                if (lower.contains("привет") || lower.contains("здравствуй")) {
+                    return "Привет! Я Hexagon AI в HexShard Messenger. Готов ответить на любые вопросы и помочь в чате!"
                 }
+                if (lower.contains("что умеешь") || lower.contains("помощь")) {
+                    return "Привет! Hexagon AI умеет мгновенно отвечать на вопросы, генерировать тексты и идеи, помогать в переписке HexShard."
+                }
+                return "Hexagon AI на связи! Чем могу помочь вам в HexShard прямо сейчас?"
             }
         } else {
-            if (pLower.contains("+999") || pLower.contains("virtual number") || pLower.contains("hexshard")) {
+            if (lower.contains("+999") || lower.contains("virtual number") || lower.contains("hexshard")) {
                 return "In HexShard, your +999 virtual number is assigned automatically during registration to guarantee complete cryptographic anonymity."
             }
             if (isVentaxis) {
-                return when {
-                    pLower.contains("hello") || pLower.contains("hi") ->
-                        "Hello! I am Ventaxis AI, your strategic and technical intelligence assistant. How can I direct my analysis to assist you today?"
-                    else ->
-                        "Ventaxis AI is ready. I can assist with analytical thinking, cryptographic architectures, and software engineering inquiries."
+                if (lower.contains("hello") || lower.contains("hi")) {
+                    return "Hello! I am Ventaxis AI, your strategic and technical intelligence assistant. How can I direct my analysis to assist you today?"
                 }
+                return "Ventaxis AI is ready. I can assist with analytical thinking, cryptographic architectures, and software engineering inquiries."
             } else {
-                return when {
-                    pLower.contains("hello") || pLower.contains("hi") ->
-                        "Hi there! I am Hexagon AI inside HexShard Messenger. Ask me anything for a rapid and helpful answer!"
-                    else ->
-                        "Hexagon AI is active and ready to assist you inside HexShard. What would you like to explore?"
+                if (lower.contains("hello") || lower.contains("hi")) {
+                    return "Hi there! I am Hexagon AI inside HexShard Messenger. Ask me anything for a rapid and helpful answer!"
                 }
+                return "Hexagon AI is active and ready to assist you inside HexShard. What would you like to explore?"
             }
         }
     }
 }
+
 
 

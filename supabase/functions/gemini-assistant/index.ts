@@ -57,7 +57,12 @@ async function getAuthenticatedUser(req: Request) {
   return null;
 }
 
+// Server-side AI rate limit and daily quota settings
+export const REQUEST_COOLDOWN_MS = 1500;
+export const MAX_DAILY_REQUESTS_PER_USER = 100;
+
 const memoryRateLimit = new Map<string, number>();
+const dailyQuotaMap = new Map<string, { date: string; count: number }>();
 
 // Server-authoritative allowed AI models
 const ALLOWED_AI_MODELS = new Set([
@@ -121,12 +126,12 @@ serve(async (req: Request) => {
       );
     }
 
-    // 2. Durable Rate Limiting (1.5s interval per account)
+    // 2. Durable Rate Limiting (cooldown per account)
     const now = Date.now();
     const lastMemoryReq = memoryRateLimit.get(user.id) ?? 0;
     const memoryDiff = now - lastMemoryReq;
-    if (memoryDiff < 1500) {
-      const retryAfterSec = Math.ceil((1500 - memoryDiff) / 1000);
+    if (memoryDiff < REQUEST_COOLDOWN_MS) {
+      const retryAfterSec = Math.ceil((REQUEST_COOLDOWN_MS - memoryDiff) / 1000);
       return new Response(
         JSON.stringify({
           error: "Rate limit exceeded",
@@ -138,6 +143,26 @@ serve(async (req: Request) => {
       );
     }
     memoryRateLimit.set(user.id, now);
+
+    // 2.1 Daily Quota Limit per user
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const userQuota = dailyQuotaMap.get(user.id);
+    if (userQuota && userQuota.date === todayStr) {
+      if (userQuota.count >= MAX_DAILY_REQUESTS_PER_USER) {
+        return new Response(
+          JSON.stringify({
+            error: "Daily AI quota exceeded",
+            code: "AI_QUOTA_EXCEEDED",
+            message: "Daily AI message quota reached. Please try again tomorrow.",
+            retry_after_seconds: 3600
+          }),
+          { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      userQuota.count++;
+    } else {
+      dailyQuotaMap.set(user.id, { date: todayStr, count: 1 });
+    }
 
     try {
       const serviceClient = getServiceClient();

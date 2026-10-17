@@ -12,9 +12,8 @@ fun AppNavigator(viewModel: ChatViewModel) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val initialDestination = remember {
         val uid = com.example.data.SecurePrefsManager.getUserId(context)
-        val username = com.example.data.SecurePrefsManager.getUsername(context)
         val token = com.example.data.SecurePrefsManager.getSupabaseAccessToken(context)
-        val hasSession = uid.isNotBlank() && username.isNotBlank() && username != "user" && token.isNotBlank()
+        val hasSession = uid.isNotBlank() && token.isNotBlank()
         if (hasSession) "chatList" else "auth"
     }
 

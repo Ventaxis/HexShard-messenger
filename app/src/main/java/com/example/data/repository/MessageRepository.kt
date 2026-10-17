@@ -25,6 +25,23 @@ import timber.log.Timber
 import java.util.Base64
 import java.util.concurrent.TimeUnit
 
+sealed class RemoteMessageSendResult {
+    data class Success(
+        val serverMessageId: String,
+        val sequence: Long,
+        val status: String,
+        val isDuplicate: Boolean = false
+    ) : RemoteMessageSendResult() {
+        val isSuccess: Boolean = true
+    }
+
+    data class Failure(
+        val errorCode: String,
+        val errorMessage: String,
+        val isRetryable: Boolean = true
+    ) : RemoteMessageSendResult()
+}
+
 class MessageRepository(
     private val chatDao: ChatDao,
     private val cryptoRepository: CryptoRepository,
@@ -349,7 +366,7 @@ class MessageRepository(
                                 )
                                 chatDao.updateOutboxPayload(outboxRowId, enc.base64Payload, enc.base64Signature, currentUserId)
                                 chatDao.updateMessageStatus(messageId.toInt(), "sending", currentUserId)
-                                val sent = sendRemoteMessage(
+                                val sentRes = sendRemoteMessage(
                                     idempotencyKey = idempotencyKey,
                                     conversationId = conversationId,
                                     senderId = currentUserId,
@@ -360,9 +377,23 @@ class MessageRepository(
                                     timeStr = timeStr,
                                     personaId = resolvedPersona
                                 )
-                                if (sent) {
-                                    chatDao.deleteOutboxByIdempotencyKey(idempotencyKey, currentUserId)
-                                    updateMessageStatus(messageId.toInt(), "sent", currentUserId)
+                                when (sentRes) {
+                                    is RemoteMessageSendResult.Success -> {
+                                        chatDao.updateMessageServerInfoByIdempotencyKey(
+                                            idempotencyKey = idempotencyKey,
+                                            serverId = sentRes.serverMessageId,
+                                            sequence = sentRes.sequence,
+                                            status = "sent",
+                                            accountId = currentUserId
+                                        )
+                                        chatDao.deleteOutboxByIdempotencyKey(idempotencyKey, currentUserId)
+                                        updateMessageStatus(messageId.toInt(), "sent", currentUserId)
+                                    }
+                                    is RemoteMessageSendResult.Failure -> {
+                                        val newStat = if (sentRes.isRetryable) "pending" else "failed"
+                                        chatDao.updateOutboxAttempt(outboxRowId, newStat, System.currentTimeMillis(), sentRes.errorMessage, currentUserId)
+                                        updateMessageStatus(messageId.toInt(), if (sentRes.isRetryable) "pending" else "error", currentUserId)
+                                    }
                                 }
                             }
                         } catch (resEx: Exception) {
@@ -424,7 +455,7 @@ class MessageRepository(
                 if (isRemoteAuthed && !isAiChat) {
                     backgroundScope.launch {
                         try {
-                            val sentOk = sendRemoteMessage(
+                            val sendResult = sendRemoteMessage(
                                 idempotencyKey = idempotencyKey,
                                 conversationId = conversationId,
                                 senderId = currentUserId,
@@ -435,12 +466,16 @@ class MessageRepository(
                                 timeStr = timeStr,
                                 personaId = resolvedPersona
                             )
-                            if (sentOk) {
-                                chatDao.deleteOutboxByIdempotencyKey(idempotencyKey, currentUserId)
-                                updateMessageStatus(messageId.toInt(), "sent", currentUserId)
-                            } else {
-                                chatDao.updateOutboxAttempt(outboxRowId, "pending", System.currentTimeMillis(), "Server send failed", currentUserId)
-                                updateMessageStatus(messageId.toInt(), "pending", currentUserId)
+                            when (sendResult) {
+                                is RemoteMessageSendResult.Success -> {
+                                    chatDao.deleteOutboxByIdempotencyKey(idempotencyKey, currentUserId)
+                                    updateMessageStatus(messageId.toInt(), "sent", currentUserId)
+                                }
+                                is RemoteMessageSendResult.Failure -> {
+                                    val nextStatus = if (sendResult.isRetryable) "pending" else "error"
+                                    chatDao.updateOutboxAttempt(outboxRowId, nextStatus, System.currentTimeMillis(), sendResult.errorMessage, currentUserId)
+                                    updateMessageStatus(messageId.toInt(), nextStatus, currentUserId)
+                                }
                             }
                         } catch (netEx: Exception) {
                             Timber.e(netEx, "Supabase message send network failure, will retry via outbox")
@@ -470,7 +505,7 @@ class MessageRepository(
 
         if (existingOutbox != null) {
             chatDao.retryOutboxEntry(existingOutbox.id, currentUserId)
-            val sentOk = sendRemoteMessage(
+            val sendRes = sendRemoteMessage(
                 idempotencyKey = existingOutbox.idempotencyKey,
                 conversationId = existingOutbox.conversationId,
                 senderId = existingOutbox.senderId,
@@ -480,18 +515,28 @@ class MessageRepository(
                 type = existingOutbox.type,
                 timeStr = existingOutbox.timeStr
             )
-            if (sentOk) {
-                chatDao.deleteOutboxByIdempotencyKey(existingOutbox.idempotencyKey, currentUserId)
-                updateMessageStatus(msgId, "sent", currentUserId)
-            } else {
-                updateMessageStatus(msgId, "error", currentUserId)
+            when (sendRes) {
+                is RemoteMessageSendResult.Success -> {
+                    chatDao.updateMessageServerInfoByIdempotencyKey(
+                        idempotencyKey = existingOutbox.idempotencyKey,
+                        serverId = sendRes.serverMessageId,
+                        sequence = sendRes.sequence,
+                        status = "sent",
+                        accountId = currentUserId
+                    )
+                    chatDao.deleteOutboxByIdempotencyKey(existingOutbox.idempotencyKey, currentUserId)
+                    updateMessageStatus(msgId, "sent", currentUserId)
+                }
+                is RemoteMessageSendResult.Failure -> {
+                    updateMessageStatus(msgId, "error", currentUserId)
+                }
             }
         }
     }
 
     /**
      * Sends message to Supabase via canonical send_message_idempotent RPC.
-     * STRICT: No fake delivery. If server call fails, returns false fail-closed.
+     * STRICT: No fake delivery. If server call fails, returns failure fail-closed.
      */
     suspend fun sendRemoteMessage(
         idempotencyKey: String,
@@ -503,13 +548,13 @@ class MessageRepository(
         type: String,
         timeStr: String,
         personaId: String? = null
-    ): Boolean = withContext(Dispatchers.IO) {
+    ): RemoteMessageSendResult = withContext(Dispatchers.IO) {
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(context)
         val accessToken = context?.let { SecurePrefsManager.getSupabaseAccessToken(it) }?.takeIf { it.isNotBlank() }
         if (accessToken.isNullOrBlank() || anonKey.isBlank()) {
             Timber.w("Cannot send remote message: user is not authenticated or Supabase not configured")
-            return@withContext false
+            return@withContext RemoteMessageSendResult.Failure("NOT_AUTHENTICATED", "User is not authenticated", isRetryable = false)
         }
 
         try {
@@ -542,7 +587,7 @@ class MessageRepository(
             var rpcResp = httpClient.newCall(rpcReq).execute()
             var isSuccess = rpcResp.isSuccessful
             val initialCode = rpcResp.code
-            var errorBody = if (!isSuccess) rpcResp.body?.string() ?: "" else ""
+            var respBody = rpcResp.body?.string().orEmpty()
             rpcResp.close()
 
             // If unauthorized 401, attempt single-flight token refresh and retry
@@ -559,9 +604,7 @@ class MessageRepository(
                                 .build()
                             val retryResp = httpClient.newCall(retryReq).execute()
                             isSuccess = retryResp.isSuccessful
-                            if (!isSuccess) {
-                                errorBody = retryResp.body?.string() ?: ""
-                            }
+                            respBody = retryResp.body?.string().orEmpty()
                             retryResp.close()
                         }
                     }
@@ -569,14 +612,26 @@ class MessageRepository(
             }
 
             if (!isSuccess) {
-                Timber.e("send_message_idempotent failed (HTTP $initialCode): $errorBody")
-                return@withContext false
+                Timber.e("send_message_idempotent failed (HTTP $initialCode): $respBody")
+                val isRetryable = initialCode >= 500 || initialCode == 429 || initialCode == 408
+                return@withContext RemoteMessageSendResult.Failure("HTTP_$initialCode", respBody.ifBlank { "HTTP $initialCode" }, isRetryable)
             }
 
-            true
+            if (respBody.isNotBlank()) {
+                val json = try { JSONObject(respBody) } catch (_: Exception) { null }
+                if (json != null) {
+                    val sId = json.optString("id", idempotencyKey)
+                    val sSeq = json.optLong("sequence", json.optLong("server_sequence", 0L))
+                    val sStat = json.optString("status", "sent")
+                    val isDup = json.optBoolean("is_duplicate", false)
+                    return@withContext RemoteMessageSendResult.Success(sId, sSeq, sStat, isDup)
+                }
+            }
+
+            RemoteMessageSendResult.Success(idempotencyKey, 0L, "sent")
         } catch (e: Exception) {
             Timber.e(e, "send_message_idempotent RPC network failure")
-            false
+            RemoteMessageSendResult.Failure("NETWORK_ERROR", e.message ?: "Network error", isRetryable = true)
         }
     }
 }

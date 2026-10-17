@@ -313,26 +313,9 @@ class ProfileRepository(private val context: Context?) {
                     }
                     retryCount++
                     if (currentPayload.length() == 0) {
-                        // All requested remote fields were missing from remote schema; save locally and succeed gracefully
-                        val cached = fetchProfileFromServer(userId, token)
-                        val fallbackDob = canonicalDobToSend ?: SecurePrefsManager.getDateOfBirth(ctx, userId)
-                        val resultProfile = (cached ?: UserProfileData(
-                            id = userId,
-                            username = username ?: "",
-                            displayName = displayName ?: "",
-                            bio = bio ?: "",
-                            dateOfBirth = fallbackDob,
-                            avatarUrl = "",
-                            hexNumber = ""
-                        )).copy(
-                            dateOfBirth = fallbackDob,
-                            displayName = displayName?.trim()?.ifBlank { null } ?: cached?.displayName ?: "",
-                            bio = bio?.trim() ?: cached?.bio ?: ""
+                        return@withContext Result.failure<UserProfileData>(
+                            IllegalStateException("Requested profile fields are not present in Supabase schema: $missingCol")
                         )
-                        SecurePrefsManager.setDateOfBirth(ctx, fallbackDob, userId)
-                        if (displayName != null) SecurePrefsManager.setDisplayName(ctx, displayName.trim(), userId)
-                        if (bio != null) SecurePrefsManager.setBio(ctx, bio.trim(), userId)
-                        return@withContext Result.success(resultProfile)
                     }
                     val retryRequest = Request.Builder()
                         .url(url)
@@ -351,24 +334,6 @@ class ProfileRepository(private val context: Context?) {
             }
 
             if (!response.isSuccessful) {
-                val missingCol = extractMissingColumn(responseBody)
-                if (missingCol == "date_of_birth" || missingCol == "date of birth") {
-                    val fallbackDob = canonicalDobToSend ?: SecurePrefsManager.getDateOfBirth(ctx, userId)
-                    SecurePrefsManager.setDateOfBirth(ctx, fallbackDob, userId)
-                    if (displayName != null) SecurePrefsManager.setDisplayName(ctx, displayName.trim(), userId)
-                    if (bio != null) SecurePrefsManager.setBio(ctx, bio.trim(), userId)
-                    val resultProfile = UserProfileData(
-                        id = userId,
-                        username = username ?: SecurePrefsManager.getUsername(ctx),
-                        displayName = displayName ?: SecurePrefsManager.getDisplayName(ctx, userId),
-                        bio = bio ?: SecurePrefsManager.getBio(ctx, userId),
-                        dateOfBirth = fallbackDob,
-                        avatarUrl = SecurePrefsManager.getAvatarUri(ctx, userId) ?: "",
-                        hexNumber = SecurePrefsManager.getPrivateVirtualNumber(ctx, userId)
-                    )
-                    return@withContext Result.success(resultProfile)
-                }
-
                 val errorMessage = try {
                     val j = JSONObject(responseBody)
                     j.optString("message", j.optString("error", "HTTP $responseCode"))
@@ -376,13 +341,13 @@ class ProfileRepository(private val context: Context?) {
                     "HTTP $responseCode: ${responseBody.take(150)}"
                 }
                 Timber.e("Failed to sync profile: HTTP $responseCode - $responseBody")
-                return@withContext Result.failure<UserProfileData>(IllegalStateException(errorMessage))
             }
 
             // Successfully received response with representation
             val array = JSONArray(responseBody)
             var updatedObj: JSONObject? = if (array.length() > 0) array.getJSONObject(0) else null
 
+            var serverWriteSucceeded = response.isSuccessful
             if (updatedObj == null) {
                 // If PATCH returned empty array, no row exists for this userId yet; perform UPSERT
                 var upsertPayload = JSONObject(currentPayload.toString()).apply {
@@ -424,6 +389,7 @@ class ProfileRepository(private val context: Context?) {
                         break
                     }
                 }
+                serverWriteSucceeded = upsertResp.isSuccessful
                 if (upsertResp.isSuccessful) {
                     val upsertArr = try { JSONArray(upsertBody) } catch (_: Exception) { JSONArray() }
                     if (upsertArr.length() > 0) {
@@ -431,6 +397,12 @@ class ProfileRepository(private val context: Context?) {
                     }
                 }
                 upsertResp.close()
+            }
+
+            if (!serverWriteSucceeded) {
+                return@withContext Result.failure<UserProfileData>(
+                    IllegalStateException("Failed to update profile on server (HTTP $responseCode)")
+                )
             }
 
             if (updatedObj == null) {

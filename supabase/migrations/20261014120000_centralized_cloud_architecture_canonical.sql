@@ -531,7 +531,7 @@ CREATE POLICY "Members can view chat attachments"
     ON storage.objects FOR SELECT
     TO authenticated
     USING (
-        bucket_id = 'attachments' AND
+        bucket_id IN ('chat-attachments', 'attachments') AND
         EXISTS (
             SELECT 1 FROM public.conversation_members cm
             WHERE cm.conversation_id = (storage.foldername(name))[1]
@@ -544,7 +544,7 @@ CREATE POLICY "Members can upload chat attachments"
     ON storage.objects FOR INSERT
     TO authenticated
     WITH CHECK (
-        bucket_id = 'attachments' AND
+        bucket_id IN ('chat-attachments', 'attachments') AND
         EXISTS (
             SELECT 1 FROM public.conversation_members cm
             WHERE cm.conversation_id = (storage.foldername(name))[1]

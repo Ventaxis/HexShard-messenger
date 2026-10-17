@@ -10,7 +10,9 @@ import com.example.data.database.isSavedMessages
 import com.example.network.supabase.SupabaseConfig
 import com.example.ui.AppLanguage
 import com.example.ui.LocalizationManager
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -192,21 +194,179 @@ class ConversationRepository(
                 SecurePrefsManager.setLegacyMigrationDone(context, true)
             }
 
+            val isRussian = LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN
+
+            // 2. Ensure Saved Messages chat exists in local vault
+            var savedChat = chatDao.getSavedMessagesChat(targetAccountId)
+            if (savedChat == null) {
+                val defaultSaved = ChatEntity(
+                    accountId = targetAccountId,
+                    name = if (isRussian) "Избранное" else "Saved Messages",
+                    ava = if (isRussian) "ИЗ" else "SM",
+                    status = "",
+                    preview = if (isRussian) "Личное облачное хранилище" else "Personal cloud storage",
+                    time = "",
+                    timestamp = System.currentTimeMillis(),
+                    isGroup = false,
+                    isPinned = true,
+                    unreadCount = 0,
+                    recipientId = "self",
+                    conversationId = "self_$targetAccountId",
+                    conversationType = com.example.data.ConversationType.SAVED_MESSAGES.name
+                )
+                val newSavedId = chatDao.upsertChat(defaultSaved).toInt()
+                savedChat = defaultSaved.copy(id = newSavedId)
+
+                val welcomeMsg = MessageEntity(
+                    accountId = targetAccountId,
+                    chatId = newSavedId,
+                    sender = if (isRussian) "Избранное" else "Saved Messages",
+                    text = if (isRussian) "Добро пожаловать в Избранное! Сохраняйте здесь важные заметки, медиа и ссылки." else "Welcome to Saved Messages! Store important notes, media, and links here.",
+                    time = "Только что",
+                    timestamp = System.currentTimeMillis(),
+                    isMe = false,
+                    isAttachment = false,
+                    status = "delivered",
+                    conversationId = "self_$targetAccountId",
+                    idempotencyKey = "init_saved_msg_$targetAccountId"
+                )
+                chatDao.insertMessageIfNotExists(welcomeMsg)
+            } else {
+                val msgList = chatDao.getMessagesForChatForAccountList(savedChat.id, targetAccountId)
+                if (msgList.isEmpty()) {
+                    val welcomeMsg = MessageEntity(
+                        accountId = targetAccountId,
+                        chatId = savedChat.id,
+                        sender = if (isRussian) "Избранное" else "Saved Messages",
+                        text = if (isRussian) "Добро пожаловать в Избранное! Сохраняйте здесь важные заметки, медиа и ссылки." else "Welcome to Saved Messages! Store important notes, media, and links here.",
+                        time = "Только что",
+                        timestamp = System.currentTimeMillis(),
+                        isMe = false,
+                        isAttachment = false,
+                        status = "delivered",
+                        conversationId = savedChat.conversationId.ifBlank { "self_$targetAccountId" },
+                        idempotencyKey = "init_saved_msg_$targetAccountId"
+                    )
+                    chatDao.insertMessageIfNotExists(welcomeMsg)
+                }
+            }
+
+            // 3. Ensure AI Assistant chat exists in local vault
+            var aiChat = chatDao.getAiAssistantChat(targetAccountId)
+            if (aiChat == null) {
+                val defaultAi = ChatEntity(
+                    accountId = targetAccountId,
+                    name = "Hexagon AI",
+                    ava = "HX",
+                    status = "",
+                    preview = if (isRussian) "Нейроассистент • HexShard / Ventaxis" else "Neural Assistant • HexShard / Ventaxis",
+                    time = "",
+                    timestamp = System.currentTimeMillis(),
+                    isGroup = false,
+                    isPinned = false,
+                    unreadCount = 0,
+                    recipientId = "ai_hexagon",
+                    conversationId = "ai_$targetAccountId",
+                    conversationType = com.example.data.ConversationType.AI_ASSISTANT.name
+                )
+                val newAiId = chatDao.upsertChat(defaultAi).toInt()
+                aiChat = defaultAi.copy(id = newAiId)
+
+                val hexagonWelcome = MessageEntity(
+                    accountId = targetAccountId,
+                    chatId = newAiId,
+                    sender = "Hexagon AI",
+                    text = if (isRussian) "Привет! Я Hexagon AI. Задайте любой вопрос для быстрого ответа!" else "Hello! I am Hexagon AI. Ask me anything for a quick answer!",
+                    time = "Только что",
+                    timestamp = System.currentTimeMillis() - 1000L,
+                    isMe = false,
+                    isAttachment = false,
+                    status = "delivered",
+                    conversationId = "ai_$targetAccountId",
+                    personaId = "hexagon",
+                    idempotencyKey = "init_ai_welcome_hexagon_$targetAccountId"
+                )
+                val ventaxisWelcome = MessageEntity(
+                    accountId = targetAccountId,
+                    chatId = newAiId,
+                    sender = "Ventaxis AI",
+                    text = if (isRussian) "Привет! Я Ventaxis AI. Чем могу помочь вам сегодня?" else "Hello! I am Ventaxis AI. How can I help you today?",
+                    time = "Только что",
+                    timestamp = System.currentTimeMillis(),
+                    isMe = false,
+                    isAttachment = false,
+                    status = "delivered",
+                    conversationId = "ai_$targetAccountId",
+                    personaId = "ventaxis",
+                    idempotencyKey = "init_ai_welcome_ventaxis_$targetAccountId"
+                )
+                chatDao.insertMessageIfNotExists(hexagonWelcome)
+                chatDao.insertMessageIfNotExists(ventaxisWelcome)
+            } else {
+                val aiMessages = chatDao.getMessagesForChatForAccountList(aiChat.id, targetAccountId)
+                val hasHexagon = aiMessages.any { it.personaId == "hexagon" || it.sender.contains("Hexagon", ignoreCase = true) }
+                val hasVentaxis = aiMessages.any { it.personaId == "ventaxis" || it.sender.contains("Ventaxis", ignoreCase = true) }
+                if (!hasHexagon) {
+                    val hexagonWelcome = MessageEntity(
+                        accountId = targetAccountId,
+                        chatId = aiChat.id,
+                        sender = "Hexagon AI",
+                        text = if (isRussian) "Привет! Я Hexagon AI. Задайте любой вопрос для быстрого ответа!" else "Hello! I am Hexagon AI. Ask me anything for a quick answer!",
+                        time = "Только что",
+                        timestamp = System.currentTimeMillis() - 1000L,
+                        isMe = false,
+                        isAttachment = false,
+                        status = "delivered",
+                        conversationId = aiChat.conversationId.ifBlank { "ai_$targetAccountId" },
+                        personaId = "hexagon",
+                        idempotencyKey = "init_ai_welcome_hexagon_$targetAccountId"
+                    )
+                    chatDao.insertMessageIfNotExists(hexagonWelcome)
+                }
+                if (!hasVentaxis) {
+                    val ventaxisWelcome = MessageEntity(
+                        accountId = targetAccountId,
+                        chatId = aiChat.id,
+                        sender = "Ventaxis AI",
+                        text = if (isRussian) "Привет! Я Ventaxis AI. Чем могу помочь вам сегодня?" else "Hello! I am Ventaxis AI. How can I help you today?",
+                        time = "Только что",
+                        timestamp = System.currentTimeMillis(),
+                        isMe = false,
+                        isAttachment = false,
+                        status = "delivered",
+                        conversationId = aiChat.conversationId.ifBlank { "ai_$targetAccountId" },
+                        personaId = "ventaxis",
+                        idempotencyKey = "init_ai_welcome_ventaxis_$targetAccountId"
+                    )
+                    chatDao.insertMessageIfNotExists(ventaxisWelcome)
+                }
+            }
+
+            // 4. Synchronize with Supabase Cloud asynchronously if access token is available
             val ctx = context
             val token = ctx?.let { SecurePrefsManager.getSupabaseAccessToken(it) }?.takeIf { it.isNotBlank() }
 
             if (token != null) {
-                try {
-                    getOrCreateSavedMessagesConversation()
-                    getOrCreateAiConversation()
-                    syncConversationsFromServer(targetAccountId)
-                    return@withLock
-                } catch (e: Exception) {
-                    Timber.w(e, "Server conversation sync during ensureDefaultChatsExist deferred: ${e.message}")
+                kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+                    try {
+                        getOrCreateSavedMessagesConversation()
+                    } catch (e: Exception) {
+                        Timber.w(e, "Saved messages server sync deferred")
+                    }
+                    try {
+                        getOrCreateAiConversation()
+                    } catch (e: Exception) {
+                        Timber.w(e, "AI conversation server sync deferred")
+                    }
+                    try {
+                        syncConversationsFromServer(targetAccountId)
+                    } catch (e: Exception) {
+                        Timber.w(e, "Conversations list server sync deferred: ${e.message}")
+                    }
                 }
             }
 
-            // Offline cache deduplication: merge duplicate rows if any exist in local vault
+            // 5. Offline cache deduplication: merge duplicate rows if any exist in local vault
             val allSaved = chatDao.getAllSavedMessagesChats(targetAccountId)
             if (allSaved.size > 1) {
                 val masterSaved = allSaved.first()
@@ -470,12 +630,55 @@ class ConversationRepository(
                 val finalChat = if (insertedId > 0) chatToUpsert.copy(id = insertedId) else chatDao.getChatByConversationId(convId, currentUserId) ?: chatToUpsert
                 Result.success(finalChat)
             } else {
-                Result.failure(java.io.IOException("Server returned HTTP $code: $body"))
+                Timber.w("Server get_or_create_direct_conversation returned HTTP $code: $body; falling back to deterministic local conversation")
+                createDeterministicLocalDirectChat(currentUserId, peerId, title)
             }
         } catch (e: Exception) {
-            Timber.e(e, "getOrCreateDirectConversation error")
-            Result.failure(e)
+            Timber.e(e, "getOrCreateDirectConversation error; falling back to deterministic local conversation")
+            createDeterministicLocalDirectChat(currentUserId, peerId, title)
         }
+    }
+
+    private suspend fun createDeterministicLocalDirectChat(
+        currentUserId: String,
+        peerId: String,
+        title: String
+    ): Result<ChatEntity> {
+        val convId = computeConversationId(currentUserId, peerId)
+        val resolvedName = title.ifBlank { peerId }
+        val resolvedAva = resolvedName.take(2).uppercase()
+
+        val existing = chatDao.getChatByConversationId(convId, currentUserId)
+            ?: chatDao.getChatByRecipientId(peerId, currentUserId)
+
+        val chatToUpsert = if (existing != null) {
+            existing.copy(
+                conversationId = convId,
+                recipientId = peerId,
+                name = if (resolvedName.isNotBlank()) resolvedName else existing.name,
+                ava = if (existing.ava.isNotBlank()) existing.ava else resolvedAva
+            )
+        } else {
+            ChatEntity(
+                accountId = currentUserId,
+                name = resolvedName,
+                ava = resolvedAva,
+                status = "offline",
+                preview = "E2E encryption channel opened",
+                time = "",
+                timestamp = System.currentTimeMillis(),
+                isGroup = false,
+                isPinned = false,
+                unreadCount = 0,
+                recipientId = peerId,
+                conversationId = convId,
+                conversationType = com.example.data.ConversationType.DIRECT.name
+            )
+        }
+        val insertedId = chatDao.upsertChat(chatToUpsert).toInt()
+        val finalChat = if (insertedId > 0) chatToUpsert.copy(id = insertedId) else chatDao.getChatByConversationId(convId, currentUserId) ?: chatToUpsert
+        persistConversationToCloud(currentUserId, finalChat)
+        return Result.success(finalChat)
     }
 
     suspend fun getOrCreateSavedMessagesConversation(): Result<ChatEntity> = withContext(Dispatchers.IO) {
@@ -485,70 +688,102 @@ class ConversationRepository(
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(ctx)
         val token = SecurePrefsManager.getSupabaseAccessToken(ctx).takeIf { it.isNotBlank() }
-            ?: return@withContext Result.failure(IllegalStateException("Access token missing"))
 
-        try {
-            val rpcUrl = "$baseUrl/rest/v1/rpc/get_or_create_saved_messages_conversation"
-            val req = Request.Builder()
-                .url(rpcUrl)
-                .header("apikey", anonKey)
-                .header("Authorization", "Bearer $token")
-                .header("Content-Type", "application/json")
-                .post("{}".toRequestBody(JSON_MEDIA_TYPE))
-                .build()
+        val isRussian = LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN
+        val savedName = if (isRussian) "Избранное" else "Saved Messages"
+        val savedAva = if (isRussian) "ИЗ" else "SM"
 
-            val resp = httpClient.newCall(req).execute()
-            val body = resp.body?.string().orEmpty()
-            val isSuccess = resp.isSuccessful
-            val code = resp.code
-            resp.close()
+        if (token != null) {
+            try {
+                val rpcUrl = "$baseUrl/rest/v1/rpc/get_or_create_saved_messages_conversation"
+                val req = Request.Builder()
+                    .url(rpcUrl)
+                    .header("apikey", anonKey)
+                    .header("Authorization", "Bearer $token")
+                    .header("Content-Type", "application/json")
+                    .post("{}".toRequestBody(JSON_MEDIA_TYPE))
+                    .build()
 
-            if (isSuccess && body.isNotBlank()) {
-                val obj = JSONObject(body)
-                val convId = obj.getString("id")
-                val isRussian = LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN
-                val savedName = if (isRussian) "Избранное" else "Saved Messages"
-                val savedAva = if (isRussian) "ИЗ" else "SM"
+                val resp = httpClient.newCall(req).execute()
+                val body = resp.body?.string().orEmpty()
+                val isSuccess = resp.isSuccessful
+                resp.close()
 
-                val existing = chatDao.getChatByConversationId(convId, currentUserId)
-                    ?: chatDao.getSavedMessagesChat(currentUserId)
+                if (isSuccess && body.isNotBlank()) {
+                    val obj = JSONObject(body)
+                    val convId = obj.getString("id")
 
-                val chatToUpsert = if (existing != null) {
-                    existing.copy(
-                        conversationId = convId,
-                        recipientId = "self",
-                        name = savedName,
-                        ava = savedAva,
-                        isPinned = true,
-                        conversationType = com.example.data.ConversationType.SAVED_MESSAGES.name
-                    )
-                } else {
-                    ChatEntity(
-                        accountId = currentUserId,
-                        name = savedName,
-                        ava = savedAva,
-                        status = "",
-                        preview = "",
-                        time = "",
-                        timestamp = System.currentTimeMillis(),
-                        isGroup = false,
-                        isPinned = true,
-                        unreadCount = 0,
-                        recipientId = "self",
-                        conversationId = convId,
-                        conversationType = com.example.data.ConversationType.SAVED_MESSAGES.name
-                    )
+                    val existing = chatDao.getChatByConversationId(convId, currentUserId)
+                        ?: chatDao.getSavedMessagesChat(currentUserId)
+
+                    val chatToUpsert = if (existing != null) {
+                        existing.copy(
+                            conversationId = convId,
+                            recipientId = "self",
+                            name = savedName,
+                            ava = savedAva,
+                            isPinned = true,
+                            conversationType = com.example.data.ConversationType.SAVED_MESSAGES.name
+                        )
+                    } else {
+                        ChatEntity(
+                            accountId = currentUserId,
+                            name = savedName,
+                            ava = savedAva,
+                            status = "",
+                            preview = if (isRussian) "Личное облачное хранилище" else "Personal cloud storage",
+                            time = "",
+                            timestamp = System.currentTimeMillis(),
+                            isGroup = false,
+                            isPinned = true,
+                            unreadCount = 0,
+                            recipientId = "self",
+                            conversationId = convId,
+                            conversationType = com.example.data.ConversationType.SAVED_MESSAGES.name
+                        )
+                    }
+                    val insertedId = chatDao.upsertChat(chatToUpsert).toInt()
+                    val finalChat = if (insertedId > 0) chatToUpsert.copy(id = insertedId) else chatDao.getChatByConversationId(convId, currentUserId) ?: chatToUpsert
+                    return@withContext Result.success(finalChat)
                 }
-                val insertedId = chatDao.upsertChat(chatToUpsert).toInt()
-                val finalChat = if (insertedId > 0) chatToUpsert.copy(id = insertedId) else chatDao.getChatByConversationId(convId, currentUserId) ?: chatToUpsert
-                Result.success(finalChat)
-            } else {
-                Result.failure(java.io.IOException("Server returned HTTP $code: $body"))
+            } catch (e: Exception) {
+                Timber.w(e, "getOrCreateSavedMessagesConversation remote call deferred")
             }
-        } catch (e: Exception) {
-            Timber.e(e, "getOrCreateSavedMessagesConversation error")
-            Result.failure(e)
         }
+
+        // Local fallback
+        val convId = "self_$currentUserId"
+        val existing = chatDao.getChatByConversationId(convId, currentUserId)
+            ?: chatDao.getSavedMessagesChat(currentUserId)
+        val chatToUpsert = if (existing != null) {
+            existing.copy(
+                conversationId = convId,
+                recipientId = "self",
+                name = savedName,
+                ava = savedAva,
+                isPinned = true,
+                conversationType = com.example.data.ConversationType.SAVED_MESSAGES.name
+            )
+        } else {
+            ChatEntity(
+                accountId = currentUserId,
+                name = savedName,
+                ava = savedAva,
+                status = "",
+                preview = if (isRussian) "Личное облачное хранилище" else "Personal cloud storage",
+                time = "",
+                timestamp = System.currentTimeMillis(),
+                isGroup = false,
+                isPinned = true,
+                unreadCount = 0,
+                recipientId = "self",
+                conversationId = convId,
+                conversationType = com.example.data.ConversationType.SAVED_MESSAGES.name
+            )
+        }
+        val insertedId = chatDao.upsertChat(chatToUpsert).toInt()
+        val finalChat = if (insertedId > 0) chatToUpsert.copy(id = insertedId) else chatDao.getChatByConversationId(convId, currentUserId) ?: chatToUpsert
+        Result.success(finalChat)
     }
 
     suspend fun getOrCreateAiConversation(): Result<ChatEntity> = withContext(Dispatchers.IO) {
@@ -558,71 +793,103 @@ class ConversationRepository(
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(ctx)
         val token = SecurePrefsManager.getSupabaseAccessToken(ctx).takeIf { it.isNotBlank() }
-            ?: return@withContext Result.failure(IllegalStateException("Access token missing"))
 
-        try {
-            val rpcUrl = "$baseUrl/rest/v1/rpc/get_or_create_ai_conversation"
-            val req = Request.Builder()
-                .url(rpcUrl)
-                .header("apikey", anonKey)
-                .header("Authorization", "Bearer $token")
-                .header("Content-Type", "application/json")
-                .post("{}".toRequestBody(JSON_MEDIA_TYPE))
-                .build()
+        val isRussian = LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN
+        val aiName = "Hexagon AI"
+        val aiAva = "HX"
+        val aiPreview = if (isRussian) "Нейроассистент • HexShard / Ventaxis" else "Neural Assistant • HexShard / Ventaxis"
 
-            val resp = httpClient.newCall(req).execute()
-            val body = resp.body?.string().orEmpty()
-            val isSuccess = resp.isSuccessful
-            val code = resp.code
-            resp.close()
+        if (token != null) {
+            try {
+                val rpcUrl = "$baseUrl/rest/v1/rpc/get_or_create_ai_conversation"
+                val req = Request.Builder()
+                    .url(rpcUrl)
+                    .header("apikey", anonKey)
+                    .header("Authorization", "Bearer $token")
+                    .header("Content-Type", "application/json")
+                    .post("{}".toRequestBody(JSON_MEDIA_TYPE))
+                    .build()
 
-            if (isSuccess && body.isNotBlank()) {
-                val obj = JSONObject(body)
-                val convId = obj.getString("id")
-                val isRussian = LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN
-                val aiName = "Hexagon AI"
-                val aiAva = "HX"
-                val aiPreview = if (isRussian) "Нейроассистент • HexShard / Ventaxis" else "Neural Assistant • HexShard / Ventaxis"
+                val resp = httpClient.newCall(req).execute()
+                val body = resp.body?.string().orEmpty()
+                val isSuccess = resp.isSuccessful
+                resp.close()
 
-                val existing = chatDao.getChatByConversationId(convId, currentUserId)
-                    ?: chatDao.getAiAssistantChat(currentUserId)
+                if (isSuccess && body.isNotBlank()) {
+                    val obj = JSONObject(body)
+                    val convId = obj.getString("id")
 
-                val chatToUpsert = if (existing != null) {
-                    existing.copy(
-                        conversationId = convId,
-                        recipientId = "ai_hexagon",
-                        name = aiName,
-                        ava = aiAva,
-                        preview = existing.preview.ifBlank { aiPreview },
-                        conversationType = com.example.data.ConversationType.AI_ASSISTANT.name
-                    )
-                } else {
-                    ChatEntity(
-                        accountId = currentUserId,
-                        name = aiName,
-                        ava = aiAva,
-                        status = "",
-                        preview = aiPreview,
-                        time = "",
-                        timestamp = System.currentTimeMillis(),
-                        isGroup = false,
-                        isPinned = false,
-                        unreadCount = 0,
-                        recipientId = "ai_hexagon",
-                        conversationId = convId,
-                        conversationType = com.example.data.ConversationType.AI_ASSISTANT.name
-                    )
+                    val existing = chatDao.getChatByConversationId(convId, currentUserId)
+                        ?: chatDao.getAiAssistantChat(currentUserId)
+
+                    val chatToUpsert = if (existing != null) {
+                        existing.copy(
+                            conversationId = convId,
+                            recipientId = "ai_hexagon",
+                            name = aiName,
+                            ava = aiAva,
+                            preview = existing.preview.ifBlank { aiPreview },
+                            conversationType = com.example.data.ConversationType.AI_ASSISTANT.name
+                        )
+                    } else {
+                        ChatEntity(
+                            accountId = currentUserId,
+                            name = aiName,
+                            ava = aiAva,
+                            status = "",
+                            preview = aiPreview,
+                            time = "",
+                            timestamp = System.currentTimeMillis(),
+                            isGroup = false,
+                            isPinned = false,
+                            unreadCount = 0,
+                            recipientId = "ai_hexagon",
+                            conversationId = convId,
+                            conversationType = com.example.data.ConversationType.AI_ASSISTANT.name
+                        )
+                    }
+                    val insertedId = chatDao.upsertChat(chatToUpsert).toInt()
+                    val finalChat = if (insertedId > 0) chatToUpsert.copy(id = insertedId) else chatDao.getChatByConversationId(convId, currentUserId) ?: chatToUpsert
+                    return@withContext Result.success(finalChat)
                 }
-                val insertedId = chatDao.upsertChat(chatToUpsert).toInt()
-                val finalChat = if (insertedId > 0) chatToUpsert.copy(id = insertedId) else chatDao.getChatByConversationId(convId, currentUserId) ?: chatToUpsert
-                Result.success(finalChat)
-            } else {
-                Result.failure(java.io.IOException("Server returned HTTP $code: $body"))
+            } catch (e: Exception) {
+                Timber.w(e, "getOrCreateAiConversation remote call deferred")
             }
-        } catch (e: Exception) {
-            Timber.e(e, "getOrCreateAiConversation error")
-            Result.failure(e)
         }
+
+        // Local fallback
+        val convId = "ai_$currentUserId"
+        val existing = chatDao.getChatByConversationId(convId, currentUserId)
+            ?: chatDao.getAiAssistantChat(currentUserId)
+        val chatToUpsert = if (existing != null) {
+            existing.copy(
+                conversationId = convId,
+                recipientId = "ai_hexagon",
+                name = aiName,
+                ava = aiAva,
+                preview = existing.preview.ifBlank { aiPreview },
+                conversationType = com.example.data.ConversationType.AI_ASSISTANT.name
+            )
+        } else {
+            ChatEntity(
+                accountId = currentUserId,
+                name = aiName,
+                ava = aiAva,
+                status = "",
+                preview = aiPreview,
+                time = "",
+                timestamp = System.currentTimeMillis(),
+                isGroup = false,
+                isPinned = false,
+                unreadCount = 0,
+                recipientId = "ai_hexagon",
+                conversationId = convId,
+                conversationType = com.example.data.ConversationType.AI_ASSISTANT.name
+            )
+        }
+        val insertedId = chatDao.upsertChat(chatToUpsert).toInt()
+        val finalChat = if (insertedId > 0) chatToUpsert.copy(id = insertedId) else chatDao.getChatByConversationId(convId, currentUserId) ?: chatToUpsert
+        Result.success(finalChat)
     }
 
     suspend fun createOrGetConversationRemote(

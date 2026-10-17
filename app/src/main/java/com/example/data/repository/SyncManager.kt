@@ -597,7 +597,7 @@ class SyncManager(
                         }
                     }
                     else -> {
-                        messageRepository.sendRemoteMessage(
+                        val sendResult = messageRepository.sendRemoteMessage(
                             idempotencyKey = entry.idempotencyKey,
                             conversationId = entry.conversationId,
                             senderId = entry.senderId,
@@ -607,6 +607,7 @@ class SyncManager(
                             type = entry.type,
                             timeStr = entry.timeStr
                         )
+                        sendResult is RemoteMessageSendResult.Success
                     }
                 }
             } catch (e: Exception) {

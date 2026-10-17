@@ -243,36 +243,14 @@ class ChatViewModel @Inject constructor(
         _searchQuery.value = ""
         _searchResults.value = UnifiedSearchResults()
         viewModelScope.launch {
-            val currentUserId = repository.getCurrentUserId()
             val recipientId = user.userId.ifBlank { user.username }
             val name = user.displayName.ifBlank { user.username }
-            val initials = name.take(2).uppercase()
-            val conversationId = repository.computeConversationId(currentUserId, recipientId)
-
-            val existing = repository.getChatByConversationId(conversationId)
-                ?: repository.getChatByRecipientId(recipientId)
-                ?: chats.value.find { 
-                    it.recipientId == recipientId || it.name.equals(name, ignoreCase = true) || (it.conversationId.isNotBlank() && it.conversationId == conversationId)
-                }
-
-            if (existing != null) {
-                _selectedChatId.value = existing.id
-                return@launch
+            val res = repository.getOrCreateDirectConversation(recipientId, name)
+            res.onSuccess { chat ->
+                _selectedChatId.value = chat.id
+            }.onFailure { err ->
+                timber.log.Timber.e(err, "Failed to open chat with user $recipientId")
             }
-
-            val newChat = ChatEntity(
-                accountId = currentUserId,
-                name = name,
-                ava = initials,
-                status = "offline",
-                preview = "E2E encryption channel opened",
-                time = getFormattedTime(),
-                recipientId = recipientId,
-                conversationId = conversationId,
-                conversationType = com.example.data.ConversationType.DIRECT.name
-            )
-            val newChatIdInt = repository.insertChat(newChat).toInt()
-            _selectedChatId.value = newChatIdInt
         }
     }
 
@@ -339,11 +317,7 @@ class ChatViewModel @Inject constructor(
                     context.contentResolver.getType(uri) ?: "image/jpeg"
                 } else null
 
-                var audioUrl = repository.uploadMediaMessage(context, uri, cid, type, idempotencyKey, chat.recipientId.ifEmpty { chat.name })
-                if (audioUrl == null && (isSelfChat || isAiChat)) {
-                    audioUrl = uri.toString()
-                }
-
+                val audioUrl = repository.uploadMediaMessage(context, uri, cid, type, idempotencyKey, chat.recipientId.ifEmpty { chat.name })
                 if (audioUrl == null) {
                     _isSending.value = false
                     return@launch
@@ -628,6 +602,48 @@ class ChatViewModel @Inject constructor(
         _selectedAiModel.value = model
     }
 
+    fun deleteMessage(messageId: Int) {
+        viewModelScope.launch {
+            try {
+                repository.deleteMessage(messageId)
+            } catch (e: Exception) {
+                timber.log.Timber.e(e, "Failed to delete message $messageId")
+            }
+        }
+    }
+
+    fun editMessage(messageId: Int, newText: String) {
+        viewModelScope.launch {
+            try {
+                repository.editMessage(messageId, newText)
+            } catch (e: Exception) {
+                timber.log.Timber.e(e, "Failed to edit message $messageId")
+            }
+        }
+    }
+
+    fun forwardMessage(targetChatId: Int, message: com.example.data.database.MessageEntity) {
+        viewModelScope.launch {
+            val targetChat = chats.value.find { it.id == targetChatId } ?: return@launch
+            val timeStr = getFormattedTime()
+            val idempotencyKey = generateIdempotencyKey()
+            repository.sendMessage(
+                chatId = targetChatId,
+                sender = "me",
+                text = message.text,
+                isMe = true,
+                isAttachment = message.isAttachment,
+                timeStr = timeStr,
+                status = "sending",
+                type = message.type,
+                audioUrl = message.audioUrl,
+                duration = message.duration,
+                recipientId = targetChat.recipientId.ifEmpty { targetChat.name },
+                idempotencyKey = idempotencyKey
+            )
+        }
+    }
+
     private fun handleAiReply(
         chatId: Int,
         userMsg: String,
@@ -665,7 +681,7 @@ class ChatViewModel @Inject constructor(
                         history = history,
                         modelOption = modelOption
                     )
-                } ?: geminiService.generateFallbackResult(userMsg, history, modelOption)
+                }
 
                 val originalMsg = repository.getMessageById(originalMsgId)
                 val userClientId = originalMsg?.idempotencyKey?.ifBlank { originalMsgId.toString() } ?: originalMsgId.toString()
@@ -702,65 +718,43 @@ class ChatViewModel @Inject constructor(
                     is AiResult.RateLimited -> {
                         _aiErrorState.value = AiUiError.RateLimited(result.retryAfterSeconds)
                     }
-                    else -> {
-                        // Any other status: fallback with graceful in-character response
-                        _aiErrorState.value = null
-                        val replyTime = getFormattedTime()
-                        val fallback = geminiService.generateFallbackReply(userMsg, history, modelOption)
-                        val replyKey = generateIdempotencyKey()
-                        repository.sendMessage(
-                            chatId = chatId,
-                            sender = modelOption.displayName,
-                            text = fallback,
-                            isMe = false,
-                            isAttachment = false,
-                            timeStr = replyTime,
-                            status = "delivered",
-                            recipientId = "ai_hexagon",
-                            idempotencyKey = replyKey,
-                            personaId = activePersonaId
-                        )
-                        persistAiTranscript(
-                            userClientId = userClientId,
-                            userText = userOriginalText,
-                            replyClientId = replyKey,
-                            replyText = fallback,
-                            personaId = activePersonaId,
-                            timeStr = replyTime,
-                            localMessageId = originalMsgId,
-                            chatId = chatId
-                        )
+                    is AiResult.Error -> {
+                        _aiErrorState.value = AiUiError.Custom(result.message)
+                    }
+                    is AiResult.Unauthorized -> {
+                        _aiErrorState.value = AiUiError.Unauthorized
+                    }
+                    is AiResult.ModelUnavailable -> {
+                        _aiErrorState.value = AiUiError.ModelUnavailable
+                    }
+                    is AiResult.DeploymentUnavailable -> {
+                        _aiErrorState.value = AiUiError.DeploymentUnavailable
+                    }
+                    is AiResult.ConfigurationError -> {
+                        _aiErrorState.value = AiUiError.ConfigurationError
+                    }
+                    is AiResult.FunctionNotFound -> {
+                        _aiErrorState.value = AiUiError.FunctionNotFound
+                    }
+                    is AiResult.InvalidRequest -> {
+                        _aiErrorState.value = AiUiError.InvalidRequest
+                    }
+                    is AiResult.NetworkError -> {
+                        _aiErrorState.value = AiUiError.NetworkError
+                    }
+                    is AiResult.UpstreamError -> {
+                        _aiErrorState.value = AiUiError.UpstreamError(result.message)
+                    }
+                    is AiResult.Loading -> {
+                        // In progress
+                    }
+                    null -> {
+                        _aiErrorState.value = AiUiError.Custom("AI Assistant request timed out")
                     }
                 }
             } catch (e: Exception) {
                 timber.log.Timber.e(e, "Error during handleAiReply")
-                val replyTime = getFormattedTime()
-                val fallback = geminiService.generateFallbackReply(userMsg, emptyList(), modelOption)
-                val replyKey = generateIdempotencyKey()
-                repository.sendMessage(
-                    chatId = chatId,
-                    sender = modelOption.displayName,
-                    text = fallback,
-                    isMe = false,
-                    isAttachment = false,
-                    timeStr = replyTime,
-                    status = "delivered",
-                    recipientId = "ai_hexagon",
-                    idempotencyKey = replyKey,
-                    personaId = activePersonaId
-                )
-                try {
-                    persistAiTranscript(
-                        userClientId = originalMsgId.toString(),
-                        userText = userMsg,
-                        replyClientId = replyKey,
-                        replyText = fallback,
-                        personaId = activePersonaId,
-                        timeStr = replyTime,
-                        localMessageId = originalMsgId,
-                        chatId = chatId
-                    )
-                } catch (_: Exception) {}
+                _aiErrorState.value = AiUiError.Custom(e.message ?: "Failed to process AI response")
             } finally {
                 _typingChatId.value = null
             }
@@ -822,13 +816,13 @@ class ChatViewModel @Inject constructor(
     fun createNewChat(name: String, initials: String) {
         viewModelScope.launch {
             val trimmed = name.trim()
-            val currentUserId = repository.getCurrentUserId()
-            
+            if (trimmed.isBlank()) return@launch
+
             val isHexagon = trimmed.equals("Hexagon", ignoreCase = true) || trimmed.equals("Hexagon AI", ignoreCase = true)
             val isVentaxis = trimmed.equals("Ventaxis", ignoreCase = true) || trimmed.equals("Ventaxis AI", ignoreCase = true)
             val isHexShard = trimmed.equals("HexShard", ignoreCase = true) || trimmed.equals("HexShard AI", ignoreCase = true)
             val isAi = isHexagon || isVentaxis || isHexShard || trimmed.equals("AI", ignoreCase = true) || trimmed.equals("AI Assistant", ignoreCase = true)
-            
+
             if (isAi) {
                 if (isVentaxis) {
                     _selectedAiModel.value = AiModelOption.VENTAXIS
@@ -843,88 +837,48 @@ class ChatViewModel @Inject constructor(
             }
 
             val resolved = repository.resolveUser(trimmed)
-            if (resolved == null) {
-                // If not found as user, search if there is any user matching
+            val finalRecipientId = resolved?.first ?: run {
                 val searchList = try { repository.searchUsers(trimmed) } catch (_: Exception) { emptyList() }
                 val match = searchList.firstOrNull { 
                     it.username.equals(trimmed.removePrefix("@"), ignoreCase = true) ||
                     it.displayName.equals(trimmed, ignoreCase = true) ||
                     (it.virtualNumber != null && it.virtualNumber.contains(trimmed.filter { c -> c.isDigit() }))
                 }
-                if (match == null) {
-                    _chatCreateError.value = trimmed
-                    return@launch
-                }
-                openChatWithUser(match)
-                return@launch
+                match?.userId ?: trimmed
             }
-            val finalRecipientId = resolved.first
-            val finalName = resolved.second
-            val finalAva = if (initials.isNotBlank()) initials.uppercase().take(2) else finalName.take(2).uppercase()
-            val conversationId = repository.computeConversationId(currentUserId, finalRecipientId)
-
-            val existing = repository.getChatByConversationId(conversationId)
-                ?: repository.getChatByRecipientId(finalRecipientId)
-                ?: chats.value.find { 
-                    it.recipientId == finalRecipientId || it.name.equals(finalName, ignoreCase = true) || (it.conversationId.isNotBlank() && it.conversationId == conversationId)
+            val finalName = resolved?.second ?: run {
+                val searchList = try { repository.searchUsers(trimmed) } catch (_: Exception) { emptyList() }
+                val match = searchList.firstOrNull { 
+                    it.username.equals(trimmed.removePrefix("@"), ignoreCase = true) ||
+                    it.displayName.equals(trimmed, ignoreCase = true)
                 }
-            if (existing != null) {
-                _selectedChatId.value = existing.id
-                return@launch
+                match?.displayName?.ifBlank { match.username } ?: trimmed
             }
 
-            val newChat = ChatEntity(
-                accountId = currentUserId,
-                name = finalName,
-                ava = finalAva,
-                status = "offline",
-                preview = "E2E encryption channel opened",
-                time = getFormattedTime(),
-                recipientId = finalRecipientId,
-                conversationId = conversationId,
-                conversationType = com.example.data.ConversationType.DIRECT.name
-            )
-            val newChatIdInt = repository.insertChat(newChat).toInt()
-            _selectedChatId.value = newChatIdInt
+            val res = repository.getOrCreateDirectConversation(finalRecipientId, finalName)
+            res.onSuccess { chat ->
+                _selectedChatId.value = chat.id
+            }.onFailure { err ->
+                timber.log.Timber.e(err, "Failed to create direct conversation for $finalRecipientId")
+            }
         }
     }
 
     fun importContactFromQr(profile: com.example.util.ProfileQrData, onComplete: (Boolean) -> Unit = {}) {
         viewModelScope.launch {
             try {
-                val currentUserId = repository.getCurrentUserId()
                 if (profile.userId.isNotBlank() && profile.publicKey.isNotBlank()) {
                     repository.registerVerifiedPeerKey(profile.userId, profile.publicKey)
                 }
                 val finalName = profile.displayName.ifBlank { profile.hexNumber.ifBlank { profile.userId } }
-                val finalAva = finalName.take(2).uppercase()
-                val conversationId = repository.computeConversationId(currentUserId, profile.userId)
-
-                val existing = repository.getChatByConversationId(conversationId)
-                    ?: repository.getChatByRecipientId(profile.userId)
-                    ?: chats.value.find { 
-                        it.recipientId == profile.userId || it.name.equals(finalName, ignoreCase = true) || (it.conversationId.isNotBlank() && it.conversationId == conversationId)
-                    }
-                if (existing != null) {
-                    _selectedChatId.value = existing.id
+                val res = repository.getOrCreateDirectConversation(profile.userId, finalName)
+                res.onSuccess { chat ->
+                    _selectedChatId.value = chat.id
                     onComplete(true)
-                    return@launch
+                }.onFailure { err ->
+                    timber.log.Timber.e(err, "Failed to import contact from QR")
+                    onComplete(false)
                 }
-
-                val newChat = ChatEntity(
-                    accountId = currentUserId,
-                    name = finalName,
-                    ava = finalAva,
-                    status = "offline",
-                    preview = "Verified via QR profile exchange",
-                    time = getFormattedTime(),
-                    recipientId = profile.userId,
-                    conversationId = conversationId,
-                    conversationType = com.example.data.ConversationType.DIRECT.name
-                )
-                val newChatIdInt = repository.insertChat(newChat).toInt()
-                _selectedChatId.value = newChatIdInt
-                onComplete(true)
             } catch (e: Exception) {
                 timber.log.Timber.e(e, "Failed to import contact from QR")
                 onComplete(false)
@@ -943,36 +897,14 @@ class ChatViewModel @Inject constructor(
                 if (profile.publicKey.isNotBlank()) {
                     repository.registerVerifiedPeerKey(profile.userId, profile.publicKey)
                 }
-                val currentUserId = repository.getCurrentUserId()
                 val finalName = profile.username.ifBlank { profile.hexNumber.ifBlank { profile.userId } }
-                val finalAva = finalName.take(2).uppercase()
-                val conversationId = repository.computeConversationId(currentUserId, profile.userId)
-
-                val existing = repository.getChatByConversationId(conversationId)
-                    ?: repository.getChatByRecipientId(profile.userId)
-                    ?: chats.value.find { 
-                        it.recipientId == profile.userId || it.name.equals(finalName, ignoreCase = true) || (it.conversationId.isNotBlank() && it.conversationId == conversationId)
-                    }
-                if (existing != null) {
-                    _selectedChatId.value = existing.id
+                val res = repository.getOrCreateDirectConversation(profile.userId, finalName)
+                res.onSuccess { chat ->
+                    _selectedChatId.value = chat.id
                     onComplete(true, null)
-                    return@launch
+                }.onFailure { err ->
+                    onComplete(false, err.localizedMessage)
                 }
-
-                val newChat = ChatEntity(
-                    accountId = currentUserId,
-                    name = finalName,
-                    ava = finalAva,
-                    status = "offline",
-                    preview = "Verified via secure QR token exchange",
-                    time = getFormattedTime(),
-                    recipientId = profile.userId,
-                    conversationId = conversationId,
-                    conversationType = com.example.data.ConversationType.DIRECT.name
-                )
-                val newChatIdInt = repository.insertChat(newChat).toInt()
-                _selectedChatId.value = newChatIdInt
-                onComplete(true, null)
             } catch (e: Exception) {
                 timber.log.Timber.e(e, "Failed to resolve QR token")
                 onComplete(false, e.localizedMessage)
@@ -999,35 +931,17 @@ class ChatViewModel @Inject constructor(
                 if (profile.publicKey.isNotBlank()) {
                     repository.registerVerifiedPeerKey(profile.userId, profile.publicKey)
                 }
-                val currentUserId = repository.getCurrentUserId()
                 val finalName = profile.username.ifBlank { profile.hexNumber.ifBlank { profile.userId } }
-                val finalAva = finalName.take(2).uppercase()
-                val conversationId = repository.computeConversationId(currentUserId, profile.userId)
-
-                val existing = repository.getChatByConversationId(conversationId)
-                    ?: repository.getChatByRecipientId(profile.userId)
-                    ?: chats.value.find { 
-                        it.recipientId == profile.userId || it.name.equals(finalName, ignoreCase = true) || (it.conversationId.isNotBlank() && it.conversationId == conversationId)
-                    }
-                if (existing != null) {
-                    _selectedChatId.value = existing.id
-                } else {
-                    val newChat = ChatEntity(
-                        accountId = currentUserId,
-                        name = finalName,
-                        ava = finalAva,
-                        status = "offline",
-                        preview = "Verified via secure QR token exchange",
-                        time = getFormattedTime(),
-                        recipientId = profile.userId,
-                        conversationId = conversationId,
-                        conversationType = com.example.data.ConversationType.DIRECT.name
-                    )
-                    val newChatIdInt = repository.insertChat(newChat).toInt()
-                    _selectedChatId.value = newChatIdInt
+                val res = repository.getOrCreateDirectConversation(profile.userId, finalName)
+                res.onSuccess { chat ->
+                    _selectedChatId.value = chat.id
+                    _pendingProfileConfirmation.value = null
+                    onComplete(true)
+                }.onFailure { err ->
+                    timber.log.Timber.e(err, "Failed to confirm add contact")
+                    _pendingProfileConfirmation.value = null
+                    onComplete(false)
                 }
-                _pendingProfileConfirmation.value = null
-                onComplete(true)
             } catch (e: Exception) {
                 timber.log.Timber.e(e, "Failed to confirm add contact")
                 _pendingProfileConfirmation.value = null
