@@ -73,8 +73,15 @@ object TelegramService {
                     )
                 }
             }
+            val errorMsg = try {
+                val errJson = JSONObject(body)
+                errJson.optString("error", if (resp.code == 404) "Telegram verification service is not deployed on server (HTTP 404)" else "Failed to initiate Telegram verification on server")
+            } catch (_: Exception) {
+                if (resp.code == 404) "Telegram verification service is not deployed on server (HTTP 404)"
+                else "Failed to initiate Telegram verification on server"
+            }
             Timber.w("Failed to create Telegram challenge on server: HTTP ${resp.code}: $body")
-            TelegramChallengeResult.Error("Failed to initiate Telegram verification on server")
+            TelegramChallengeResult.Error(errorMsg)
         } catch (e: Exception) {
             Timber.e(e, "Network error during create-telegram-challenge")
             TelegramChallengeResult.Error("Unable to reach verification server. Please check your connection.")
@@ -127,9 +134,10 @@ object TelegramService {
 
             val errorMsg = try {
                 val errJson = JSONObject(body)
-                errJson.optString("error", "Invalid or expired verification code")
+                errJson.optString("error", if (resp.code == 404) "Telegram verification service is not deployed on server (HTTP 404)" else "Invalid or expired verification code")
             } catch (_: Exception) {
-                "Invalid or expired verification code"
+                if (resp.code == 404) "Telegram verification service is not deployed on server (HTTP 404)"
+                else "Invalid or expired verification code"
             }
             TelegramVerifyResult.Error(errorMsg)
         } catch (e: Exception) {

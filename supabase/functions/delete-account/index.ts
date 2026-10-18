@@ -21,7 +21,7 @@ serve(async (req: Request) => {
     const userClient = getUserClient(authHeader);
     const serviceClient = getServiceClient();
 
-    // 1. Clean up storage files (profile-backgrounds)
+    // 1. Clean up storage files (profile-backgrounds and avatars)
     try {
       const { data: bgFiles } = await serviceClient.storage.from("profile-backgrounds").list(userId);
       if (bgFiles && bgFiles.length > 0) {
@@ -32,18 +32,29 @@ serve(async (req: Request) => {
       console.warn("Profile background storage cleanup:", _storageErr);
     }
 
-    // 2. Run database cleanup RPC
     try {
-      await userClient.rpc("delete_user_account");
-    } catch (_e) {
+      const { data: avFiles } = await serviceClient.storage.from("avatars").list(userId);
+      if (avFiles && avFiles.length > 0) {
+        const avPaths = avFiles.map((f: { name: string }) => `${userId}/${f.name}`);
+        await serviceClient.storage.from("avatars").remove(avPaths);
+      }
+    } catch (_avErr) {
+      console.warn("Avatars storage cleanup:", _avErr);
+    }
+
+    // 2. Run database cleanup RPC with explicit error check
+    const { error: rpcErr } = await userClient.rpc("delete_user_account");
+    if (rpcErr) {
+      console.warn("delete_user_account RPC returned error, executing fallback:", rpcErr);
       // Fallback direct cleanup with service client
-      await serviceClient.from("attachments").delete().eq("owner_id", userId);
+      await serviceClient.from("attachments").delete().or(`owner_id.eq.${userId},uploader_id.eq.${userId}`);
       await serviceClient.from("messages").delete().eq("sender_id", userId);
       await serviceClient.from("conversation_members").delete().eq("account_id", userId);
       await serviceClient.from("devices").delete().eq("account_id", userId);
       await serviceClient.from("telegram_links").delete().eq("account_id", userId);
       await serviceClient.from("telegram_challenges").delete().eq("account_id", userId);
-      await serviceClient.from("hex_numbers").update({ status: "cooldown", owner_id: null }).eq("owner_id", userId);
+      await serviceClient.from("user_crypto_backups").delete().eq("account_id", userId);
+      await serviceClient.from("hex_numbers").update({ status: "available", owner_id: null, account_id: null }).or(`owner_id.eq.${userId},account_id.eq.${userId}`);
       await serviceClient.from("profiles").delete().eq("id", userId);
     }
 

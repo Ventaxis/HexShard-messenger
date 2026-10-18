@@ -475,6 +475,9 @@ CREATE TABLE IF NOT EXISTS public.messages (
     CONSTRAINT uq_messages_conversation_client UNIQUE (conversation_id, client_message_id)
 );
 
+ALTER TABLE public.conversations ADD COLUMN IF NOT EXISTS participant1 UUID REFERENCES auth.users(id) ON DELETE CASCADE;
+ALTER TABLE public.conversations ADD COLUMN IF NOT EXISTS participant2 UUID REFERENCES auth.users(id) ON DELETE CASCADE;
+
 ALTER TABLE public.conversations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
 
@@ -491,7 +494,7 @@ CREATE POLICY "conversations_insert_policy" ON public.conversations
 DROP POLICY IF EXISTS "messages_select_policy" ON public.messages;
 CREATE POLICY "messages_select_policy" ON public.messages
     FOR SELECT TO authenticated
-    USING (sender_id = auth.uid() OR recipient_id = auth.uid());
+    USING (sender_id = auth.uid() OR recipient_id::text = auth.uid()::text);
 
 DROP POLICY IF EXISTS "messages_insert_policy" ON public.messages;
 CREATE POLICY "messages_insert_policy" ON public.messages
@@ -575,38 +578,6 @@ BEGIN
         'client_message_id', p_client_message_id,
         'idempotent', false,
         'created_at', now()
-    );
-END;
-$$;
-
-GRANT EXECUTE ON FUNCTION public.send_message_idempotent(TEXT, TEXT, TEXT, TEXT, UUID, TEXT, TEXT, INT) TO authenticated;
-
--- Non-prefixed overload for schema cache compatibility
-CREATE OR REPLACE FUNCTION public.send_message_idempotent(
-    conversation_id TEXT,
-    client_message_id TEXT,
-    payload TEXT,
-    signature TEXT,
-    recipient_id UUID DEFAULT NULL,
-    type TEXT DEFAULT 'text',
-    time_str TEXT DEFAULT '',
-    encryption_version INT DEFAULT 2
-)
-RETURNS JSONB
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public, pg_temp
-AS $$
-BEGIN
-    RETURN public.send_message_idempotent(
-        conversation_id,
-        client_message_id,
-        payload,
-        signature,
-        recipient_id,
-        type,
-        time_str,
-        encryption_version
     );
 END;
 $$;

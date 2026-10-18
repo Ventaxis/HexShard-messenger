@@ -18,7 +18,7 @@ serve(async (req: Request) => {
 
     const supabase = getServiceClient();
 
-    // Check rate limit: maximum 3 active challenges created in last 5 minutes
+    // Check rate limit: maximum 5 active challenges created in last 5 minutes
     const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
     const { count, error: countError } = await supabase
       .from("telegram_challenges")
@@ -27,6 +27,7 @@ serve(async (req: Request) => {
       .gt("created_at", fiveMinutesAgo);
 
     if (countError) {
+      console.error("Database error checking rate limit:", countError);
       return new Response(
         JSON.stringify({ error: "Database error checking rate limit" }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -65,16 +66,16 @@ serve(async (req: Request) => {
     });
 
     if (insertError) {
+      console.error("Failed to insert telegram_challenge:", insertError);
       return new Response(
-        JSON.stringify({ error: "Failed to persist challenge" }),
+        JSON.stringify({ error: "Failed to persist challenge in database" }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    const botUsername = Deno.env.get("TELEGRAM_BOT_USERNAME") ?? "HexShardBot";
+    const botUsername = (Deno.env.get("TELEGRAM_BOT_USERNAME") || "HexShardBot").trim().replace(/^@/, "");
     const deepLink = `https://t.me/${botUsername}?start=${challengeId}`;
 
-    // Security requirement: NEVER return verification code or secrets to client
     return new Response(
       JSON.stringify({
         challenge_id: challengeId,
@@ -83,7 +84,8 @@ serve(async (req: Request) => {
       }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
-  } catch (_e) {
+  } catch (e) {
+    console.error("Unexpected error in create-telegram-challenge:", e);
     return new Response(
       JSON.stringify({ error: "Internal server error" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }

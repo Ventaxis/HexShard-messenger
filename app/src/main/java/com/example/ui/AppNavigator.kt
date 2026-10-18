@@ -99,11 +99,17 @@ fun AppNavigator(viewModel: ChatViewModel) {
                     }
                 },
                 onDeleteAccount = {
-                    viewModel.deleteAccount(context) {
-                        navController.navigate("auth") {
-                            popUpTo(0) { inclusive = true }
+                    viewModel.deleteAccount(
+                        context = context,
+                        onSuccess = {
+                            navController.navigate("auth") {
+                                popUpTo(0) { inclusive = true }
+                            }
+                        },
+                        onError = { errMsg ->
+                            android.widget.Toast.makeText(context, errMsg, android.widget.Toast.LENGTH_LONG).show()
                         }
-                    }
+                    )
                 }
             )
         }

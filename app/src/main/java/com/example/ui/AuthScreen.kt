@@ -329,8 +329,8 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
 
     // Action: Step 2 -> Verify Telegram challenge code
     fun verifyTelegramChallengeCode() {
-        val challengeToken = activeChallenge?.challengeId
-        if (challengeToken.isNullOrBlank()) {
+        val challengeToken = activeChallenge?.challengeId ?: assignedAccountId
+        if (challengeToken.isBlank()) {
             errorMessage = if (isRussian) "Сессия верификации недоступна. Запросите новый код или продолжите без Telegram." else "Challenge session unavailable. Please request a new code or skip."
             return
         }
@@ -357,7 +357,15 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
                 is ChallengeVerifyResult.Error -> {
                     isLoading = false
                     errorMessage = if (isRussian) {
-                        if (result.message.contains("expired", ignoreCase = true)) strings.codeExpired else strings.invalidCode
+                        when {
+                            result.message.contains("expired", ignoreCase = true) -> strings.codeExpired
+                            result.message.contains("already linked", ignoreCase = true) -> "Этот Telegram уже привязан к другому аккаунту."
+                            result.message.contains("start the bot", ignoreCase = true) || result.message.contains("open the Telegram", ignoreCase = true) -> "Сначала запустите бота @HexShardBot в Telegram для получения кода."
+                            result.message.contains("404", ignoreCase = true) || result.message.contains("not deployed", ignoreCase = true) -> "Сервис Telegram временно недоступен на сервере. Вы можете нажать «Пропустить»."
+                            result.message.contains("Rate limit", ignoreCase = true) || result.message.contains("Maximum", ignoreCase = true) -> "Слишком много попыток. Запросите новый код."
+                            result.message.contains("Invalid verification code", ignoreCase = true) -> strings.invalidCode
+                            else -> result.message
+                        }
                     } else {
                         result.message
                     }
@@ -1016,6 +1024,45 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2990D6))
                                             ) {
                                                 Text(strings.verifyCode, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                            }
+                                        }
+
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.End
+                                        ) {
+                                            TextButton(
+                                                onClick = {
+                                                    if (assignedAccountId.isNotBlank()) {
+                                                        isLoading = true
+                                                        errorMessage = null
+                                                        telegramCodeInput = ""
+                                                        scope.launch {
+                                                            activeChallenge = SupabaseAuthService.createTelegramChallenge(assignedAccountId, context)
+                                                            isLoading = false
+                                                            Toast.makeText(
+                                                                context,
+                                                                if (isRussian) "Новая ссылка создана" else "New challenge created",
+                                                                Toast.LENGTH_SHORT
+                                                            ).show()
+                                                        }
+                                                    }
+                                                },
+                                                enabled = !isLoading
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.Refresh,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(14.dp),
+                                                    tint = Color(0xFF2990D6)
+                                                )
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text(
+                                                    text = if (isRussian) "Запросить новый код" else "Request new code",
+                                                    fontSize = 12.sp,
+                                                    color = Color(0xFF2990D6)
+                                                )
                                             }
                                         }
                                     }

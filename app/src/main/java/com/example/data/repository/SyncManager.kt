@@ -219,13 +219,16 @@ class SyncManager(
         // 2. Global stream catch-up using global_sequence for new conversations or missed events
         var globalCursor = SecurePrefsManager.getSyncCursor(ctx, currentUserId)
         val filter = "or=(recipient_id.eq.$currentUserId,sender_id.eq.$currentUserId)"
-        val globalUrl = if (globalCursor > 0L) {
-            "$baseUrl/rest/v1/messages?$filter&global_sequence=gt.$globalCursor&order=global_sequence.asc&limit=50"
-        } else {
-            "$baseUrl/rest/v1/messages?$filter&order=global_sequence.asc&limit=50"
-        }
+        var pageCount = 0
 
-        try {
+        while (pageCount < 100) {
+            pageCount++
+            val globalUrl = if (globalCursor > 0L) {
+                "$baseUrl/rest/v1/messages?$filter&global_sequence=gt.$globalCursor&order=global_sequence.asc&limit=50"
+            } else {
+                "$baseUrl/rest/v1/messages?$filter&order=global_sequence.asc&limit=50"
+            }
+
             val req = Request.Builder()
                 .url(globalUrl)
                 .header("apikey", anonKey)
@@ -233,24 +236,32 @@ class SyncManager(
                 .get()
                 .build()
 
-            val resp = httpClient.newCall(req).execute()
-            if (resp.isSuccessful) {
-                val body = resp.body?.string().orEmpty()
-                val arr = JSONArray(body)
-                var maxGlob = globalCursor
-                for (i in 0 until arr.length()) {
-                    val obj = arr.getJSONObject(i)
-                    val gSeq = obj.optLong("global_sequence", 0L)
-                    processSingleMessageRecord(obj, currentUserId)
-                    if (gSeq > maxGlob) maxGlob = gSeq
-                }
-                if (maxGlob > globalCursor) {
-                    SecurePrefsManager.setSyncCursor(ctx, currentUserId, maxGlob)
-                }
-            }
+            val resp = try { httpClient.newCall(req).execute() } catch (_: Exception) { null } ?: break
+            val body = resp.body?.string().orEmpty()
+            val ok = resp.isSuccessful
             resp.close()
-        } catch (_: Exception) {
-            // Graceful fallback if global_sequence is temporarily unavailable
+
+            if (!ok || body.isBlank() || body == "[]") break
+
+            val arr = try { JSONArray(body) } catch (_: Exception) { JSONArray() }
+            if (arr.length() == 0) break
+
+            var maxGlob = globalCursor
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                val gSeq = obj.optLong("global_sequence", 0L)
+                processSingleMessageRecord(obj, currentUserId)
+                if (gSeq > maxGlob) maxGlob = gSeq
+            }
+
+            if (maxGlob > globalCursor) {
+                globalCursor = maxGlob
+                SecurePrefsManager.setSyncCursor(ctx, currentUserId, maxGlob)
+            } else {
+                break
+            }
+
+            if (arr.length() < 50) break
         }
     }
 

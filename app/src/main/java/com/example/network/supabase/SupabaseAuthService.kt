@@ -106,7 +106,9 @@ object SupabaseAuthService {
      * Server verifies the 6-digit code sent by the bot and binds the Telegram identity.
      */
     suspend fun verifyTelegramChallenge(challengeToken: String, code: String, context: Context): ChallengeVerifyResult = withContext(Dispatchers.IO) {
-        val token = SecurePrefsManager.getSupabaseAccessToken(context)
+        val token = SessionManager.currentSession.value?.accessToken?.takeIf { it.isNotBlank() }
+            ?: (context.let { SecurePrefsManager.getSupabaseAccessToken(it) }.takeIf { it.isNotBlank() })
+            ?: ""
         val result = TelegramService.verifyChallenge(
             accessToken = token,
             challengeId = challengeToken,
@@ -592,13 +594,6 @@ object SupabaseAuthService {
 
         var serverDeleted = false
         if (accountId.isNotBlank() && accessToken.isNotBlank() && anonKey.isNotBlank()) {
-            // Clean up profile background
-            try {
-                com.example.data.repository.ProfileBackgroundManager.removeProfileBackground(context)
-            } catch (bgEx: Exception) {
-                Timber.w(bgEx, "Failed to remove profile background during account deletion")
-            }
-
             // 1. Request server-side complete account deletion via Edge Function
             try {
                 val edgePayload = JSONObject().apply {
@@ -654,34 +649,42 @@ object SupabaseAuthService {
                 }
             }
 
-            // 3. Direct RLS table deletion for devices and profile
-            try {
-                val delDev = Request.Builder()
-                    .url("$baseUrl/rest/v1/devices?account_id=eq.$accountId")
-                    .header("apikey", anonKey)
-                    .header("Authorization", "Bearer $accessToken")
-                    .delete()
-                    .build()
-                httpClient.newCall(delDev).execute().close()
+            // 3. Direct RLS table deletion for devices and profile only after server deletion confirmation
+            if (serverDeleted) {
+                try {
+                    com.example.data.repository.ProfileBackgroundManager.removeProfileBackground(context)
+                } catch (bgEx: Exception) {
+                    Timber.w(bgEx, "Failed to remove profile background during account deletion")
+                }
 
-                val delProf = Request.Builder()
-                    .url("$baseUrl/rest/v1/profiles?id=eq.$accountId")
-                    .header("apikey", anonKey)
-                    .header("Authorization", "Bearer $accessToken")
-                    .delete()
-                    .build()
-                httpClient.newCall(delProf).execute().close()
-            } catch (e: Exception) {
-                Timber.w(e, "Direct RLS cleanup during account deletion exception")
+                try {
+                    val delDev = Request.Builder()
+                        .url("$baseUrl/rest/v1/devices?account_id=eq.$accountId")
+                        .header("apikey", anonKey)
+                        .header("Authorization", "Bearer $accessToken")
+                        .delete()
+                        .build()
+                    httpClient.newCall(delDev).execute().close()
+
+                    val delProf = Request.Builder()
+                        .url("$baseUrl/rest/v1/profiles?id=eq.$accountId")
+                        .header("apikey", anonKey)
+                        .header("Authorization", "Bearer $accessToken")
+                        .delete()
+                        .build()
+                    httpClient.newCall(delProf).execute().close()
+                } catch (e: Exception) {
+                    Timber.w(e, "Direct RLS cleanup during account deletion exception")
+                }
             }
         }
 
         if (!serverDeleted && accountId.isNotBlank()) {
-            Timber.e("Server account deletion failed. Failing closed to allow retry.")
+            Timber.e("Server account deletion failed. Failing closed to preserve local state and allow retry.")
             return@withContext false
         }
 
-        // 3. Wipe local Room encrypted database
+        // 4. Wipe local Room encrypted database specifically for the target account
         try {
             val db = AppDatabase.getDatabase(context)
             if (accountId.isNotBlank()) {
@@ -689,30 +692,19 @@ object SupabaseAuthService {
                 db.chatDao().clearAllMessagesForAccount(accountId)
                 db.chatDao().clearAllChatsForAccount(accountId)
             }
-            db.chatDao().clearAllOutboxForAccount("")
-            db.chatDao().clearAllMessagesForAccount("")
-            db.chatDao().clearAllChatsForAccount("")
         } catch (e: Exception) {
-            Timber.w(e, "Error clearing local Room database during account deletion")
+            Timber.w(e, "Error clearing local Room database for account $accountId")
         }
 
-        // 4. Delete hardware-backed cryptographic keys from AndroidKeyStore
+        // 5. Delete hardware-backed cryptographic keys for target account
         try {
             E2ECryptoManager.deleteKeys(accountId)
         } catch (e: Exception) {
-            Timber.w(e, "Error deleting cryptographic keys")
+            Timber.w(e, "Error deleting cryptographic keys for account $accountId")
         }
 
-        // 5. Cryptographically wipe SQLCipher database passphrase
-        try {
-            com.example.data.database.SQLCipherUtils.clearPassphrase(context)
-        } catch (e: Exception) {
-            Timber.w(e, "Error clearing SQLCipher passphrase")
-        }
-
-        // 6. Clear session state and secure preferences
+        // 6. Clear active session state
         SessionManager.clearSession(context)
-        SecurePrefsManager.clear(context)
 
         true
     }

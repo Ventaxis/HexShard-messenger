@@ -1,0 +1,168 @@
+{
+  "project": "HexShard Messenger",
+  "version": "7",
+  "date": "2026-10-18",
+  "tasks": [
+    {
+      "id": "K01",
+      "related": ["N001", "N002", "N003", "N010", "N013", "N016", "F013", "F015", "F020"],
+      "title": "Verifiably installable and upgradeable database bootstrap and forward migration",
+      "status": "IN_PROGRESS",
+      "files": [
+        "supabase/migrations/20260911000000_profile_share_tokens_and_security.sql",
+        "supabase/migrations/20260912000000_profile_backgrounds_storage.sql",
+        "supabase/migrations/20261018000000_canonical_security_and_contracts_hardening.sql",
+        "supabase/migrations/20261018120000_v7_forward_security_and_contracts.sql"
+      ],
+      "tests": "Migration syntax, table & function signatures, DDL replay order",
+      "result": "Pending completion of forward migration and legacy signature drops",
+      "limitation": "Live remote Supabase deploy requires owner credentials"
+    },
+    {
+      "id": "K02",
+      "related": ["N014", "F022", "F023", "F024", "F025", "F026"],
+      "title": "Account deletion: typed result propagated from server to UI without wiping shared vault",
+      "status": "VERIFIED",
+      "files": [
+        "app/src/main/java/com/example/network/supabase/SupabaseAuthService.kt",
+        "app/src/main/java/com/example/data/database/ChatRepository.kt",
+        "app/src/main/java/com/example/ui/ChatViewModel.kt",
+        "app/src/main/java/com/example/ui/AppNavigator.kt",
+        "supabase/functions/delete-account/index.ts"
+      ],
+      "tests": "Robolectric unit test for deleteAccount failure handling and vault preservation; gradle :app:testDebugUnitTest",
+      "result": "Server-side account deletion with typed verification, fail-closed handling, and account-scoped local data wipe without destroying shared prefs",
+      "limitation": "Multi-user hardware keystore separation constrained by single Android Keystore"
+    },
+    {
+      "id": "K03",
+      "related": ["F027", "F028", "F029", "F030", "F031"],
+      "title": "Crypto backup without replacing active identity",
+      "status": "IN_PROGRESS",
+      "files": [
+        "app/src/main/java/com/example/crypto/CryptoBackupManager.kt",
+        "app/src/main/java/com/example/crypto/E2ECryptoManager.kt"
+      ],
+      "tests": "Fingerprint preservation before/after backup attempt; hardware key non-destructive failure test",
+      "result": "Eliminating destructive software keypair generation fallback",
+      "limitation": "Hardware-backed Android Keystore keys cannot be exported off-chip"
+    },
+    {
+      "id": "K04",
+      "related": ["N004", "N005", "N006", "N007", "N008", "N009", "F005", "F006", "F007", "F008", "F010", "F011", "F012"],
+      "title": "Telegram service: inbox, OTP state, idempotency and delivery outbox",
+      "status": "IN_PROGRESS",
+      "files": [
+        "supabase/functions/telegram-webhook/index.ts",
+        "supabase/functions/verify-telegram/index.ts",
+        "supabase/functions/telegram-recovery/index.ts"
+      ],
+      "tests": "Validation of mandatory webhook secret, non-reset of attempts on repeated /start, idempotent verify",
+      "result": "Closing security holes in webhook and verify functions",
+      "limitation": "Live Telegram Bot API delivery depends on configured TELEGRAM_BOT_TOKEN secret"
+    },
+    {
+      "id": "K05",
+      "related": ["F044", "F045"],
+      "title": "Common session and token gateway",
+      "status": "NOT_STARTED",
+      "files": [
+        "app/src/main/java/com/example/network/supabase/SessionManager.kt",
+        "app/src/main/java/com/example/network/supabase/SupabaseRealtimeManager.kt"
+      ],
+      "tests": "Session token refresh propagation to Realtime",
+      "result": "",
+      "limitation": ""
+    },
+    {
+      "id": "K06",
+      "related": ["N015", "F038", "F039", "F040", "F041", "F046", "F047", "F048", "F049", "F050"],
+      "title": "Durable send and synchronization unified model",
+      "status": "IN_PROGRESS",
+      "files": [
+        "app/src/main/java/com/example/data/repository/SyncManager.kt",
+        "app/src/main/java/com/example/data/repository/MessageRepository.kt"
+      ],
+      "tests": "Catch-up pagination and ACK persistence; gradle :app:testDebugUnitTest",
+      "result": "Paginated global sequence catch-up with per-page cursor checkpointing and bounded loop protection",
+      "limitation": ""
+    },
+    {
+      "id": "K07",
+      "related": ["F037", "F053", "F054"],
+      "title": "Edit and delete through durable queue and tombstone processing",
+      "status": "NOT_STARTED",
+      "files": [
+        "app/src/main/java/com/example/data/repository/MessageRepository.kt",
+        "app/src/main/java/com/example/data/repository/SyncManager.kt"
+      ],
+      "tests": "Soft delete empty payload handling and edit recipient targeting",
+      "result": "",
+      "limitation": ""
+    },
+    {
+      "id": "K08",
+      "related": ["F055", "F056", "F057", "F058", "F059", "F060", "F061"],
+      "title": "Media pipeline, metadata and cleanup",
+      "status": "NOT_STARTED",
+      "files": [
+        "app/src/main/java/com/example/data/repository/AttachmentRepository.kt",
+        "app/src/main/java/com/example/ui/ChatViewModel.kt"
+      ],
+      "tests": "MIME separation from MessageType, cache isolation",
+      "result": "",
+      "limitation": ""
+    },
+    {
+      "id": "K09",
+      "related": ["F032", "F033", "F034"],
+      "title": "Cryptographic trust, multi-device and quarantine",
+      "status": "NOT_STARTED",
+      "files": [
+        "app/src/main/java/com/example/data/repository/CryptoRepository.kt",
+        "app/src/main/java/com/example/crypto/E2ECryptoManager.kt"
+      ],
+      "tests": "Signature verification and outbound self-decryption separation",
+      "result": "",
+      "limitation": ""
+    },
+    {
+      "id": "K10",
+      "related": ["F062", "F063", "F064", "F065", "F066", "F067"],
+      "title": "+999 virtual numbers, profile and QR integrity",
+      "status": "NOT_STARTED",
+      "files": [
+        "app/src/main/java/com/example/network/supabase/VirtualNumberService.kt",
+        "app/src/main/java/com/example/data/repository/ProfileRepository.kt"
+      ],
+      "tests": "Virtual number normalization and authoritative state check",
+      "result": "",
+      "limitation": ""
+    },
+    {
+      "id": "K11",
+      "related": ["F001", "F051"],
+      "title": "AI generation, transcript and quota consistency",
+      "status": "NOT_STARTED",
+      "files": [
+        "app/src/main/java/com/example/network/GeminiService.kt",
+        "supabase/functions/gemini-assistant/index.ts"
+      ],
+      "tests": "AI conversation isolation and prompt outbox deduplication",
+      "result": "",
+      "limitation": ""
+    },
+    {
+      "id": "K12",
+      "related": [],
+      "title": "Product state and lifecycle",
+      "status": "NOT_STARTED",
+      "files": [
+        "app/src/main/java/com/example/ui/ChatScreen.kt"
+      ],
+      "tests": "Lifecycle and state preservation",
+      "result": "",
+      "limitation": ""
+    }
+  ]
+}

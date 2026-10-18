@@ -163,9 +163,21 @@ CREATE TABLE IF NOT EXISTS public.attachments (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+ALTER TABLE public.attachments ADD COLUMN IF NOT EXISTS uploader_id UUID REFERENCES auth.users(id) ON DELETE CASCADE;
 ALTER TABLE public.attachments ADD COLUMN IF NOT EXISTS size_bytes BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE public.attachments ADD COLUMN IF NOT EXISTS encryption_version INT NOT NULL DEFAULT 2;
 ALTER TABLE public.attachments ADD COLUMN IF NOT EXISTS checksum TEXT;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'attachments' AND column_name = 'owner_id') THEN
+        ALTER TABLE public.attachments ALTER COLUMN owner_id DROP NOT NULL;
+        UPDATE public.attachments SET uploader_id = owner_id WHERE uploader_id IS NULL;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'attachments' AND column_name = 'size') THEN
+        UPDATE public.attachments SET size_bytes = size WHERE size_bytes IS NULL OR size_bytes = 0;
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_attachments_conv ON public.attachments(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_msg ON public.attachments(message_id);

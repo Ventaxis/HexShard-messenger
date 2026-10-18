@@ -341,14 +341,18 @@ BEGIN
         RAISE EXCEPTION 'Authentication required';
     END IF;
 
-    IF v_conv_id IS NULL OR v_conv_id = '' THEN
-        v_conv_id := 'ai_' || v_user_id::text;
+    -- F001 FIX: Reject foreign conversation IDs and strictly derive canonical AI conversation ID for calling user
+    IF p_conversation_id IS NOT NULL AND p_conversation_id != '' AND p_conversation_id != ('ai_' || v_user_id::text) THEN
+        RAISE EXCEPTION 'Access denied: Cannot bind AI message to foreign conversation' USING ERRCODE = '42501';
     END IF;
+    v_conv_id := 'ai_' || v_user_id::text;
 
-    -- Ensure conversation & membership exist atomically
+    -- Ensure conversation & membership exist atomically for this user only
     INSERT INTO public.conversations (id, type, title, created_by, current_sequence, created_at, updated_at)
     VALUES (v_conv_id, 'AI', 'HexShard AI', v_user_id, 0, v_now, v_now)
-    ON CONFLICT (id) DO UPDATE SET updated_at = v_now;
+    ON CONFLICT (id) DO UPDATE
+        SET updated_at = v_now
+        WHERE conversations.created_by = v_user_id AND conversations.type = 'AI';
 
     INSERT INTO public.conversation_members (conversation_id, account_id, role, is_pinned)
     VALUES (v_conv_id, v_user_id, 'owner', true)

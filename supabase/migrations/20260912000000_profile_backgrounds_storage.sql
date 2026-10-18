@@ -177,6 +177,8 @@ $$;
 -- ====================================================================
 -- 5. UPDATE RPC: resolve_profile_by_share_id
 -- ====================================================================
+DROP FUNCTION IF EXISTS public.resolve_profile_by_share_id(TEXT);
+
 CREATE OR REPLACE FUNCTION public.resolve_profile_by_share_id(
     p_share_id TEXT
 )
@@ -195,6 +197,10 @@ DECLARE
     v_public_key TEXT;
     v_key_version INT := 1;
 BEGIN
+    IF auth.uid() IS NULL THEN
+        RAISE EXCEPTION 'Unauthorized: User authentication required' USING ERRCODE = '42501';
+    END IF;
+
     IF p_share_id IS NULL OR trim(p_share_id) = '' THEN
         RETURN jsonb_build_object('found', false);
     END IF;
@@ -259,6 +265,8 @@ BEGIN
     );
 END;
 $$;
+REVOKE EXECUTE ON FUNCTION public.resolve_profile_by_share_id(TEXT) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.resolve_profile_by_share_id(TEXT) TO authenticated;
 
 -- ====================================================================
 -- 6. UPDATE RPC: delete_user_account

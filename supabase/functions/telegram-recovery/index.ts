@@ -45,7 +45,7 @@ serve(async (req: Request) => {
       .from("telegram_challenges")
       .select("*")
       .eq("challenge_id", challengeId)
-      .single();
+      .maybeSingle();
 
     if (error || !challenge) {
       return new Response(
@@ -100,11 +100,20 @@ serve(async (req: Request) => {
       );
     }
 
-    // Mark challenge as consumed
-    await supabase
+    // Mark challenge as consumed atomically
+    const { data: updatedRows, error: updateErr } = await supabase
       .from("telegram_challenges")
-      .update({ is_used: true, verified_at: new Date().toISOString() })
-      .eq("challenge_id", challengeId);
+      .update({ is_used: true })
+      .eq("challenge_id", challengeId)
+      .eq("is_used", false)
+      .select("challenge_id");
+
+    if (updateErr || !updatedRows || updatedRows.length === 0) {
+      return new Response(
+        JSON.stringify({ error: "This recovery challenge has already been used or expired." }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     // Retrieve verified account associated with this Telegram user
     const { data: link, error: linkErr } = await supabase
@@ -112,7 +121,7 @@ serve(async (req: Request) => {
       .select("account_id, verified")
       .eq("telegram_user_id", challenge.telegram_user_id)
       .eq("verified", true)
-      .single();
+      .maybeSingle();
 
     if (linkErr || !link) {
       return new Response(
@@ -129,7 +138,8 @@ serve(async (req: Request) => {
       }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
-  } catch (_e) {
+  } catch (e) {
+    console.error("Internal server error in telegram-recovery:", e);
     return new Response(
       JSON.stringify({ error: "Internal server error" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }

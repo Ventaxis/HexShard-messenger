@@ -160,14 +160,18 @@ BEGIN
         RAISE EXCEPTION 'UNKNOWN_PERSONA: Persona must be ventaxis or hexagon, got %', p_persona_id;
     END IF;
 
-    IF v_conv_id IS NULL OR v_conv_id = '' THEN
-        v_conv_id := 'ai_' || v_user_id::text;
+    -- F001 FIX: Enforce canonical AI conversation ID derived strictly from calling user
+    IF p_conversation_id IS NOT NULL AND p_conversation_id != '' AND p_conversation_id != ('ai_' || v_user_id::text) THEN
+        RAISE EXCEPTION 'Access denied: Cannot bind AI message to foreign conversation' USING ERRCODE = '42501';
     END IF;
+    v_conv_id := 'ai_' || v_user_id::text;
 
-    -- Ensure AI conversation & membership exist
+    -- Ensure AI conversation & membership exist for this user only
     INSERT INTO public.conversations (id, type, title, created_by, current_sequence, created_at, updated_at)
     VALUES (v_conv_id, 'AI', 'HexShard AI', v_user_id, 0, v_now, v_now)
-    ON CONFLICT (id) DO UPDATE SET updated_at = v_now;
+    ON CONFLICT (id) DO UPDATE
+        SET updated_at = v_now
+        WHERE conversations.created_by = v_user_id AND conversations.type = 'AI';
 
     INSERT INTO public.conversation_members (conversation_id, account_id, role, is_pinned)
     VALUES (v_conv_id, v_user_id, 'owner', true)

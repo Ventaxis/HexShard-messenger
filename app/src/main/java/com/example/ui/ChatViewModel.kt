@@ -569,13 +569,27 @@ class ChatViewModel @Inject constructor(
         }
     }
 
-    fun deleteAccount(context: android.content.Context, onComplete: () -> Unit) {
+    fun deleteAccount(
+        context: android.content.Context,
+        onSuccess: () -> Unit,
+        onError: ((String) -> Unit)? = null
+    ) {
         viewModelScope.launch {
-            repository.deleteAccount(context)
-            _selectedChatId.value = null
-            onAccountChanged()
-            onComplete()
+            val success = repository.deleteAccount(context)
+            if (success) {
+                _selectedChatId.value = null
+                onAccountChanged()
+                onSuccess()
+            } else {
+                val isRussian = com.example.ui.LocalizationManager.currentLanguage.value == com.example.ui.AppLanguage.RUSSIAN
+                val errorMsg = if (isRussian) "Не удалось удалить аккаунт на сервере. Попробуйте еще раз." else "Failed to delete account on server. Please try again."
+                onError?.invoke(errorMsg)
+            }
         }
+    }
+
+    fun deleteAccount(context: android.content.Context, onComplete: () -> Unit) {
+        deleteAccount(context, onSuccess = onComplete)
     }
     
     fun retryMessage(msgId: Int, chatId: Int, text: String) {
