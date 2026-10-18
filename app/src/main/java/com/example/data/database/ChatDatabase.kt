@@ -271,6 +271,12 @@ interface ChatDao {
     @Query("DELETE FROM messages WHERE serverMessageId = :serverId AND accountId = :accountId")
     suspend fun deleteMessageByServerId(serverId: String, accountId: String)
 
+    @Query("DELETE FROM messages WHERE idempotencyKey = :key AND accountId = :accountId")
+    suspend fun deleteMessageByIdempotencyKey(key: String, accountId: String)
+
+    @Query("UPDATE messages SET text = :text, timestamp = :timestamp WHERE id = :id AND accountId = :accountId")
+    suspend fun updateMessageText(id: Int, text: String, timestamp: Long, accountId: String)
+
     @Query("SELECT * FROM messages WHERE accountId = :accountId AND text LIKE '%' || :query || '%' AND text != '' ORDER BY timestamp DESC LIMIT 30")
     suspend fun searchMessages(query: String, accountId: String): List<MessageEntity>
 

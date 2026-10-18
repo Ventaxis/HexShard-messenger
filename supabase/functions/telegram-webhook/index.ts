@@ -34,13 +34,20 @@ serve(async (req: Request) => {
     return new Response("Method Not Allowed", { status: 405 });
   }
 
-  // 1. Validate Telegram webhook secret token if configured
+  // 1. Validate Telegram webhook secret token
   const expectedSecret = (Deno.env.get("TELEGRAM_WEBHOOK_SECRET") || Deno.env.get("WEBHOOK_SECRET"))?.trim();
+  const receivedSecret = req.headers.get("x-telegram-bot-api-secret-token")?.trim();
+
   if (expectedSecret) {
-    const receivedSecret = req.headers.get("x-telegram-bot-api-secret-token")?.trim();
     if (!receivedSecret || !constantTimeEqual(receivedSecret, expectedSecret)) {
       console.warn("Unauthorized webhook request: missing or mismatched X-Telegram-Bot-Api-Secret-Token");
       return new Response("Unauthorized", { status: 401 });
+    }
+  } else {
+    const isTestMode = Deno.env.get("DENO_ENV") === "test" || Deno.env.get("APP_ENV") === "test";
+    if (!isTestMode) {
+      console.warn("Unauthorized webhook request: TELEGRAM_WEBHOOK_SECRET is not configured on server");
+      return new Response("Unauthorized: Webhook secret not configured", { status: 401 });
     }
   }
 
@@ -276,7 +283,8 @@ serve(async (req: Request) => {
       telegram_user_id: telegramUserId,
       telegram_username: telegramUsername || null,
       code_hash: codeHash,
-      attempts: 0,
+      // Do NOT reset attempts to 0: preserve attempts count to prevent brute-force attacks via repeated /start
+      attempts: targetChallenge.attempts,
       expires_at: codeExpiresAt,
     })
     .eq("challenge_id", targetChallenge.challenge_id)

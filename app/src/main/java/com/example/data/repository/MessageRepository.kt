@@ -137,6 +137,7 @@ class MessageRepository(
         val msg = chatDao.getMessageById(messageId, accountId) ?: return@withContext false
         val serverId = msg.serverMessageId.ifBlank { msg.idempotencyKey }
 
+        val originalText = msg.text
         // Local cache optimistic update
         chatDao.editMessage(messageId, newText, System.currentTimeMillis(), accountId)
 
@@ -146,10 +147,15 @@ class MessageRepository(
         val token = SecurePrefsManager.getSupabaseAccessToken(ctx)
         if (token.isNotBlank() && serverId.isNotBlank()) {
             try {
-                val isSelfOrAi = isSelfConversation(msg.conversationId) || isAiConversation(msg.conversationId)
+                val chat = chatDao.getChatById(msg.chatId, accountId)
+                val peerRecipient = chat?.recipientId?.takeIf { it.isNotBlank() } ?: msg.sender
+                val isSaved = chat?.conversationType == com.example.data.ConversationType.SAVED_MESSAGES.name || chat?.conversationId?.startsWith("self_") == true || peerRecipient == "self"
+                val isAi = chat?.conversationType == com.example.data.ConversationType.AI_ASSISTANT.name || chat?.conversationId?.startsWith("ai_") == true || isAiConversation(peerRecipient, conversationId = msg.conversationId)
+                val isSelfOrAi = isSaved || isAi || isSelfConversation(peerRecipient, msg.conversationId)
+
                 val encrypted = cryptoRepository.encryptOutboundMessage(
                     currentUserId = accountId,
-                    recipientId = msg.sender,
+                    recipientId = if (isSelfOrAi) accountId else peerRecipient,
                     conversationId = msg.conversationId,
                     idempotencyKey = msg.idempotencyKey,
                     plainText = newText,
@@ -169,10 +175,23 @@ class MessageRepository(
                     .build()
                 val resp = httpClient.newCall(req).execute()
                 val ok = resp.isSuccessful
+                val bodyStr = resp.body?.string().orEmpty()
                 resp.close()
-                return@withContext ok
+
+                val rpcSuccess = ok && (bodyStr.isBlank() || try {
+                    JSONObject(bodyStr).optBoolean("success", true)
+                } catch (_: Exception) { true })
+
+                if (!rpcSuccess) {
+                    // Roll back optimistic edit on server rejection
+                    chatDao.editMessage(messageId, originalText, msg.timestamp, accountId)
+                    return@withContext false
+                }
+                return@withContext true
             } catch (e: Exception) {
-                Timber.w(e, "editMessage remote RPC failed")
+                Timber.w(e, "editMessage remote RPC failed, rolling back local cache")
+                chatDao.editMessage(messageId, originalText, msg.timestamp, accountId)
+                return@withContext false
             }
         }
         true
@@ -183,14 +202,13 @@ class MessageRepository(
         val msg = chatDao.getMessageById(messageId, accountId) ?: return@withContext false
         val serverId = msg.serverMessageId.ifBlank { msg.idempotencyKey }
 
-        // Local cache delete
-        chatDao.deleteMessage(messageId, accountId)
-
-        val ctx = context ?: return@withContext true
+        val ctx = context
         val baseUrl = SupabaseConfig.getBaseUrl()
-        val anonKey = SupabaseConfig.getAnonKey(ctx)
-        val token = SecurePrefsManager.getSupabaseAccessToken(ctx)
-        if (token.isNotBlank() && serverId.isNotBlank()) {
+        val anonKey = ctx?.let { SupabaseConfig.getAnonKey(it) } ?: ""
+        val token = ctx?.let { SecurePrefsManager.getSupabaseAccessToken(it) } ?: ""
+
+        var remoteSuccess = false
+        if (token.isNotBlank() && serverId.isNotBlank() && anonKey.isNotBlank()) {
             try {
                 val payload = JSONObject().apply {
                     put("p_message_id", serverId)
@@ -204,13 +222,28 @@ class MessageRepository(
                     .build()
                 val resp = httpClient.newCall(req).execute()
                 val ok = resp.isSuccessful
+                val bodyStr = resp.body?.string().orEmpty()
                 resp.close()
-                return@withContext ok
+
+                remoteSuccess = ok && (bodyStr.isBlank() || try {
+                    JSONObject(bodyStr).optBoolean("success", true)
+                } catch (_: Exception) { true })
             } catch (e: Exception) {
                 Timber.w(e, "deleteMessage remote RPC failed")
+                remoteSuccess = false
             }
+        } else {
+            // Local-only unsent message
+            remoteSuccess = true
         }
-        true
+
+        if (remoteSuccess) {
+            chatDao.deleteMessage(messageId, accountId)
+            true
+        } else {
+            Timber.w("Refusing to delete local message without verified server deletion")
+            false
+        }
     }
 
     /**
@@ -330,13 +363,12 @@ class MessageRepository(
                     signatureValid = true,
                     personaId = resolvedPersona
                 )
-                val messageId = chatDao.insertMessage(message)
-                conversationRepository.updateChatPreview(chatId, text, timeStr, message.timestamp)
-
+                val messageId: Long
+                val outboxRowId: Long
                 if (isMe && idempotencyKey.isNotEmpty()) {
                     val outboxEntry = OutboxEntity(
                         accountId = currentUserId,
-                        localMessageId = messageId.toInt(),
+                        localMessageId = 0,
                         chatId = chatId,
                         conversationId = conversationId,
                         idempotencyKey = idempotencyKey,
@@ -350,8 +382,16 @@ class MessageRepository(
                         status = "WAITING_FOR_PEER_KEY",
                         createdAt = System.currentTimeMillis()
                     )
-                    val outboxRowId = chatDao.insertOutbox(outboxEntry)
+                    val pair = chatDao.insertMessageAndOutbox(message, outboxEntry)
+                    messageId = pair.first
+                    outboxRowId = pair.second
+                } else {
+                    messageId = chatDao.insertMessage(message)
+                    outboxRowId = 0L
+                }
+                conversationRepository.updateChatPreview(chatId, text, timeStr, message.timestamp)
 
+                if (isMe && idempotencyKey.isNotEmpty()) {
                     backgroundScope.launch {
                         try {
                             val pubKey = cryptoRepository.userRepository.getOrFetchUserPublicKey(recipientId)
@@ -429,14 +469,12 @@ class MessageRepository(
                 signatureValid = true,
                 personaId = resolvedPersona
             )
-            val messageId = chatDao.insertMessage(message)
-            conversationRepository.updateChatPreview(chatId, text, timeStr, message.timestamp)
-
-            // ALL user-initiated messages are enqueued into durable outbox (direct, saved, and AI user prompts)
+            val messageId: Long
+            val outboxRowId: Long
             if (isMe && idempotencyKey.isNotEmpty()) {
                 val outboxEntry = OutboxEntity(
                     accountId = currentUserId,
-                    localMessageId = messageId.toInt(),
+                    localMessageId = 0,
                     chatId = chatId,
                     conversationId = conversationId,
                     idempotencyKey = idempotencyKey,
@@ -450,8 +488,17 @@ class MessageRepository(
                     status = "sending",
                     createdAt = System.currentTimeMillis()
                 )
-                val outboxRowId = chatDao.insertOutbox(outboxEntry)
+                val pair = chatDao.insertMessageAndOutbox(message, outboxEntry)
+                messageId = pair.first
+                outboxRowId = pair.second
+            } else {
+                messageId = chatDao.insertMessage(message)
+                outboxRowId = 0L
+            }
+            conversationRepository.updateChatPreview(chatId, text, timeStr, message.timestamp)
 
+            // ALL user-initiated messages are enqueued into durable outbox (direct, saved, and AI user prompts)
+            if (isMe && idempotencyKey.isNotEmpty()) {
                 if (isRemoteAuthed && !isAiChat) {
                     backgroundScope.launch {
                         try {
@@ -468,6 +515,13 @@ class MessageRepository(
                             )
                             when (sendResult) {
                                 is RemoteMessageSendResult.Success -> {
+                                    chatDao.updateMessageServerInfoByIdempotencyKey(
+                                        idempotencyKey = idempotencyKey,
+                                        serverId = sendResult.serverMessageId,
+                                        sequence = sendResult.sequence,
+                                        status = "sent",
+                                        accountId = currentUserId
+                                    )
                                     chatDao.deleteOutboxByIdempotencyKey(idempotencyKey, currentUserId)
                                     updateMessageStatus(messageId.toInt(), "sent", currentUserId)
                                 }

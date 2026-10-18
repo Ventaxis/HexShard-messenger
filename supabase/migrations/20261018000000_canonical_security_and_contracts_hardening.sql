@@ -81,11 +81,82 @@ CREATE POLICY "messages_member_insert"
         AND public.is_conversation_member(conversation_id, auth.uid())
     );
 
-CREATE POLICY "messages_member_update"
+DROP POLICY IF EXISTS "messages_member_update" ON public.messages;
+DROP POLICY IF EXISTS "messages_sender_update" ON public.messages;
+DROP POLICY IF EXISTS "messages_recipient_update_status" ON public.messages;
+
+-- Senders can update their own messages (edit payload, signature, soft-delete)
+CREATE POLICY "messages_sender_update"
     ON public.messages FOR UPDATE
     TO authenticated
-    USING (public.is_conversation_member(conversation_id, auth.uid()))
-    WITH CHECK (public.is_conversation_member(conversation_id, auth.uid()));
+    USING (
+        sender_id = auth.uid()
+        AND public.is_conversation_member(conversation_id, auth.uid())
+    )
+    WITH CHECK (
+        sender_id = auth.uid()
+        AND public.is_conversation_member(conversation_id, auth.uid())
+    );
+
+-- Conversation participants can update message status (read/delivery receipts) on peer messages
+CREATE POLICY "messages_recipient_update_status"
+    ON public.messages FOR UPDATE
+    TO authenticated
+    USING (
+        public.is_conversation_member(conversation_id, auth.uid())
+        AND sender_id != auth.uid()
+    )
+    WITH CHECK (
+        public.is_conversation_member(conversation_id, auth.uid())
+        AND sender_id != auth.uid()
+    );
+
+-- Trigger to strictly protect immutable message columns and prevent non-senders from altering payload/signature
+CREATE OR REPLACE FUNCTION public.check_message_update_integrity()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    IF NEW.id IS DISTINCT FROM OLD.id THEN
+        RAISE EXCEPTION 'Cannot modify message id' USING ERRCODE = '42501';
+    END IF;
+    IF NEW.conversation_id IS DISTINCT FROM OLD.conversation_id THEN
+        RAISE EXCEPTION 'Cannot modify conversation_id' USING ERRCODE = '42501';
+    END IF;
+    IF NEW.client_message_id IS DISTINCT FROM OLD.client_message_id THEN
+        RAISE EXCEPTION 'Cannot modify client_message_id' USING ERRCODE = '42501';
+    END IF;
+    IF NEW.sender_id IS DISTINCT FROM OLD.sender_id THEN
+        RAISE EXCEPTION 'Cannot modify sender_id' USING ERRCODE = '42501';
+    END IF;
+    IF NEW.sequence IS DISTINCT FROM OLD.sequence THEN
+        RAISE EXCEPTION 'Cannot modify sequence' USING ERRCODE = '42501';
+    END IF;
+    IF NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+        RAISE EXCEPTION 'Cannot modify created_at' USING ERRCODE = '42501';
+    END IF;
+
+    -- If updater is not the sender, forbid updating payload, signature, type, or is_deleted
+    IF auth.uid() IS NOT NULL AND auth.uid() != OLD.sender_id THEN
+        IF NEW.payload IS DISTINCT FROM OLD.payload OR
+           NEW.signature IS DISTINCT FROM OLD.signature OR
+           NEW.type IS DISTINCT FROM OLD.type OR
+           NEW.is_deleted IS DISTINCT FROM OLD.is_deleted THEN
+            RAISE EXCEPTION 'Only the sender can edit or delete message content' USING ERRCODE = '42501';
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_messages_protect_integrity ON public.messages;
+CREATE TRIGGER trg_messages_protect_integrity
+    BEFORE UPDATE ON public.messages
+    FOR EACH ROW
+    EXECUTE FUNCTION public.check_message_update_integrity();
 
 -- 4. ATTACHMENTS SCHEMA & POLICIES (F015, F020, F061, D002)
 ALTER TABLE public.attachments ADD COLUMN IF NOT EXISTS uploader_id UUID REFERENCES auth.users(id) ON DELETE CASCADE;

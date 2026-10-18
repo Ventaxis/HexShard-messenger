@@ -12,9 +12,19 @@ data class EncryptedMessagePayload(
     val signatureValid: Boolean
 )
 
+enum class DecryptionTrustStatus {
+    VERIFIED,
+    UNVERIFIED_LEGACY,
+    INVALID_SIGNATURE,
+    MISSING_KEY,
+    CORRUPT_PAYLOAD,
+    DECRYPTION_FAILED
+}
+
 data class DecryptedResult(
     val plainText: String,
-    val isSignatureValid: Boolean
+    val isSignatureValid: Boolean,
+    val trustStatus: DecryptionTrustStatus = if (isSignatureValid) DecryptionTrustStatus.VERIFIED else DecryptionTrustStatus.INVALID_SIGNATURE
 )
 
 class PeerKeyUnavailableException(val recipientId: String) : Exception("Recipient $recipientId public key is not available")
@@ -124,7 +134,11 @@ class CryptoRepository(
             if (senderPubKey != null) {
                 E2ECryptoManager.deriveSharedSecret(senderPubKey, recipientId)
             } else {
-                return DecryptedResult("[E2EE Error: Sender public key unavailable]", false)
+                return DecryptedResult(
+                    plainText = "[Waiting for sender public key...]",
+                    isSignatureValid = false,
+                    trustStatus = DecryptionTrustStatus.MISSING_KEY
+                )
             }
         }
 
@@ -137,15 +151,25 @@ class CryptoRepository(
         val combinedBytes = try {
             Base64.getDecoder().decode(base64Payload)
         } catch (_: Exception) {
-            return DecryptedResult(base64Payload, false)
+            return DecryptedResult(
+                plainText = "[Corrupt payload: invalid encoding]",
+                isSignatureValid = false,
+                trustStatus = DecryptionTrustStatus.CORRUPT_PAYLOAD
+            )
         }
 
         if (combinedBytes.size < 44) { // 32 bytes HMAC + 12 bytes IV
-            return DecryptedResult("[E2EE Error: Truncated payload]", false)
+            return DecryptedResult(
+                plainText = "[Corrupt payload: truncated envelope]",
+                isSignatureValid = false,
+                trustStatus = DecryptionTrustStatus.CORRUPT_PAYLOAD
+            )
         }
 
         // Verify digital signature - fail-closed for peer messages
         var signatureValid = false
+        val isLegacyMessage = base64Signature.isNullOrBlank() && !isSelf
+
         if (!base64Signature.isNullOrBlank() && !isSelf) {
             try {
                 val senderSigningKey = userRepository.getOrFetchUserSigningKey(senderId)
@@ -161,6 +185,8 @@ class CryptoRepository(
                     )
                     val sigBytes = Base64.getDecoder().decode(base64Signature)
                     signatureValid = E2ECryptoManager.verifySignature(canonicalEnvelope, sigBytes, senderSigningKey)
+                } else {
+                    Timber.w("Sender signing key unavailable for verification: $senderId")
                 }
             } catch (e: Exception) {
                 Timber.w(e, "Signature verification failed for sender $senderId")
@@ -178,7 +204,11 @@ class CryptoRepository(
         System.arraycopy(combinedBytes, 0, receivedHmac, 0, 32)
 
         if (!E2ECryptoManager.verifyHMAC(ivAndCipher, receivedHmac, messageKey)) {
-            return DecryptedResult("[E2EE Error: Message integrity verification failed]", false)
+            return DecryptedResult(
+                plainText = "[Message integrity verification failed: tampered ciphertext]",
+                isSignatureValid = false,
+                trustStatus = DecryptionTrustStatus.CORRUPT_PAYLOAD
+            )
         }
 
         val iv = ByteArray(12)
@@ -188,10 +218,39 @@ class CryptoRepository(
 
         return try {
             val decrypted = E2ECryptoManager.decryptMessage(iv, cipherText, messageKey)
-            DecryptedResult(decrypted, signatureValid)
+            when {
+                isSelf || signatureValid -> {
+                    DecryptedResult(
+                        plainText = decrypted,
+                        isSignatureValid = true,
+                        trustStatus = DecryptionTrustStatus.VERIFIED
+                    )
+                }
+                isLegacyMessage -> {
+                    // Legacy message without signature: explicitly tagged as unverified
+                    DecryptedResult(
+                        plainText = decrypted,
+                        isSignatureValid = false,
+                        trustStatus = DecryptionTrustStatus.UNVERIFIED_LEGACY
+                    )
+                }
+                else -> {
+                    // Signature was supplied but failed cryptographic verification:
+                    // NEVER present untrusted payload as verified authentic text!
+                    DecryptedResult(
+                        plainText = "[⚠️ Security Alert: Message digital signature verification failed. Content unverified.]",
+                        isSignatureValid = false,
+                        trustStatus = DecryptionTrustStatus.INVALID_SIGNATURE
+                    )
+                }
+            }
         } catch (e: Exception) {
             Timber.e(e, "Decryption failure")
-            DecryptedResult("[Decryption Error]", false)
+            DecryptedResult(
+                plainText = "[Decryption Error: Key mismatch or corrupted data]",
+                isSignatureValid = false,
+                trustStatus = DecryptionTrustStatus.DECRYPTION_FAILED
+            )
         }
     }
 }

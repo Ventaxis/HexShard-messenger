@@ -28,6 +28,9 @@ import javax.crypto.spec.SecretKeySpec
 
 class NoBackupFoundException(message: String) : Exception(message)
 class InvalidPassphraseException(message: String) : Exception(message)
+class HardwareKeyNonExportableException(message: String) : Exception(message)
+class BackupAccountMismatchException(message: String) : Exception(message)
+class KeyIntegrityException(message: String) : Exception(message)
 
 /**
  * Manages secure user-passphrase encrypted cloud backup and recovery of E2EE identity key material.
@@ -106,17 +109,32 @@ object CryptoBackupManager {
 
         var derivedKeyBytes: ByteArray? = null
         try {
-            // 1. Ensure keys exist or generate exportable keypair
+            // 1. Ensure keys exist without mutating active identity
+            loadCachedKeysIfAvailable(context, accountId)
+
             val ecdhPriv = E2ECryptoManager.getExportableEcdhPrivateKey(accountId)
-                ?: generateAndCacheExportableEcdh(context, accountId)
             val ecdhPub = E2ECryptoManager.getMyPublicKey(accountId)
 
             val signPriv = E2ECryptoManager.getExportableSigningPrivateKey(accountId)
-                ?: generateAndCacheExportableSigning(context, accountId)
             val signPub = E2ECryptoManager.getMySigningPublicKey(accountId)
 
             val selfSecret = E2ECryptoManager.getExportableSelfStorageSecret(accountId)
                 ?: E2ECryptoManager.deriveSelfStorageSecret(accountId)
+
+            if (ecdhPriv == null || signPriv == null) {
+                return@withContext Result.failure(
+                    HardwareKeyNonExportableException(
+                        "Active cryptographic identity is protected in the device hardware Keystore and cannot be exported off-chip. Backup requires an enrolled exportable software keypair."
+                    )
+                )
+            }
+
+            // Cryptographic correspondence check: ensure public key matches private key before exporting
+            if (!verifyKeyPairCorrespondence(ecdhPriv, ecdhPub) || !verifyKeyPairCorrespondence(signPriv, signPub)) {
+                return@withContext Result.failure(
+                    KeyIntegrityException("Cryptographic key pair correspondence check failed prior to backup creation.")
+                )
+            }
 
             // 2. Build canonical JSON payload
             val payloadJson = JSONObject().apply {
@@ -266,6 +284,15 @@ object CryptoBackupManager {
 
             // 4. Parse payload and reconstruct keys
             val payload = JSONObject(String(decryptedBytes, Charsets.UTF_8))
+
+            // Validate account binding to prevent cross-account restore
+            val backupAccountId = payload.optString("accountId", "")
+            if (backupAccountId.isNotBlank() && backupAccountId != accountId) {
+                return@withContext Result.failure(
+                    BackupAccountMismatchException("Backup belongs to account '$backupAccountId', cannot restore into '$accountId'")
+                )
+            }
+
             val kf = KeyFactory.getInstance("EC")
 
             val ecdhPrivBytes = Base64.getDecoder().decode(payload.getString("ecdhPriv"))
@@ -279,6 +306,13 @@ object CryptoBackupManager {
             val signPub = kf.generatePublic(X509EncodedKeySpec(signPubBytes))
 
             val selfSecret = Base64.getDecoder().decode(payload.getString("selfSecret"))
+
+            // Verify reconstructed keypair integrity before applying to active state
+            if (!verifyKeyPairCorrespondence(ecdhPriv, ecdhPub) || !verifyKeyPairCorrespondence(signPriv, signPub)) {
+                return@withContext Result.failure(
+                    KeyIntegrityException("Restored cryptographic key pair integrity check failed. Aborting restore to protect active identity.")
+                )
+            }
 
             // 5. Load reconstructed keys into E2ECryptoManager
             E2ECryptoManager.setRestoredKeys(
@@ -347,39 +381,21 @@ object CryptoBackupManager {
         }
     }
 
-    private fun generateAndCacheExportableEcdh(context: Context, accountId: String): java.security.PrivateKey {
-        val kpg = KeyPairGenerator.getInstance("EC")
-        kpg.initialize(ECGenParameterSpec("secp256r1"))
-        val pair = kpg.generateKeyPair()
+    internal fun verifyKeyPairCorrespondence(privateKey: java.security.PrivateKey, publicKey: java.security.PublicKey): Boolean {
+        return try {
+            val testData = "HexShard-Key-Correspondence-Proof".toByteArray(Charsets.UTF_8)
+            val signer = java.security.Signature.getInstance("SHA256withECDSA")
+            signer.initSign(privateKey)
+            signer.update(testData)
+            val sig = signer.sign()
 
-        val prefs = SecurePrefsManager.getPrefs(context)
-        prefs.edit()
-            .putString("crypto_ecdh_priv_$accountId", Base64.getEncoder().encodeToString(pair.private.encoded))
-            .putString("crypto_ecdh_pub_$accountId", Base64.getEncoder().encodeToString(pair.public.encoded))
-            .apply()
-
-        E2ECryptoManager.setRestoredKeys(
-            accountId = accountId,
-            ecdhPrivate = pair.private,
-            ecdhPublic = pair.public,
-            signingPrivate = E2ECryptoManager.getExportableSigningPrivateKey(accountId) ?: pair.private,
-            signingPublic = pair.public,
-            selfStorageSecret = E2ECryptoManager.getExportableSelfStorageSecret(accountId) ?: ByteArray(32).also { SecureRandom().nextBytes(it) }
-        )
-        return pair.private
-    }
-
-    private fun generateAndCacheExportableSigning(context: Context, accountId: String): java.security.PrivateKey {
-        val kpg = KeyPairGenerator.getInstance("EC")
-        kpg.initialize(ECGenParameterSpec("secp256r1"))
-        val pair = kpg.generateKeyPair()
-
-        val prefs = SecurePrefsManager.getPrefs(context)
-        prefs.edit()
-            .putString("crypto_sign_priv_$accountId", Base64.getEncoder().encodeToString(pair.private.encoded))
-            .putString("crypto_sign_pub_$accountId", Base64.getEncoder().encodeToString(pair.public.encoded))
-            .apply()
-        return pair.private
+            val verifier = java.security.Signature.getInstance("SHA256withECDSA")
+            verifier.initVerify(publicKey)
+            verifier.update(testData)
+            verifier.verify(sig)
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun cacheExportableKeys(

@@ -56,6 +56,18 @@ class AttachmentRepository(
             val clean = mimeType.trim().lowercase()
             return ALLOWED_MIME_TYPES.any { clean.startsWith(it) }
         }
+
+        fun clearCacheForAccount(context: Context, accountId: String) {
+            if (accountId.isBlank()) return
+            try {
+                val dir = File(context.cacheDir, "attachments/$accountId")
+                if (dir.exists()) {
+                    dir.deleteRecursively()
+                }
+            } catch (e: Exception) {
+                Timber.w(e, "Error clearing attachment cache for account $accountId")
+            }
+        }
     }
 
     /**
@@ -159,9 +171,11 @@ class AttachmentRepository(
                         put("conversation_id", conversationId)
                         put("message_id", idempotencyKey.ifBlank { null })
                         put("uploader_id", currentUserId)
+                        put("owner_id", currentUserId)
                         put("storage_path", objectPath)
                         put("mime_type", fileType)
                         put("size_bytes", tempEncryptedFile.length())
+                        put("size", tempEncryptedFile.length())
                         put("encryption_version", 2)
                     }.toString().toRequestBody(JSON_MEDIA)
 
@@ -295,9 +309,11 @@ class AttachmentRepository(
                         put("conversation_id", conversationId)
                         put("message_id", idempotencyKey.ifBlank { null })
                         put("owner_id", currentUserId)
+                        put("uploader_id", currentUserId)
                         put("storage_path", objectPath)
                         put("mime_type", "audio/mp4")
                         put("size", tempEncryptedFile.length())
+                        put("size_bytes", tempEncryptedFile.length())
                         put("encryption_version", 2)
                     }.toString().toRequestBody(JSON_MEDIA)
 
@@ -354,7 +370,10 @@ class AttachmentRepository(
         }
         val safeName = cleanPath.replace(Regex("[^a-zA-Z0-9._-]"), "_")
         val safeExt = fileExtension.replace(Regex("[^a-zA-Z0-9]"), "")
-        val cachedFile = File(ctx.cacheDir, "dec_${safeName}.$safeExt")
+        val accountCacheDir = File(ctx.cacheDir, "attachments/$currentUserId").apply {
+            if (!exists()) mkdirs()
+        }
+        val cachedFile = File(accountCacheDir, "dec_${safeName}.$safeExt")
         if (cachedFile.exists() && cachedFile.length() > 0) {
             return@withContext cachedFile.absolutePath
         }
@@ -373,7 +392,8 @@ class AttachmentRepository(
             val respBody = resp.body ?: return@withContext null
 
             // Download encrypted stream to temp file
-            val tempEncFile = File.createTempFile("down_enc_", ".bin", ctx.cacheDir)
+            val tempEncFile = File.createTempFile("down_enc_", ".bin", accountCacheDir)
+            val tempDecFile = File.createTempFile("down_dec_", ".tmp", accountCacheDir)
             try {
                 FileOutputStream(tempEncFile).use { out ->
                     respBody.byteStream().use { input ->
@@ -412,7 +432,7 @@ class AttachmentRepository(
                             cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(primaryKey, "AES"), GCMParameterSpec(128, iv))
 
                             CipherInputStream(fileIn, cipher).use { cipherIn ->
-                                FileOutputStream(cachedFile).use { decOut ->
+                                FileOutputStream(tempDecFile).use { decOut ->
                                     val buf = ByteArray(32 * 1024)
                                     var readBytes: Int
                                     while (cipherIn.read(buf).also { readBytes = it } != -1) {
@@ -420,11 +440,11 @@ class AttachmentRepository(
                                     }
                                 }
                             }
-                            decryptedOk = true
+                            decryptedOk = tempDecFile.exists() && tempDecFile.length() > 0
                         }
                     }
                 } catch (decEx: Exception) {
-                    cachedFile.delete()
+                    tempDecFile.delete()
                     Timber.w(decEx, "Primary key decryption failed, attempting legacy sharedSecret fallback")
                 }
 
@@ -439,7 +459,7 @@ class AttachmentRepository(
                                 cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(sharedSecret, "AES"), GCMParameterSpec(128, iv))
 
                                 CipherInputStream(fileIn, cipher).use { cipherIn ->
-                                    FileOutputStream(cachedFile).use { decOut ->
+                                    FileOutputStream(tempDecFile).use { decOut ->
                                         val buf = ByteArray(32 * 1024)
                                         var readBytes: Int
                                         while (cipherIn.read(buf).also { readBytes = it } != -1) {
@@ -447,18 +467,32 @@ class AttachmentRepository(
                                         }
                                     }
                                 }
-                                decryptedOk = true
+                                decryptedOk = tempDecFile.exists() && tempDecFile.length() > 0
                             }
                         }
                     } catch (fallbackEx: Exception) {
-                        cachedFile.delete()
+                        tempDecFile.delete()
                         Timber.e(fallbackEx, "Attachment decryption fallback failed")
                     }
                 }
 
-                if (decryptedOk) cachedFile.absolutePath else null
+                if (decryptedOk) {
+                    // Atomic publish: rename validated temporary file to final target
+                    if (cachedFile.exists()) cachedFile.delete()
+                    if (tempDecFile.renameTo(cachedFile)) {
+                        cachedFile.absolutePath
+                    } else {
+                        // Fallback copy if rename across mount fails
+                        tempDecFile.copyTo(cachedFile, overwrite = true)
+                        tempDecFile.delete()
+                        cachedFile.absolutePath
+                    }
+                } else {
+                    null
+                }
             } finally {
                 tempEncFile.delete()
+                if (tempDecFile.exists()) tempDecFile.delete()
             }
         } catch (e: Exception) {
             Timber.e(e, "Failed to download and decrypt attachment")

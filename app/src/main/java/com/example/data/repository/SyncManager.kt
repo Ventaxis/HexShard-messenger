@@ -111,6 +111,17 @@ class SyncManager(
                 }
             }
         }
+
+        // 5. Propagate session token updates and auth state changes to Realtime gateway
+        syncScope.launch {
+            com.example.network.supabase.SessionManager.currentSession.collect { session ->
+                if (session == null || session.accessToken.isBlank()) {
+                    realtimeManager?.disconnect()
+                } else {
+                    realtimeManager?.updateAccessToken(session.accessToken)
+                }
+            }
+        }
     }
 
     /**
@@ -277,19 +288,28 @@ class SyncManager(
         val sequence = obj.optLong("sequence", 0L)
         if (sender.isBlank()) return@withContext
 
-        val payloadString = obj.optString("payload")
-        if (payloadString.isBlank()) return@withContext
-
+        // P0-03: Process tombstones FIRST before checking payload, as server sets payload='' on delete
         val isDeleted = obj.optBoolean("is_deleted", false)
         if (isDeleted) {
-            chatDao.deleteMessageByServerId(docId, currentUserId)
+            if (docId.isNotBlank()) {
+                chatDao.deleteMessageByServerId(docId, currentUserId)
+            }
+            val clientMsgId = obj.optString("client_message_id", obj.optString("idempotency_key", ""))
+            if (clientMsgId.isNotBlank()) {
+                chatDao.deleteMessageByIdempotencyKey(clientMsgId, currentUserId)
+            }
             return@withContext
         }
+
+        val payloadString = obj.optString("payload")
+        if (payloadString.isBlank()) return@withContext
 
         val type = obj.optString("type", "text")
         val timeStr = obj.optString("time_str", "")
         val idempotencyKey = obj.optString("client_message_id", obj.optString("idempotency_key", docId)).ifBlank { docId }
         val personaId = obj.optString("persona_id").takeIf { it.isNotBlank() && it != "null" }
+        val editedAt = obj.optString("edited_at").takeIf { it.isNotBlank() && it != "null" }
+        val serverStatus = obj.optString("status").takeIf { it.isNotBlank() } ?: "sent"
 
         val isSelfMessage = (sender == currentUserId && (recipient == currentUserId || recipient == "self" || recipient.isBlank()))
         val isOutboundFromAnotherDevice = (sender == currentUserId && recipient != currentUserId && recipient.isNotBlank())
@@ -310,9 +330,28 @@ class SyncManager(
             }
         }
 
-        // Fast-path duplicate check
-        if (chatDao.getMessageByIdempotencyKey(idempotencyKey, currentUserId) != null) return@withContext
-        if (chatDao.getMessageByServerId(docId, currentUserId) != null) return@withContext
+        // P0-04: Existing message detection: update server metadata and check if edited
+        val existingMsg = (if (docId.isNotBlank()) chatDao.getMessageByServerId(docId, currentUserId) else null)
+            ?: (if (idempotencyKey.isNotBlank()) chatDao.getMessageByIdempotencyKey(idempotencyKey, currentUserId) else null)
+
+        if (existingMsg != null) {
+            if ((existingMsg.serverMessageId.isBlank() && docId.isNotBlank()) ||
+                (existingMsg.serverSequence == 0L && sequence > 0L) ||
+                (existingMsg.status != "read" && serverStatus == "read")
+            ) {
+                chatDao.updateMessageServerInfoByIdempotencyKey(
+                    idempotencyKey = idempotencyKey,
+                    serverId = docId,
+                    sequence = sequence,
+                    status = serverStatus,
+                    accountId = currentUserId
+                )
+            }
+            if (editedAt == null) {
+                // Not edited, already present in local database
+                return@withContext
+            }
+        }
 
         var isMe = sender == currentUserId
         var resolvedSender = sender
@@ -333,9 +372,17 @@ class SyncManager(
             }
         } else {
             // E2EE message decryption
+            // P0-06: For outbound message from another device of same account,
+            // the ECDH shared secret was derived with peerId (recipient), not self.
+            val effectiveCryptoPeer = when {
+                isSelfMessage -> currentUserId
+                isOutboundFromAnotherDevice -> recipient
+                else -> sender
+            }
+
             val signatureStr = obj.optString("signature").takeIf { it.isNotBlank() }
             val decryptedResult = cryptoRepository.decryptInboundMessage(
-                senderId = if (isSelfMessage) currentUserId else sender,
+                senderId = effectiveCryptoPeer,
                 recipientId = currentUserId,
                 conversationId = conversationId,
                 idempotencyKey = idempotencyKey,
@@ -343,10 +390,10 @@ class SyncManager(
                 base64Signature = signatureStr
             )
 
-            isDecryptionError = decryptedResult.plainText.startsWith("[E2EE Error") ||
-                                decryptedResult.plainText.startsWith("[Decryption Error")
-            resolvedText = if (isDecryptionError) "[Encrypted message - decryption failed]" else decryptedResult.plainText
-            signatureValid = !isDecryptionError && decryptedResult.isSignatureValid
+            isDecryptionError = decryptedResult.trustStatus == DecryptionTrustStatus.CORRUPT_PAYLOAD ||
+                                decryptedResult.trustStatus == DecryptionTrustStatus.DECRYPTION_FAILED
+            resolvedText = decryptedResult.plainText
+            signatureValid = decryptedResult.isSignatureValid
 
             if (!isDecryptionError && decryptedResult.plainText.startsWith("{") && decryptedResult.plainText.endsWith("}")) {
                 try {
@@ -369,8 +416,17 @@ class SyncManager(
 
         // Synchronize local database insert under syncMutex
         syncMutex.withLock {
-            if (chatDao.getMessageByIdempotencyKey(idempotencyKey, currentUserId) != null) return@withContext
-            if (chatDao.getMessageByServerId(docId, currentUserId) != null) return@withContext
+            val existing = (if (docId.isNotBlank()) chatDao.getMessageByServerId(docId, currentUserId) else null)
+                ?: (if (idempotencyKey.isNotBlank()) chatDao.getMessageByIdempotencyKey(idempotencyKey, currentUserId) else null)
+
+            if (existing != null) {
+                if (editedAt != null) {
+                    chatDao.updateMessageText(existing.id, resolvedText, System.currentTimeMillis(), currentUserId)
+                    chatDao.updateMessageStatus(existing.id, messageStatus, currentUserId)
+                    conversationRepository.updateChatPreview(existing.chatId, resolvedText, timeStr, System.currentTimeMillis())
+                }
+                return@withContext
+            }
 
             var chat = when {
                 isSelfMessage -> chatDao.getSavedMessagesChat(currentUserId)

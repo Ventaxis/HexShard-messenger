@@ -286,5 +286,27 @@ class SupabaseRealtimeManager(
         activeJoinRef = null
     }
 
+    fun updateAccessToken(newAccessToken: String) {
+        val ws = webSocket
+        if (ws != null && _connectionState.value == RealtimeConnectionState.CONNECTED) {
+            try {
+                val ref = refCounter.incrementAndGet().toString()
+                val tokenMsg = JSONObject().apply {
+                    put("topic", "realtime:public:messages")
+                    put("event", "access_token")
+                    put("payload", JSONObject().put("access_token", newAccessToken))
+                    put("ref", ref)
+                }
+                ws.send(tokenMsg.toString())
+                Timber.i("Sent updated access token to Realtime channel (ref=$ref)")
+            } catch (e: Exception) {
+                Timber.w(e, "Failed to send access_token to Realtime, reconnecting")
+                connect()
+            }
+        } else if (_connectionState.value == RealtimeConnectionState.FAILED || _connectionState.value == RealtimeConnectionState.DISCONNECTED) {
+            connect()
+        }
+    }
+
     fun isRealtimeConnected(): Boolean = _connectionState.value == RealtimeConnectionState.CONNECTED
 }
