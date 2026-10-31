@@ -32,3 +32,11 @@ HexShard Messenger is an Android messaging application focused on:
 - Real-time message synchronization with idempotent deduplication via Supabase Realtime
 - Private Virtual Numbers (+999 format)
 - Zero Google Services dependency (pure Supabase backend)
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
+
+Copyright (c) 2026 Ventaxis (Ventaxis Corp)
