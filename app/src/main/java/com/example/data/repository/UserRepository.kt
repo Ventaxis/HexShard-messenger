@@ -535,7 +535,13 @@ class UserRepository(
                 .patch(profileBody)
                 .build()
 
-            httpClient.newCall(profileReq).execute().close()
+            // Fail-closed: verify the profile row was actually updated
+            httpClient.newCall(profileReq).execute().use { profileResp ->
+                if (!profileResp.isSuccessful) {
+                    Timber.e("Public key upload failed: profiles PATCH returned HTTP ${profileResp.code}")
+                    return@withContext false
+                }
+            }
 
             // Update devices table using canonical schema columns (account_id, device_id, public_key, signing_key, last_seen_at)
             val deviceBody = JSONObject().apply {
@@ -557,7 +563,13 @@ class UserRepository(
                 .post(deviceBody)
                 .build()
 
-            httpClient.newCall(deviceReq).execute().close()
+            // Fail-closed: verify the device row was actually upserted
+            httpClient.newCall(deviceReq).execute().use { deviceResp ->
+                if (!deviceResp.isSuccessful) {
+                    Timber.e("Public key upload failed: devices POST returned HTTP ${deviceResp.code}")
+                    return@withContext false
+                }
+            }
             true
         } catch (e: Exception) {
             Timber.e(e, "Failed to upload public keys to Supabase")
@@ -785,8 +797,10 @@ class UserRepository(
                         .build()
 
                     val resp = httpClient.newCall(req).execute()
-                    if (resp.isSuccessful) {
-                        break
+                    val ok = resp.isSuccessful
+                    resp.close()
+                    if (ok) {
+                        return@withContext true
                     }
                     Timber.w("Server revoke returned HTTP ${resp.code}")
                 } catch (e: Exception) {
@@ -794,6 +808,7 @@ class UserRepository(
                 }
             }
         }
-        true
+        // Fail-closed: report failure so the UI does not claim tokens were revoked
+        false
     }
 }

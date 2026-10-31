@@ -96,8 +96,9 @@ class AttachmentRepository(
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(ctx)
 
+        // Substring matching ("ai") would misclassify real peers and encrypt to the wrong key
         val isSelf = recipientId == "self" || recipientId == "me" || recipientId.isBlank() ||
-                recipientId == "ai_assistant" || recipientId.startsWith("ai_") || recipientId.contains("ai", ignoreCase = true)
+                recipientId == "ai_assistant" || recipientId.startsWith("ai_")
         val sharedSecret = if (isSelf) {
             E2ECryptoManager.deriveSelfStorageSecret(currentUserId)
         } else {
@@ -242,8 +243,9 @@ class AttachmentRepository(
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(ctx)
 
+        // Substring matching ("ai") would misclassify real peers and encrypt to the wrong key
         val isSelf = recipientId == "self" || recipientId == "me" || recipientId.isBlank() ||
-                recipientId == "ai_assistant" || recipientId.startsWith("ai_") || recipientId.contains("ai", ignoreCase = true)
+                recipientId == "ai_assistant" || recipientId.startsWith("ai_")
         val sharedSecret = if (isSelf) {
             E2ECryptoManager.deriveSelfStorageSecret(currentUserId)
         } else {

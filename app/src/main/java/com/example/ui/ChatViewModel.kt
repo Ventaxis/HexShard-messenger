@@ -275,13 +275,13 @@ class ChatViewModel @Inject constructor(
 
     suspend fun downloadVoiceMessage(url: String, idempotencyKey: String = ""): ByteArray? {
         val cid = _selectedChatId.value ?: return null
-        val chat = chats.value.find { it.id == cid } ?: return null
+        val chat = repository.getChatById(cid) ?: return null
         return repository.downloadVoiceMessage(url, chat.recipientId.ifEmpty { chat.name }, idempotencyKey)
     }
 
     suspend fun downloadMediaMessage(url: String, idempotencyKey: String = ""): ByteArray? {
         val cid = _selectedChatId.value ?: return null
-        val chat = chats.value.find { it.id == cid } ?: return null
+        val chat = repository.getChatById(cid) ?: return null
         return repository.downloadMediaMessage(url, chat.recipientId.ifEmpty { chat.name }, idempotencyKey)
     }
 
@@ -301,7 +301,9 @@ class ChatViewModel @Inject constructor(
 
         viewModelScope.launch {
             try {
-                val chat = chats.value.find { it.id == cid } ?: return@launch
+                // Repository lookup, NOT the search-filtered `chats` flow:
+                // a chat hidden by an active search query must still be sendable
+                val chat = repository.getChatById(cid) ?: return@launch
                 val timeStr = getFormattedTime()
                 val idempotencyKey = generateIdempotencyKey()
 
@@ -355,6 +357,7 @@ class ChatViewModel @Inject constructor(
                 }
             } catch (e: Exception) {
                 timber.log.Timber.e(e, "Failed to send media message")
+            } finally {
                 _isSending.value = false
             }
         }
@@ -375,7 +378,8 @@ class ChatViewModel @Inject constructor(
 
         viewModelScope.launch {
             try {
-                val chat = chats.value.find { it.id == cid } ?: return@launch
+                // Repository lookup, NOT the search-filtered `chats` flow
+                val chat = repository.getChatById(cid) ?: return@launch
                 val timeStr = getFormattedTime()
                 val idempotencyKey = generateIdempotencyKey()
 
@@ -414,6 +418,7 @@ class ChatViewModel @Inject constructor(
             } catch (e: Exception) {
                 timber.log.Timber.e(e, "Failed to send voice message")
                 file.delete()
+            } finally {
                 _isSending.value = false
             }
         }
@@ -487,11 +492,12 @@ class ChatViewModel @Inject constructor(
 
         viewModelScope.launch {
             try {
-                val chat = chats.value.find { it.id == cid } ?: run {
+                // Repository lookup, NOT the search-filtered `chats` flow
+                val chat = repository.getChatById(cid) ?: run {
                     _isSending.value = false
                     return@launch
                 }
-                
+
                 val timeStr = getFormattedTime()
                 val recipientId = chat.recipientId.ifEmpty { chat.name }
                 val idempotencyKey = generateIdempotencyKey(cid, recipientId, trimmed)
@@ -594,7 +600,7 @@ class ChatViewModel @Inject constructor(
     
     fun retryMessage(msgId: Int, chatId: Int, text: String) {
         viewModelScope.launch {
-            val chat = chats.value.find { it.id == chatId } ?: return@launch
+            val chat = repository.getChatById(chatId) ?: return@launch
             val isSelfChat = chat.isSavedMessages
             val isAiChat = chat.isAiAssistant
             if (isSelfChat) {
@@ -638,7 +644,7 @@ class ChatViewModel @Inject constructor(
 
     fun forwardMessage(targetChatId: Int, message: com.example.data.database.MessageEntity) {
         viewModelScope.launch {
-            val targetChat = chats.value.find { it.id == targetChatId } ?: return@launch
+            val targetChat = repository.getChatById(targetChatId) ?: return@launch
             val timeStr = getFormattedTime()
             val idempotencyKey = generateIdempotencyKey()
             repository.sendMessage(
@@ -843,7 +849,7 @@ class ChatViewModel @Inject constructor(
                 } else {
                     _selectedAiModel.value = AiModelOption.HEXAGON
                 }
-                val aiChat = chats.value.find { it.isAiAssistant } ?: repository.getChatByRecipientId("ai_hexagon")
+                val aiChat = repository.getChatByRecipientId("ai_hexagon") ?: repository.getChatByRecipientId("ai_assistant")
                 if (aiChat != null) {
                     _selectedChatId.value = aiChat.id
                 }

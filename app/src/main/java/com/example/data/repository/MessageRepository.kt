@@ -111,8 +111,8 @@ class MessageRepository(
         if (token.isNotBlank() && chat.conversationId.isNotBlank()) {
             backgroundScope.launch {
                 try {
-                    val messages = chatDao.getMessagesForChatForAccountList(chatId, accountId)
-                    val maxSeq = messages.maxOfOrNull { it.timestamp } ?: 0L
+                    // Server expects the per-conversation message sequence, not wall-clock millis
+                    val maxSeq = chatDao.getMaxSequenceForConversation(chat.conversationId, accountId) ?: 0L
                     val payload = JSONObject().apply {
                         put("p_conversation_id", chat.conversationId)
                         put("p_sequence", maxSeq)
@@ -178,9 +178,10 @@ class MessageRepository(
                 val bodyStr = resp.body?.string().orEmpty()
                 resp.close()
 
+                // Fail-closed: unparseable body or missing success flag counts as failure
                 val rpcSuccess = ok && (bodyStr.isBlank() || try {
-                    JSONObject(bodyStr).optBoolean("success", true)
-                } catch (_: Exception) { true })
+                    JSONObject(bodyStr).optBoolean("success", false)
+                } catch (_: Exception) { false })
 
                 if (!rpcSuccess) {
                     // Roll back optimistic edit on server rejection
@@ -225,9 +226,10 @@ class MessageRepository(
                 val bodyStr = resp.body?.string().orEmpty()
                 resp.close()
 
+                // Fail-closed: unparseable body or missing success flag counts as failure
                 remoteSuccess = ok && (bodyStr.isBlank() || try {
-                    JSONObject(bodyStr).optBoolean("success", true)
-                } catch (_: Exception) { true })
+                    JSONObject(bodyStr).optBoolean("success", false)
+                } catch (_: Exception) { false })
             } catch (e: Exception) {
                 Timber.w(e, "deleteMessage remote RPC failed")
                 remoteSuccess = false
@@ -555,7 +557,10 @@ class MessageRepository(
         
         updateMessageStatus(msgId, "sending", currentUserId)
         val outboxList = chatDao.getPendingOutboxEntries(currentUserId)
-        val existingOutbox = outboxList.find { it.idempotencyKey == msg.idempotencyKey || it.localMessageId == msgId }
+        // Never send a blank payload: WAITING_FOR_PEER_KEY entries carry no ciphertext yet
+        val existingOutbox = outboxList.find {
+            it.payload.isNotBlank() && (it.idempotencyKey == msg.idempotencyKey || it.localMessageId == msgId)
+        }
 
         if (existingOutbox != null) {
             chatDao.retryOutboxEntry(existingOutbox.id, currentUserId)
