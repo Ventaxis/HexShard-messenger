@@ -278,6 +278,7 @@ open class ChatRepository(
                 chatDao.clearAllChatsForAccount(currentAccount)
                 chatDao.clearAllMessagesForAccount(currentAccount)
                 chatDao.clearAllOutboxForAccount(currentAccount)
+                com.example.data.repository.AttachmentRepository.clearCacheForAccount(context, currentAccount)
             }
             refreshAccount()
         } else {

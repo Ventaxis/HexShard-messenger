@@ -113,13 +113,7 @@ object CryptoBackupManager {
             loadCachedKeysIfAvailable(context, accountId)
 
             val ecdhPriv = E2ECryptoManager.getExportableEcdhPrivateKey(accountId)
-            val ecdhPub = E2ECryptoManager.getMyPublicKey(accountId)
-
             val signPriv = E2ECryptoManager.getExportableSigningPrivateKey(accountId)
-            val signPub = E2ECryptoManager.getMySigningPublicKey(accountId)
-
-            val selfSecret = E2ECryptoManager.getExportableSelfStorageSecret(accountId)
-                ?: E2ECryptoManager.deriveSelfStorageSecret(accountId)
 
             if (ecdhPriv == null || signPriv == null) {
                 return@withContext Result.failure(
@@ -128,6 +122,11 @@ object CryptoBackupManager {
                     )
                 )
             }
+
+            val ecdhPub = E2ECryptoManager.getMyPublicKey(accountId)
+            val signPub = E2ECryptoManager.getMySigningPublicKey(accountId)
+            val selfSecret = E2ECryptoManager.getExportableSelfStorageSecret(accountId)
+                ?: E2ECryptoManager.deriveSelfStorageSecret(accountId)
 
             // Cryptographic correspondence check: ensure public key matches private key before exporting
             if (!verifyKeyPairCorrespondence(ecdhPriv, ecdhPub) || !verifyKeyPairCorrespondence(signPriv, signPub)) {
