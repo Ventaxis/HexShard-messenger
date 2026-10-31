@@ -1,0 +1,38 @@
+# Supabase Configuration for HexShard Messenger v11
+project_id = "zqyipemjvzcxjpglmegy"
+
+[api]
+port = 54321
+schemas = ["public", "storage", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[auth]
+site_url = "https://zqyipemjvzcxjpglmegy.supabase.co"
+additional_redirect_urls = ["hexshard://auth/callback"]
+jwt_expiry = 3600
+enable_signup = true
+
+[functions.create-telegram-challenge]
+verify_jwt = true
+
+[functions.verify-telegram]
+verify_jwt = true
+
+[functions.telegram-webhook]
+verify_jwt = false
+
+[functions.telegram-recovery]
+verify_jwt = false
+
+[functions.gemini-assistant]
+verify_jwt = false
+
+[functions.reserve-virtual-number]
+verify_jwt = true
+
+[functions.confirm-virtual-number]
+verify_jwt = true
+
+[functions.delete-account]
+verify_jwt = true

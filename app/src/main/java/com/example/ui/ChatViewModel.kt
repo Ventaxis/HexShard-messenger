@@ -1,0 +1,986 @@
+package com.example.ui
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.example.data.database.ChatEntity
+import com.example.data.database.ChatRepository
+import com.example.data.database.MessageEntity
+import com.example.data.database.isAiAssistant
+import com.example.data.database.isSavedMessages
+import com.example.network.AiModelOption
+import com.example.network.AiResult
+import com.example.network.GeminiService
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.*
+import java.text.SimpleDateFormat
+import java.util.*
+import java.util.concurrent.atomic.AtomicLong
+import javax.inject.Inject
+
+sealed class AiUiError {
+    data class RateLimited(val retryAfterSeconds: Long) : AiUiError()
+    object Unauthorized : AiUiError()
+    object FunctionNotFound : AiUiError()
+    object DeploymentUnavailable : AiUiError()
+    object ModelUnavailable : AiUiError()
+    object ConfigurationError : AiUiError()
+    object InvalidRequest : AiUiError()
+    object NetworkError : AiUiError()
+    data class UpstreamError(val message: String) : AiUiError()
+    data class Custom(val message: String) : AiUiError()
+
+    fun getLocalizedMessage(strings: AppStrings): String {
+        return when (this) {
+            is RateLimited -> strings.aiRateLimited.replace("%d", "$retryAfterSeconds")
+            is Unauthorized -> strings.aiUnauthorized
+            is FunctionNotFound -> strings.aiFunctionNotFound
+            is DeploymentUnavailable -> strings.aiDeploymentUnavailable
+            is ModelUnavailable -> strings.aiModelUnavailable
+            is ConfigurationError -> strings.aiConfigurationError
+            is InvalidRequest -> strings.aiInvalidRequest
+            is NetworkError -> strings.aiNetworkError
+            is UpstreamError -> message.ifBlank { strings.aiUnavailable }
+            is Custom -> message
+        }
+    }
+}
+
+data class UnifiedSearchResults(
+    val users: List<com.example.data.repository.UserRepository.UserSearchResult> = emptyList(),
+    val chats: List<ChatEntity> = emptyList(),
+    val messages: List<MessageEntity> = emptyList(),
+    val isSearching: Boolean = false
+)
+
+class ChatViewModel @Inject constructor(
+    private val repository: ChatRepository,
+    private val geminiService: GeminiService
+) : ViewModel() {
+
+    private val _selectedChatId = MutableStateFlow<Int?>(null)
+    val selectedChatId: StateFlow<Int?> = _selectedChatId.asStateFlow()
+
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    private val _searchResults = MutableStateFlow(UnifiedSearchResults())
+    val searchResults: StateFlow<UnifiedSearchResults> = _searchResults.asStateFlow()
+
+    private var searchJob: Job? = null
+
+    private val _pendingProfileConfirmation = MutableStateFlow<com.example.util.ProfileQrData?>(null)
+    val pendingProfileConfirmation: StateFlow<com.example.util.ProfileQrData?> = _pendingProfileConfirmation.asStateFlow()
+
+    private val _isSending = MutableStateFlow(false)
+    val isSending: StateFlow<Boolean> = _isSending.asStateFlow()
+
+    private val _typingChatId = MutableStateFlow<Int?>(null)
+    val typingChatId: StateFlow<Int?> = _typingChatId.asStateFlow()
+
+    private val _isDarkTheme = MutableStateFlow(true)
+    val isDarkTheme: StateFlow<Boolean> = _isDarkTheme.asStateFlow()
+
+    private val _selectedAiModel = MutableStateFlow(AiModelOption.DEFAULT)
+    val selectedAiModel: StateFlow<AiModelOption> = _selectedAiModel.asStateFlow()
+
+    private val _aiErrorState = MutableStateFlow<AiUiError?>(null)
+    val aiErrorState: StateFlow<AiUiError?> = _aiErrorState.asStateFlow()
+
+    private val _viewingPeerProfile = MutableStateFlow<com.example.data.repository.UserRepository.PeerProfileInfo?>(null)
+    val viewingPeerProfile: StateFlow<com.example.data.repository.UserRepository.PeerProfileInfo?> = _viewingPeerProfile.asStateFlow()
+
+    private val _chatCreateError = MutableStateFlow<String?>(null)
+    val chatCreateError: StateFlow<String?> = _chatCreateError.asStateFlow()
+
+    fun dismissChatCreateError() {
+        _chatCreateError.value = null
+    }
+
+    fun openPeerProfile(chat: ChatEntity) {
+        if (chat.isSavedMessages || chat.isAiAssistant) return
+        viewModelScope.launch {
+            val peerId = chat.recipientId.ifBlank { chat.name }
+            val profile = repository.fetchPeerProfile(peerId) ?: com.example.data.repository.UserRepository.PeerProfileInfo(
+                id = chat.recipientId.ifBlank { chat.name },
+                username = chat.name.removePrefix("@"),
+                displayName = chat.name,
+                virtualNumber = "",
+                avatarUrl = null,
+                backgroundPath = null,
+                backgroundType = null,
+                bio = "",
+                dateOfBirth = "",
+                isOnline = chat.status == "online"
+            )
+            _viewingPeerProfile.value = profile
+        }
+    }
+
+    fun dismissPeerProfile() {
+        _viewingPeerProfile.value = null
+    }
+
+    fun dismissAiError() {
+        _aiErrorState.value = null
+    }
+
+    // SECURITY: Thread-safe last send time using AtomicLong
+    private val lastSendTimeNano = AtomicLong(0L)
+    private val MIN_SEND_INTERVAL_MS = 300L
+
+    init {
+        viewModelScope.launch {
+            repository.populateInitialDataIfNeeded()
+        }
+    }
+
+    fun onAccountChanged() {
+        repository.refreshAccount()
+        viewModelScope.launch {
+            repository.populateInitialDataIfNeeded()
+        }
+    }
+
+    fun ensureDefaultChats() {
+        viewModelScope.launch {
+            repository.populateInitialDataIfNeeded()
+        }
+    }
+
+    val chats: StateFlow<List<ChatEntity>> = combine(
+        repository.allChats,
+        _searchQuery
+    ) { chatList, query ->
+        if (query.isBlank()) {
+            chatList
+        } else {
+            chatList.filter {
+                it.name.contains(query, ignoreCase = true) ||
+                it.preview.contains(query, ignoreCase = true)
+            }
+        }
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = emptyList()
+    )
+
+    val selectedChatMessages: StateFlow<List<MessageEntity>> = combine(
+        _selectedChatId.flatMapLatest { id ->
+            if (id == null) flowOf(emptyList())
+            else repository.getMessagesForChat(id)
+        },
+        _selectedChatId,
+        _selectedAiModel,
+        repository.allChats
+    ) { messages, chatId, aiModel, allChatsList ->
+        if (chatId == null) return@combine emptyList()
+        val chat = allChatsList.find { it.id == chatId }
+        if (chat != null && chat.isAiAssistant) {
+            // Filter strictly by personaId enum identifier, completely isolated
+            val validMessages = messages.filter { it.text.isNotBlank() || it.isAttachment || it.audioUrl != null }
+            validMessages.filter {
+                resolvePersonaId(it) == aiModel.personaId
+            }
+        } else {
+            messages
+        }
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = emptyList()
+    )
+
+    fun selectChat(id: Int) {
+        _selectedChatId.value = id
+        viewModelScope.launch {
+            repository.markAllAsRead(id)
+        }
+    }
+
+    fun deselectChat() {
+        _selectedChatId.value = null
+    }
+
+    fun updateSearchQuery(query: String) {
+        _searchQuery.value = query
+        searchJob?.cancel()
+        if (query.isBlank()) {
+            _searchResults.value = UnifiedSearchResults()
+            return
+        }
+
+        searchJob = viewModelScope.launch {
+            _searchResults.value = _searchResults.value.copy(isSearching = true)
+
+            // Local searches
+            val matchedChats = repository.searchChats(query)
+            val matchedMessages = repository.searchMessages(query)
+
+            _searchResults.value = _searchResults.value.copy(
+                chats = matchedChats,
+                messages = matchedMessages
+            )
+
+            // Debounced remote user search
+            delay(250)
+            val matchedUsers = try {
+                repository.searchUsers(query)
+            } catch (_: Exception) {
+                emptyList()
+            }
+
+            _searchResults.value = UnifiedSearchResults(
+                users = matchedUsers,
+                chats = matchedChats,
+                messages = matchedMessages,
+                isSearching = false
+            )
+        }
+    }
+
+    fun openChatWithUser(user: com.example.data.repository.UserRepository.UserSearchResult) {
+        _searchQuery.value = ""
+        _searchResults.value = UnifiedSearchResults()
+        viewModelScope.launch {
+            val recipientId = user.userId.ifBlank { user.username }
+            val name = user.displayName.ifBlank { user.username }
+            val res = repository.getOrCreateDirectConversation(recipientId, name)
+            res.onSuccess { chat ->
+                _selectedChatId.value = chat.id
+            }.onFailure { err ->
+                timber.log.Timber.e(err, "Failed to open chat with user $recipientId")
+            }
+        }
+    }
+
+    fun toggleTheme() {
+        _isDarkTheme.value = !_isDarkTheme.value
+    }
+
+    fun toggleChatPin(chatId: Int) {
+        viewModelScope.launch {
+            repository.toggleChatPin(chatId)
+        }
+    }
+
+    fun deleteChat(chatId: Int) {
+        viewModelScope.launch {
+            if (_selectedChatId.value == chatId) {
+                _selectedChatId.value = null
+            }
+            repository.deleteChat(chatId)
+        }
+    }
+
+    suspend fun downloadVoiceMessage(url: String, idempotencyKey: String = ""): ByteArray? {
+        val cid = _selectedChatId.value ?: return null
+        val chat = chats.value.find { it.id == cid } ?: return null
+        return repository.downloadVoiceMessage(url, chat.recipientId.ifEmpty { chat.name }, idempotencyKey)
+    }
+
+    suspend fun downloadMediaMessage(url: String, idempotencyKey: String = ""): ByteArray? {
+        val cid = _selectedChatId.value ?: return null
+        val chat = chats.value.find { it.id == cid } ?: return null
+        return repository.downloadMediaMessage(url, chat.recipientId.ifEmpty { chat.name }, idempotencyKey)
+    }
+
+    fun sendMediaMessage(context: android.content.Context, uri: android.net.Uri, type: String) {
+        val cid = _selectedChatId.value ?: return
+        
+        // SECURITY: Check throttle atomically
+        if (!shouldAllowSend()) {
+            timber.log.Timber.w("Media send throttled")
+            return
+        }
+
+        if (!_isSending.compareAndSet(expect = false, update = true)) {
+            timber.log.Timber.w("Already sending media")
+            return
+        }
+
+        viewModelScope.launch {
+            try {
+                val chat = chats.value.find { it.id == cid } ?: return@launch
+                val timeStr = getFormattedTime()
+                val idempotencyKey = generateIdempotencyKey()
+
+                val isSelfChat = chat.isSavedMessages
+                val isAiChat = chat.isAiAssistant
+
+                val imageBytes = if (isAiChat && type == "image") {
+                    try {
+                        context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    } catch (_: Exception) { null }
+                } else null
+                val mimeType = if (isAiChat && type == "image") {
+                    context.contentResolver.getType(uri) ?: "image/jpeg"
+                } else null
+
+                val audioUrl = repository.uploadMediaMessage(context, uri, cid, type, idempotencyKey, chat.recipientId.ifEmpty { chat.name })
+                if (audioUrl == null) {
+                    _isSending.value = false
+                    return@launch
+                }
+
+                val msgId = repository.sendMessage(
+                    chatId = cid,
+                    sender = "me",
+                    text = if (type == "image") "📷 Photo" else "🎥 Video",
+                    isMe = true,
+                    isAttachment = false,
+                    timeStr = timeStr,
+                    status = if (isSelfChat || isAiChat) "delivered" else "sending",
+                    type = type,
+                    audioUrl = audioUrl,
+                    duration = null,
+                    recipientId = chat.recipientId.ifEmpty { chat.name },
+                    idempotencyKey = idempotencyKey
+                )
+                
+                _isSending.value = false
+                if (msgId != -1L) {
+                    if (isSelfChat || isAiChat) {
+                        repository.updateMessageStatus(msgId.toInt(), "delivered")
+                    }
+                    if (isAiChat && imageBytes != null) {
+                        handleAiReply(
+                            chatId = cid,
+                            userMsg = "Пожалуйста, посмотри и детально опиши эту фотографию. Расскажи, что на ней изображено, распознай текст или детали.",
+                            originalMsgId = msgId.toInt(),
+                            imageBytes = imageBytes,
+                            mimeType = mimeType
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                timber.log.Timber.e(e, "Failed to send media message")
+                _isSending.value = false
+            }
+        }
+    }
+
+    fun sendVoiceMessage(file: java.io.File, duration: Int) {
+        val cid = _selectedChatId.value ?: return
+        
+        if (!shouldAllowSend()) {
+            timber.log.Timber.w("Voice send throttled")
+            return
+        }
+
+        if (!_isSending.compareAndSet(expect = false, update = true)) {
+            timber.log.Timber.w("Already sending voice")
+            return
+        }
+
+        viewModelScope.launch {
+            try {
+                val chat = chats.value.find { it.id == cid } ?: return@launch
+                val timeStr = getFormattedTime()
+                val idempotencyKey = generateIdempotencyKey()
+
+                val audioUrl = repository.uploadVoiceMessage(file, cid, idempotencyKey, chat.recipientId.ifEmpty { chat.name })
+                file.delete()
+                
+                if (audioUrl == null) {
+                    _isSending.value = false
+                    return@launch
+                }
+
+                val isSelfChat = chat.isSavedMessages
+                val isAiChat = chat.isAiAssistant
+
+                val msgId = repository.sendMessage(
+                    chatId = cid,
+                    sender = "me",
+                    text = "🎤 Voice message",
+                    isMe = true,
+                    isAttachment = false,
+                    timeStr = timeStr,
+                    status = if (isSelfChat || isAiChat) "delivered" else "sending",
+                    type = "voice",
+                    audioUrl = audioUrl,
+                    duration = duration,
+                    recipientId = chat.recipientId.ifEmpty { chat.name },
+                    idempotencyKey = idempotencyKey
+                )
+                
+                _isSending.value = false
+                if (msgId != -1L) {
+                    if (isSelfChat || isAiChat) {
+                        repository.updateMessageStatus(msgId.toInt(), "delivered")
+                    }
+                }
+            } catch (e: Exception) {
+                timber.log.Timber.e(e, "Failed to send voice message")
+                file.delete()
+                _isSending.value = false
+            }
+        }
+    }
+
+    fun sendLocationMessage(context: android.content.Context) {
+        val cid = _selectedChatId.value ?: return
+        if (!shouldAllowSend()) return
+        if (!_isSending.compareAndSet(expect = false, update = true)) return
+
+        viewModelScope.launch {
+            try {
+                val chat = chats.value.find { it.id == cid } ?: run {
+                    _isSending.value = false
+                    return@launch
+                }
+                val locationData = com.example.util.LocationHelper.getCurrentLocation(context)
+                if (locationData == null) {
+                    _isSending.value = false
+                    return@launch
+                }
+                val timeStr = getFormattedTime()
+                val idempotencyKey = generateIdempotencyKey()
+                val isSelfChat = chat.isSavedMessages
+                val isAiChat = chat.isAiAssistant
+
+                val msgId = repository.sendMessage(
+                    chatId = cid,
+                    sender = "me",
+                    text = locationData.toJson(),
+                    isMe = true,
+                    isAttachment = false,
+                    timeStr = timeStr,
+                    status = if (isSelfChat || isAiChat) "delivered" else "sending",
+                    type = "location",
+                    audioUrl = null,
+                    duration = null,
+                    recipientId = chat.recipientId.ifEmpty { chat.name },
+                    idempotencyKey = idempotencyKey
+                )
+                _isSending.value = false
+                if (msgId != -1L && (isSelfChat || isAiChat)) {
+                    repository.updateMessageStatus(msgId.toInt(), "delivered")
+                }
+            } catch (e: Exception) {
+                timber.log.Timber.e(e, "Failed to send location message")
+                _isSending.value = false
+            }
+        }
+    }
+
+    fun sendMessage(text: String, isAttachment: Boolean = false) {
+        val cid = _selectedChatId.value ?: return
+        val trimmed = text.trim()
+        
+        if (!isAttachment && !com.example.utils.InputValidator.isValidMessage(text)) {
+            return
+        }
+
+        // SECURITY: Check throttle BEFORE anything else
+        if (!shouldAllowSend()) {
+            timber.log.Timber.w("Message send throttled")
+            return
+        }
+
+        // SECURITY: Atomic check-then-set
+        if (!_isSending.compareAndSet(expect = false, update = true)) {
+            timber.log.Timber.w("Already sending message (concurrent attempt)")
+            return
+        }
+
+        viewModelScope.launch {
+            try {
+                val chat = chats.value.find { it.id == cid } ?: run {
+                    _isSending.value = false
+                    return@launch
+                }
+                
+                val timeStr = getFormattedTime()
+                val recipientId = chat.recipientId.ifEmpty { chat.name }
+                val idempotencyKey = generateIdempotencyKey(cid, recipientId, trimmed)
+                val isSelfChat = chat.isSavedMessages
+                val isAiChat = chat.isAiAssistant
+                val activeAi = _selectedAiModel.value
+                val finalRecipientId = if (isAiChat) {
+                    if (chat.recipientId.isNotBlank()) chat.recipientId
+                    else if (activeAi.persona == com.example.data.AiPersona.HEXAGON) "ai_hexagon"
+                    else "ai_ventaxis"
+                } else recipientId
+
+                val msgId = repository.sendMessage(
+                    chatId = cid,
+                    sender = "me",
+                    text = trimmed.ifBlank { "📎 Sent an attachment" },
+                    isMe = true,
+                    isAttachment = isAttachment,
+                    timeStr = timeStr,
+                    status = if (isSelfChat || isAiChat) "delivered" else "sending",
+                    recipientId = finalRecipientId,
+                    idempotencyKey = idempotencyKey,
+                    personaId = if (isAiChat) activeAi.personaId else null
+                )
+                
+                _isSending.value = false
+                if (msgId != -1L) {
+                    if (isSelfChat) {
+                        repository.updateMessageStatus(msgId.toInt(), "delivered")
+                    } else if (isAiChat) {
+                        repository.updateMessageStatus(msgId.toInt(), "delivered")
+                        handleAiReply(cid, trimmed, msgId.toInt())
+                    }
+                }
+
+            } catch (e: Exception) {
+                timber.log.Timber.e(e, "Failed to send message")
+                _isSending.value = false
+            }
+        }
+    }
+
+    // SECURITY: Throttle send operations
+    private fun shouldAllowSend(): Boolean {
+        val now = System.nanoTime()
+        val last = lastSendTimeNano.get()
+        val elapsed = (now - last) / 1_000_000 // Convert to milliseconds
+        
+        if (elapsed < MIN_SEND_INTERVAL_MS) {
+            return false
+        }
+        
+        // Update only if we haven't been updated since
+        lastSendTimeNano.compareAndSet(last, now)
+        return true
+    }
+
+    // SECURITY: Generate cryptographic idempotency key (32 random bytes, URL-safe Base64 without padding)
+    private fun generateIdempotencyKey(
+        chatId: Int = 0,
+        recipientId: String = "me",
+        content: String = ""
+    ): String {
+        val randomBytes = ByteArray(32)
+        java.security.SecureRandom().nextBytes(randomBytes)
+        return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(randomBytes)
+    }
+
+    fun logout(context: android.content.Context, onComplete: () -> Unit) {
+        viewModelScope.launch {
+            repository.logout(context)
+            _selectedChatId.value = null
+            onAccountChanged()
+            onComplete()
+        }
+    }
+
+    fun deleteAccount(
+        context: android.content.Context,
+        onSuccess: () -> Unit,
+        onError: ((String) -> Unit)? = null
+    ) {
+        viewModelScope.launch {
+            val success = repository.deleteAccount(context)
+            if (success) {
+                _selectedChatId.value = null
+                onAccountChanged()
+                onSuccess()
+            } else {
+                val isRussian = com.example.ui.LocalizationManager.currentLanguage.value == com.example.ui.AppLanguage.RUSSIAN
+                val errorMsg = if (isRussian) "Не удалось удалить аккаунт на сервере. Попробуйте еще раз." else "Failed to delete account on server. Please try again."
+                onError?.invoke(errorMsg)
+            }
+        }
+    }
+
+    fun deleteAccount(context: android.content.Context, onComplete: () -> Unit) {
+        deleteAccount(context, onSuccess = onComplete)
+    }
+    
+    fun retryMessage(msgId: Int, chatId: Int, text: String) {
+        viewModelScope.launch {
+            val chat = chats.value.find { it.id == chatId } ?: return@launch
+            val isSelfChat = chat.isSavedMessages
+            val isAiChat = chat.isAiAssistant
+            if (isSelfChat) {
+                repository.updateMessageStatus(msgId, "delivered")
+            } else if (isAiChat) {
+                repository.updateMessageStatus(msgId, "delivered")
+                handleAiReply(chatId, text, msgId)
+            } else {
+                repository.retryMessage(msgId, chatId, text)
+            }
+        }
+    }
+
+    fun selectAiModel(model: AiModelOption) {
+        _selectedAiModel.value = model
+    }
+
+    fun switchToAiChat(model: AiModelOption) {
+        _selectedAiModel.value = model
+    }
+
+    fun deleteMessage(messageId: Int) {
+        viewModelScope.launch {
+            try {
+                repository.deleteMessage(messageId)
+            } catch (e: Exception) {
+                timber.log.Timber.e(e, "Failed to delete message $messageId")
+            }
+        }
+    }
+
+    fun editMessage(messageId: Int, newText: String) {
+        viewModelScope.launch {
+            try {
+                repository.editMessage(messageId, newText)
+            } catch (e: Exception) {
+                timber.log.Timber.e(e, "Failed to edit message $messageId")
+            }
+        }
+    }
+
+    fun forwardMessage(targetChatId: Int, message: com.example.data.database.MessageEntity) {
+        viewModelScope.launch {
+            val targetChat = chats.value.find { it.id == targetChatId } ?: return@launch
+            val timeStr = getFormattedTime()
+            val idempotencyKey = generateIdempotencyKey()
+            repository.sendMessage(
+                chatId = targetChatId,
+                sender = "me",
+                text = message.text,
+                isMe = true,
+                isAttachment = message.isAttachment,
+                timeStr = timeStr,
+                status = "sending",
+                type = message.type,
+                audioUrl = message.audioUrl,
+                duration = message.duration,
+                recipientId = targetChat.recipientId.ifEmpty { targetChat.name },
+                idempotencyKey = idempotencyKey
+            )
+        }
+    }
+
+    private fun handleAiReply(
+        chatId: Int,
+        userMsg: String,
+        originalMsgId: Int,
+        imageBytes: ByteArray? = null,
+        mimeType: String? = null
+    ) {
+        viewModelScope.launch {
+            delay(150)
+            repository.updateMessageStatus(originalMsgId, "read")
+            _typingChatId.value = chatId
+
+            val modelOption = _selectedAiModel.value
+            val activePersonaId = modelOption.personaId
+
+            try {
+                // Retrieve conversation history strictly for this active persona
+                val pastMessages = repository.getMessagesForChat(chatId).first()
+                    .filter { msg ->
+                        !msg.isAttachment && msg.text.isNotBlank() && msg.id != originalMsgId &&
+                        resolvePersonaId(msg) == activePersonaId
+                    }
+                    .takeLast(10)
+
+                val history = pastMessages.map { msg ->
+                    Pair(if (msg.isMe) "user" else "model", msg.text)
+                }
+
+                // Guard with a 15s timeout for multimodal or cloud response
+                val result = kotlinx.coroutines.withTimeoutOrNull(15000L) {
+                    geminiService.requestAssistant(
+                        prompt = userMsg,
+                        imageBytes = imageBytes,
+                        imageMimeType = mimeType,
+                        history = history,
+                        modelOption = modelOption
+                    )
+                }
+
+                val originalMsg = repository.getMessageById(originalMsgId)
+                val userClientId = originalMsg?.idempotencyKey?.ifBlank { originalMsgId.toString() } ?: originalMsgId.toString()
+                val userOriginalText = originalMsg?.text ?: userMsg
+
+                when (result) {
+                    is AiResult.Success -> {
+                        _aiErrorState.value = null
+                        val replyTime = getFormattedTime()
+                        val replyKey = generateIdempotencyKey()
+                        repository.sendMessage(
+                            chatId = chatId,
+                            sender = modelOption.displayName,
+                            text = result.reply,
+                            isMe = false,
+                            isAttachment = false,
+                            timeStr = replyTime,
+                            status = "delivered",
+                            recipientId = "ai_hexagon",
+                            idempotencyKey = replyKey,
+                            personaId = activePersonaId
+                        )
+                        persistAiTranscript(
+                            userClientId = userClientId,
+                            userText = userOriginalText,
+                            replyClientId = replyKey,
+                            replyText = result.reply,
+                            personaId = activePersonaId,
+                            timeStr = replyTime,
+                            localMessageId = originalMsgId,
+                            chatId = chatId
+                        )
+                    }
+                    is AiResult.RateLimited -> {
+                        _aiErrorState.value = AiUiError.RateLimited(result.retryAfterSeconds)
+                    }
+                    is AiResult.Error -> {
+                        _aiErrorState.value = AiUiError.Custom(result.message)
+                    }
+                    is AiResult.Unauthorized -> {
+                        _aiErrorState.value = AiUiError.Unauthorized
+                    }
+                    is AiResult.ModelUnavailable -> {
+                        _aiErrorState.value = AiUiError.ModelUnavailable
+                    }
+                    is AiResult.DeploymentUnavailable -> {
+                        _aiErrorState.value = AiUiError.DeploymentUnavailable
+                    }
+                    is AiResult.ConfigurationError -> {
+                        _aiErrorState.value = AiUiError.ConfigurationError
+                    }
+                    is AiResult.FunctionNotFound -> {
+                        _aiErrorState.value = AiUiError.FunctionNotFound
+                    }
+                    is AiResult.InvalidRequest -> {
+                        _aiErrorState.value = AiUiError.InvalidRequest
+                    }
+                    is AiResult.NetworkError -> {
+                        _aiErrorState.value = AiUiError.NetworkError
+                    }
+                    is AiResult.UpstreamError -> {
+                        _aiErrorState.value = AiUiError.UpstreamError(result.message)
+                    }
+                    is AiResult.Loading -> {
+                        // In progress
+                    }
+                    null -> {
+                        _aiErrorState.value = AiUiError.Custom("AI Assistant request timed out")
+                    }
+                }
+            } catch (e: Exception) {
+                timber.log.Timber.e(e, "Error during handleAiReply")
+                _aiErrorState.value = AiUiError.Custom(e.message ?: "Failed to process AI response")
+            } finally {
+                _typingChatId.value = null
+            }
+        }
+    }
+
+    private suspend fun persistAiTranscript(
+        userClientId: String,
+        userText: String,
+        replyClientId: String,
+        replyText: String,
+        personaId: String,
+        timeStr: String,
+        localMessageId: Int,
+        chatId: Int
+    ) {
+        val currentUserId = repository.getCurrentUserId()
+        if (currentUserId.isBlank()) return
+        val aiConvId = "ai_$currentUserId"
+
+        val sentOk = repository.sendAiTranscript(
+            conversationId = aiConvId,
+            userClientId = userClientId,
+            userText = userText,
+            replyClientId = replyClientId,
+            replyText = replyText,
+            personaId = personaId,
+            timeStr = timeStr
+        )
+
+        if (!sentOk) {
+            val payloadObj = org.json.JSONObject().apply {
+                put("userClientId", userClientId)
+                put("userText", userText)
+                put("replyClientId", replyClientId)
+                put("replyText", replyText)
+                put("personaId", personaId)
+            }
+            val outboxEntry = com.example.data.database.OutboxEntity(
+                accountId = currentUserId,
+                localMessageId = localMessageId,
+                chatId = chatId,
+                conversationId = aiConvId,
+                idempotencyKey = replyClientId,
+                senderId = currentUserId,
+                recipientId = "ai_$personaId",
+                payload = payloadObj.toString(),
+                signature = "",
+                type = "ai_transcript",
+                timeStr = timeStr,
+                attempts = 0,
+                status = "pending",
+                createdAt = System.currentTimeMillis()
+            )
+            repository.insertOutbox(outboxEntry)
+        }
+    }
+
+    fun createNewChat(name: String, initials: String) {
+        viewModelScope.launch {
+            val trimmed = name.trim()
+            if (trimmed.isBlank()) return@launch
+
+            val isHexagon = trimmed.equals("Hexagon", ignoreCase = true) || trimmed.equals("Hexagon AI", ignoreCase = true)
+            val isVentaxis = trimmed.equals("Ventaxis", ignoreCase = true) || trimmed.equals("Ventaxis AI", ignoreCase = true)
+            val isHexShard = trimmed.equals("HexShard", ignoreCase = true) || trimmed.equals("HexShard AI", ignoreCase = true)
+            val isAi = isHexagon || isVentaxis || isHexShard || trimmed.equals("AI", ignoreCase = true) || trimmed.equals("AI Assistant", ignoreCase = true)
+
+            if (isAi) {
+                if (isVentaxis) {
+                    _selectedAiModel.value = AiModelOption.VENTAXIS
+                } else {
+                    _selectedAiModel.value = AiModelOption.HEXAGON
+                }
+                val aiChat = chats.value.find { it.isAiAssistant } ?: repository.getChatByRecipientId("ai_hexagon")
+                if (aiChat != null) {
+                    _selectedChatId.value = aiChat.id
+                }
+                return@launch
+            }
+
+            val resolved = repository.resolveUser(trimmed)
+            val finalRecipientId = resolved?.first ?: run {
+                val searchList = try { repository.searchUsers(trimmed) } catch (_: Exception) { emptyList() }
+                val match = searchList.firstOrNull { 
+                    it.username.equals(trimmed.removePrefix("@"), ignoreCase = true) ||
+                    it.displayName.equals(trimmed, ignoreCase = true) ||
+                    (it.virtualNumber != null && it.virtualNumber.contains(trimmed.filter { c -> c.isDigit() }))
+                }
+                match?.userId ?: trimmed
+            }
+            val finalName = resolved?.second ?: run {
+                val searchList = try { repository.searchUsers(trimmed) } catch (_: Exception) { emptyList() }
+                val match = searchList.firstOrNull { 
+                    it.username.equals(trimmed.removePrefix("@"), ignoreCase = true) ||
+                    it.displayName.equals(trimmed, ignoreCase = true)
+                }
+                match?.displayName?.ifBlank { match.username } ?: trimmed
+            }
+
+            val res = repository.getOrCreateDirectConversation(finalRecipientId, finalName)
+            res.onSuccess { chat ->
+                _selectedChatId.value = chat.id
+            }.onFailure { err ->
+                timber.log.Timber.e(err, "Failed to create direct conversation for $finalRecipientId")
+            }
+        }
+    }
+
+    fun importContactFromQr(profile: com.example.util.ProfileQrData, onComplete: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            try {
+                if (profile.userId.isNotBlank() && profile.publicKey.isNotBlank()) {
+                    repository.registerVerifiedPeerKey(profile.userId, profile.publicKey)
+                }
+                val finalName = profile.displayName.ifBlank { profile.hexNumber.ifBlank { profile.userId } }
+                val res = repository.getOrCreateDirectConversation(profile.userId, finalName)
+                res.onSuccess { chat ->
+                    _selectedChatId.value = chat.id
+                    onComplete(true)
+                }.onFailure { err ->
+                    timber.log.Timber.e(err, "Failed to import contact from QR")
+                    onComplete(false)
+                }
+            } catch (e: Exception) {
+                timber.log.Timber.e(e, "Failed to import contact from QR")
+                onComplete(false)
+            }
+        }
+    }
+
+    fun resolveAndImportQrToken(token: String, onComplete: (Boolean, String?) -> Unit) {
+        viewModelScope.launch {
+            try {
+                val profile = repository.resolveProfileShareToken(token)
+                if (profile == null) {
+                    onComplete(false, "Token expired or invalid")
+                    return@launch
+                }
+                if (profile.publicKey.isNotBlank()) {
+                    repository.registerVerifiedPeerKey(profile.userId, profile.publicKey)
+                }
+                val finalName = profile.username.ifBlank { profile.hexNumber.ifBlank { profile.userId } }
+                val res = repository.getOrCreateDirectConversation(profile.userId, finalName)
+                res.onSuccess { chat ->
+                    _selectedChatId.value = chat.id
+                    onComplete(true, null)
+                }.onFailure { err ->
+                    onComplete(false, err.localizedMessage)
+                }
+            } catch (e: Exception) {
+                timber.log.Timber.e(e, "Failed to resolve QR token")
+                onComplete(false, e.localizedMessage)
+            }
+        }
+    }
+
+    fun handleIncomingDeepLink(token: String) {
+        viewModelScope.launch {
+            try {
+                val profile = repository.resolveProfileShareToken(token)
+                if (profile != null) {
+                    _pendingProfileConfirmation.value = profile
+                }
+            } catch (e: Exception) {
+                timber.log.Timber.e(e, "Failed to handle incoming deep link token")
+            }
+        }
+    }
+
+    fun confirmAddContact(profile: com.example.util.ProfileQrData, onComplete: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            try {
+                if (profile.publicKey.isNotBlank()) {
+                    repository.registerVerifiedPeerKey(profile.userId, profile.publicKey)
+                }
+                val finalName = profile.username.ifBlank { profile.hexNumber.ifBlank { profile.userId } }
+                val res = repository.getOrCreateDirectConversation(profile.userId, finalName)
+                res.onSuccess { chat ->
+                    _selectedChatId.value = chat.id
+                    _pendingProfileConfirmation.value = null
+                    onComplete(true)
+                }.onFailure { err ->
+                    timber.log.Timber.e(err, "Failed to confirm add contact")
+                    _pendingProfileConfirmation.value = null
+                    onComplete(false)
+                }
+            } catch (e: Exception) {
+                timber.log.Timber.e(e, "Failed to confirm add contact")
+                _pendingProfileConfirmation.value = null
+                onComplete(false)
+            }
+        }
+    }
+
+    fun dismissPendingProfileConfirmation() {
+        _pendingProfileConfirmation.value = null
+    }
+
+    private fun resolvePersonaId(msg: MessageEntity): String {
+        msg.personaId?.let { return it.lowercase() }
+        val sender = msg.sender
+        if (sender.contains("Ventaxis", ignoreCase = true)) return "ventaxis"
+        if (sender.contains("Hexagon", ignoreCase = true) || sender.contains("HexShard", ignoreCase = true)) return "hexagon"
+        val text = msg.text
+        if (text.contains("Ventaxis", ignoreCase = true)) return "ventaxis"
+        if (text.contains("Hexagon", ignoreCase = true) || text.contains("HexShard", ignoreCase = true)) return "hexagon"
+        return "hexagon"
+    }
+
+    private fun getFormattedTime(): String {
+        val sdf = SimpleDateFormat("h:mm a", Locale.getDefault())
+        return sdf.format(Date())
+    }
+}

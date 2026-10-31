@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Outer chat speech bubble outline with soft glowing fill -->
+    <path
+        android:fillColor="#1A1DB954"
+        android:strokeColor="#1DB954"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M20,3 H4 C2.9,3 2,3.9 2,5 V17 C2,18.1 2.9,19 4,19 H6 V22 L10,19 H20 C21.1,19 22,18.1 22,17 V5 C22,3.9 21.1,3 20,3 Z" />
+    <!-- Hexagonal shard faceted silhouette -->
+    <path
+        android:fillColor="#261DB954"
+        android:strokeColor="#1DB954"
+        android:strokeWidth="1.2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M12,6.5 L16,8.8 V13.2 L12,15.5 L8,13.2 V8.8 Z" />
+    <!-- Inner facet division lines -->
+    <path
+        android:strokeColor="#1DB954"
+        android:strokeWidth="0.9"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M12,6.5 V15.5 M8,8.8 L16,13.2 M8,13.2 L16,8.8" />
+    <!-- Center core crystal point -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M12,9.8 L13.2,11 L12,12.2 L10.8,11 Z" />
+</vector>
