@@ -208,6 +208,17 @@ interface ChatDao {
     @Query("UPDATE messages SET chatId = :targetChatId WHERE chatId = :sourceChatId AND accountId = :accountId")
     suspend fun reassignMessagesChatId(sourceChatId: Int, targetChatId: Int, accountId: String)
 
+    /**
+     * Re-binds a chat (and its messages) to the server-issued conversation UUID.
+     * Unlike @Update on a possibly stale entity, this works by the deterministic
+     * local conversation id, so it is safe right after insertChat (id == 0 case).
+     */
+    @Query("UPDATE chats SET conversationId = :newConversationId WHERE conversationId = :oldConversationId AND accountId = :accountId")
+    suspend fun updateChatConversationId(oldConversationId: String, newConversationId: String, accountId: String)
+
+    @Query("UPDATE messages SET conversationId = :newConversationId WHERE conversationId = :oldConversationId AND accountId = :accountId")
+    suspend fun updateMessagesConversationId(oldConversationId: String, newConversationId: String, accountId: String)
+
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertMessages(messages: List<MessageEntity>)
 
@@ -350,7 +361,7 @@ interface ChatDao {
     suspend fun backfillLegacyOutboxAccountId(targetAccountId: String): Int
 }
 
-@Database(entities = [ChatEntity::class, MessageEntity::class, OutboxEntity::class], version = 15, exportSchema = false)
+@Database(entities = [ChatEntity::class, MessageEntity::class, OutboxEntity::class], version = 16, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
 
@@ -476,6 +487,23 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                // Real deduplication: insertMessageIfNotExists relied on IGNORE + a unique
+                // index that never existed. Purge duplicates first so the partial unique
+                // index can be created on legacy data.
+                database.execSQL(
+                    "DELETE FROM messages WHERE idempotencyKey != '' AND rowid NOT IN " +
+                    "(SELECT MIN(rowid) FROM messages WHERE idempotencyKey != '' GROUP BY accountId, idempotencyKey)"
+                )
+                // Partial index: empty idempotencyKey stays unconstrained (legacy rows).
+                database.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_messages_accountId_idempotencyKey_unique " +
+                    "ON messages(accountId, idempotencyKey) WHERE idempotencyKey != ''"
+                )
+            }
+        }
+
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val factory = SQLCipherUtils.createSupportFactory(context)
@@ -495,7 +523,8 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_11_12,
                     MIGRATION_12_13,
                     MIGRATION_13_14,
-                    MIGRATION_14_15
+                    MIGRATION_14_15,
+                    MIGRATION_15_16
                 )
                 .build()
                 INSTANCE = instance

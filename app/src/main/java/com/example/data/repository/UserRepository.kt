@@ -2,6 +2,7 @@ package com.example.data.repository
 
 import android.content.Context
 import com.example.crypto.E2ECryptoManager
+import com.example.data.PeerKeyTrustStore
 import com.example.data.SecurePrefsManager
 import com.example.network.supabase.SupabaseConfig
 import kotlinx.coroutines.Dispatchers
@@ -49,6 +50,80 @@ class UserRepository(
     private val publicKeyCache = ConcurrentHashMap<String, CachedKey>()
     private val signingKeyCache = ConcurrentHashMap<String, CachedKey>()
 
+    /** Result wrapper exposing TOFU pin state alongside the key material. */
+    data class TrustedKey(
+        val key: java.security.PublicKey,
+        /** True when this key differs from the first-ever pinned key for the peer. */
+        val keyChanged: Boolean,
+        /** Original pinned key when a change was detected, null otherwise. */
+        val pinnedKey: java.security.PublicKey?
+    )
+
+    /**
+     * TOFU-guarded ECDH key fetch: pins the first key seen for a peer and surfaces
+     * any later server-side substitution instead of silently trusting it.
+     */
+    suspend fun getTrustedUserPublicKey(userId: String): TrustedKey? = withContext(Dispatchers.IO) {
+        val fetched = getOrFetchUserPublicKey(userId) ?: return@withContext null
+        val ctx = context ?: return@withContext TrustedKey(fetched, false, null)
+        val accountId = getCurrentUserId()
+        if (accountId.isBlank()) return@withContext TrustedKey(fetched, false, null)
+        val pinnedBytes = PeerKeyTrustStore.getPinnedEcdhKey(ctx, accountId, userId)
+        if (pinnedBytes == null) {
+            PeerKeyTrustStore.pinEcdhKey(ctx, accountId, userId, fetched.encoded)
+            TrustedKey(fetched, false, null)
+        } else if (pinnedBytes.contentEquals(fetched.encoded)) {
+            TrustedKey(fetched, false, null)
+        } else {
+            val pinned = parsePublicKeyFromBytes(pinnedBytes)
+            TrustedKey(fetched, keyChanged = true, pinnedKey = pinned)
+        }
+    }
+
+    /** TOFU-guarded signing key fetch, mirroring getTrustedUserPublicKey. */
+    suspend fun getTrustedUserSigningKey(userId: String): TrustedKey? = withContext(Dispatchers.IO) {
+        val fetched = getOrFetchUserSigningKey(userId) ?: return@withContext null
+        val ctx = context ?: return@withContext TrustedKey(fetched, false, null)
+        val accountId = getCurrentUserId()
+        if (accountId.isBlank()) return@withContext TrustedKey(fetched, false, null)
+        val pinnedBytes = PeerKeyTrustStore.getPinnedSigningKey(ctx, accountId, userId)
+        if (pinnedBytes == null) {
+            PeerKeyTrustStore.pinSigningKey(ctx, accountId, userId, fetched.encoded)
+            TrustedKey(fetched, false, null)
+        } else if (pinnedBytes.contentEquals(fetched.encoded)) {
+            TrustedKey(fetched, false, null)
+        } else {
+            val pinned = parsePublicKeyFromBytes(pinnedBytes)
+            TrustedKey(fetched, keyChanged = true, pinnedKey = pinned)
+        }
+    }
+
+    /** Re-pins the current server key for a peer after the user acknowledged a rotation. */
+    fun acceptRotatedKeys(peerId: String) {
+        val ctx = context ?: return
+        val accountId = getCurrentUserId()
+        if (accountId.isBlank()) return
+        try {
+            val ecdh = publicKeyCache[peerId]
+            val sign = signingKeyCache[peerId]
+            if (ecdh != null) PeerKeyTrustStore.pinEcdhKey(ctx, accountId, peerId, ecdh.key.encoded)
+            if (sign != null) PeerKeyTrustStore.pinSigningKey(ctx, accountId, peerId, sign.key.encoded)
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to accept rotated peer keys")
+        }
+    }
+
+    private fun parsePublicKeyFromBytes(bytes: ByteArray): java.security.PublicKey? {
+        return try {
+            val spec = java.security.spec.X509EncodedKeySpec(bytes)
+            java.security.KeyFactory.getInstance("EC").generatePublic(spec)
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to parse pinned public key")
+            null
+        }
+    }
+
+
     fun clearCache() {
         publicKeyCache.clear()
         signingKeyCache.clear()
@@ -64,6 +139,16 @@ class UserRepository(
 
     companion object {
         private const val KEY_CACHE_TTL_MS = 24 * 60 * 60 * 1000L // 24 hours
+        private val UUID_REGEX = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+        private val USERNAME_REGEX = Regex("^[A-Za-z0-9_]{1,32}$")
+
+        /**
+         * PostgREST filter values are URL query syntax — unescaped user input allows
+         * filter injection (`,`, `()`, `*`). Encode with the query-component rule and
+         * reject identifiers that are neither a strict UUID nor a safe username token.
+         */
+        private fun encodeFilterValue(value: String): String =
+            java.net.URLEncoder.encode(value, "UTF-8")
     }
 
     /**
@@ -73,17 +158,19 @@ class UserRepository(
     suspend fun resolveUser(identifier: String): Pair<String, String>? = withContext(Dispatchers.IO) {
         val clean = identifier.trim().removePrefix("@")
         if (clean.isBlank()) return@withContext null
+        val isUuid = UUID_REGEX.matches(clean)
+        if (!isUuid && !USERNAME_REGEX.matches(clean)) return@withContext null
+        val encoded = encodeFilterValue(clean)
 
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(context)
         if (anonKey.isBlank()) return@withContext null
 
         try {
-            val isUuid = clean.matches(Regex("^[0-9a-fA-F-]{36}$"))
             val url = if (isUuid) {
-                "$baseUrl/rest/v1/profiles?or=(id.eq.$clean,username.ilike.$clean)&select=id,username"
+                "$baseUrl/rest/v1/profiles?or=(id.eq.$encoded,username.ilike.$encoded)&select=id,username"
             } else {
-                "$baseUrl/rest/v1/profiles?username=ilike.$clean&select=id,username"
+                "$baseUrl/rest/v1/profiles?username=ilike.$encoded&select=id,username"
             }
 
             val token = context?.let { SecurePrefsManager.getSupabaseAccessToken(it) }?.takeIf { it.isNotBlank() }
@@ -121,6 +208,10 @@ class UserRepository(
     suspend fun searchUsers(query: String): List<UserSearchResult> = withContext(Dispatchers.IO) {
         val clean = query.trim().removePrefix("@")
         if (clean.isBlank()) return@withContext emptyList()
+        // Strip everything PostgREST treats as filter syntax before interpolation
+        val safeQuery = clean.replace(Regex("[,()*&|\\\\]"), "")
+        if (safeQuery.isBlank()) return@withContext emptyList()
+        val encoded = encodeFilterValue(safeQuery)
 
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(context)
@@ -132,7 +223,7 @@ class UserRepository(
         val results = mutableListOf<UserSearchResult>()
 
         try {
-            val url = "$baseUrl/rest/v1/profiles?or=(username.ilike.*$clean*,display_name.ilike.*$clean*)&select=id,username,display_name,avatar_path&limit=15"
+            val url = "$baseUrl/rest/v1/profiles?or=(username.ilike.*$encoded*,display_name.ilike.*$encoded*)&select=id,username,display_name,avatar_path&limit=15"
             val reqBuilder = Request.Builder()
                 .url(url)
                 .header("apikey", anonKey)
@@ -168,7 +259,7 @@ class UserRepository(
         val digitsOnly = clean.filter { it.isDigit() }
         if (digitsOnly.length >= 4) {
             try {
-                val hexUrl = "$baseUrl/rest/v1/hex_numbers?number=ilike.*$digitsOnly*&select=number,account_id&limit=10"
+                val hexUrl = "$baseUrl/rest/v1/hex_numbers?number=ilike.*${encodeFilterValue(digitsOnly)}*&select=number,account_id&limit=10"
                 val hexReq = Request.Builder().url(hexUrl).header("apikey", anonKey)
                 if (token != null) hexReq.header("Authorization", "Bearer $token")
                 val hResp = httpClient.newCall(hexReq.get().build()).execute()
@@ -219,17 +310,19 @@ class UserRepository(
     suspend fun fetchPeerProfile(peerIdOrUsername: String): PeerProfileInfo? = withContext(Dispatchers.IO) {
         val clean = peerIdOrUsername.trim().removePrefix("@")
         if (clean.isBlank()) return@withContext null
+        val isUuid = UUID_REGEX.matches(clean)
+        if (!isUuid && !USERNAME_REGEX.matches(clean)) return@withContext null
+        val encoded = encodeFilterValue(clean)
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(context)
         if (anonKey.isBlank()) return@withContext null
         val token = context?.let { SecurePrefsManager.getSupabaseAccessToken(it) }?.takeIf { it.isNotBlank() }
 
         try {
-            val isUuid = clean.matches(Regex("^[0-9a-fA-F-]{36}$"))
             val url = if (isUuid) {
-                "$baseUrl/rest/v1/profiles?id=eq.$clean&select=*&limit=1"
+                "$baseUrl/rest/v1/profiles?id=eq.$encoded&select=*&limit=1"
             } else {
-                "$baseUrl/rest/v1/profiles?username=ilike.$clean&select=*&limit=1"
+                "$baseUrl/rest/v1/profiles?username=ilike.$encoded&select=*&limit=1"
             }
             val reqBuilder = Request.Builder()
                 .url(url)

@@ -290,6 +290,28 @@ object E2ECryptoManager {
     }
 
     /**
+     * v3 key schedule: separate AES-GCM encryption key with its own domain separator.
+     * Never falls back to the raw shared secret — the KDF round is unconditional.
+     */
+    fun deriveEncryptionKey(masterSecret: ByteArray, messageNonce: String): ByteArray {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(masterSecret, "HmacSHA256"))
+        mac.update("HEXSHARD_ENC_KEY_V3".toByteArray(Charsets.UTF_8))
+        return mac.doFinal(messageNonce.toByteArray(Charsets.UTF_8))
+    }
+
+    /**
+     * v3 key schedule: separate HMAC (integrity) key — one key must never serve both
+     * GCM encryption and HMAC (v2 reused a single key for both).
+     */
+    fun deriveMacKey(masterSecret: ByteArray, messageNonce: String): ByteArray {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(masterSecret, "HmacSHA256"))
+        mac.update("HEXSHARD_MAC_KEY_V3".toByteArray(Charsets.UTF_8))
+        return mac.doFinal(messageNonce.toByteArray(Charsets.UTF_8))
+    }
+
+    /**
      * Signs data using the sender's private ECDSA key in hardware KeyStore.
      * Strictly uses the accountId-scoped signing key.
      */
@@ -320,21 +342,31 @@ object E2ECryptoManager {
      * NEVER reuse the same IV with the same key!
      */
     fun encryptData(data: ByteArray, sharedSecret: ByteArray): Pair<ByteArray, ByteArray> {
+        return encryptData(data, sharedSecret, null)
+    }
+
+    /**
+     * AES-256-GCM with optional Additional Authenticated Data. The AAD is authenticated
+     * by the GCM tag without being part of the ciphertext — use it to bind the payload
+     * to its context (chat id, sender, recipient, message id).
+     */
+    fun encryptData(data: ByteArray, sharedSecret: ByteArray, aad: ByteArray?): Pair<ByteArray, ByteArray> {
         if (sharedSecret.size != 32) {
             throw IllegalArgumentException("Shared secret must be 256 bits (32 bytes), got ${sharedSecret.size}")
         }
 
         val secretKey = SecretKeySpec(sharedSecret, 0, 32, "AES")
         val cipher = Cipher.getInstance(ENCRYPTION_ALGORITHM)
-        
+
         // Generate cryptographically secure random 96-bit IV (12 bytes)
         val iv = ByteArray(12)
         SecureRandom().nextBytes(iv)
-        
+
         val spec = GCMParameterSpec(128, iv)
         cipher.init(Cipher.ENCRYPT_MODE, secretKey, spec)
+        if (aad != null) cipher.updateAAD(aad)
         val cipherText = cipher.doFinal(data)
-        
+
         return Pair(iv, cipherText)
     }
 
@@ -343,6 +375,11 @@ object E2ECryptoManager {
      * Throws exception on authentication failure (GCM tag mismatch = tampering detected).
      */
     fun decryptData(iv: ByteArray, cipherText: ByteArray, sharedSecret: ByteArray): ByteArray {
+        return decryptData(iv, cipherText, sharedSecret, null)
+    }
+
+    /** AES-256-GCM decryption with optional AAD; must mirror the encryption call exactly. */
+    fun decryptData(iv: ByteArray, cipherText: ByteArray, sharedSecret: ByteArray, aad: ByteArray?): ByteArray {
         if (iv.size != 12) {
             throw IllegalArgumentException("IV must be 96 bits (12 bytes), got ${iv.size}")
         }
@@ -354,7 +391,8 @@ object E2ECryptoManager {
         val cipher = Cipher.getInstance(ENCRYPTION_ALGORITHM)
         val spec = GCMParameterSpec(128, iv)
         cipher.init(Cipher.DECRYPT_MODE, secretKey, spec)
-        
+        if (aad != null) cipher.updateAAD(aad)
+
         // Will throw AEADBadTagException if tag verification fails (message tampered)
         return cipher.doFinal(cipherText)
     }
@@ -363,8 +401,19 @@ object E2ECryptoManager {
         return encryptData(plainText.toByteArray(Charsets.UTF_8), sharedSecret)
     }
 
+    /** v3: encrypt with context binding (AAD). */
+    fun encryptMessage(plainText: String, sharedSecret: ByteArray, aad: ByteArray): Pair<ByteArray, ByteArray> {
+        return encryptData(plainText.toByteArray(Charsets.UTF_8), sharedSecret, aad)
+    }
+
     fun decryptMessage(iv: ByteArray, cipherText: ByteArray, sharedSecret: ByteArray): String {
         val plainTextBytes = decryptData(iv, cipherText, sharedSecret)
+        return String(plainTextBytes, Charsets.UTF_8)
+    }
+
+    /** v3: decrypt with context binding (AAD). */
+    fun decryptMessage(iv: ByteArray, cipherText: ByteArray, sharedSecret: ByteArray, aad: ByteArray): String {
+        val plainTextBytes = decryptData(iv, cipherText, sharedSecret, aad)
         return String(plainTextBytes, Charsets.UTF_8)
     }
 
@@ -390,6 +439,8 @@ object E2ECryptoManager {
 
     /**
      * Securely deletes cryptographic keypairs from AndroidKeyStore upon account deletion.
+     * Also wipes the in-memory restored-key caches: getMyPrivateKey prefers them over
+     * the keystore, so without this wipe exported keys would keep working after logout.
      */
     fun deleteKeys(accountId: String? = null) {
         synchronized(this) {
@@ -412,6 +463,23 @@ object E2ECryptoManager {
                 }
             } catch (e: Exception) {
                 timber.log.Timber.w(e, "Error deleting cryptographic keys from AndroidKeyStore")
+            } finally {
+                // Wipe restored/exported key material from memory (account-scoped or all)
+                if (accountId.isNullOrBlank()) {
+                    restoredEcdhPrivateKeys.clear()
+                    restoredEcdhPublicKeys.clear()
+                    restoredSigningPrivateKeys.clear()
+                    restoredSigningPublicKeys.clear()
+                    restoredSelfStorageSecrets.values.forEach { zeroize(it) }
+                    restoredSelfStorageSecrets.clear()
+                } else {
+                    val clean = accountId.trim()
+                    restoredEcdhPrivateKeys.remove(clean)
+                    restoredEcdhPublicKeys.remove(clean)
+                    restoredSigningPrivateKeys.remove(clean)
+                    restoredSigningPublicKeys.remove(clean)
+                    restoredSelfStorageSecrets.remove(clean)?.let { zeroize(it) }
+                }
             }
         }
     }

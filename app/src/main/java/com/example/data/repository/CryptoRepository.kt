@@ -24,6 +24,7 @@ enum class DecryptionTrustStatus {
 data class DecryptedResult(
     val plainText: String,
     val isSignatureValid: Boolean,
+    val senderKeyChanged: Boolean = false,
     val trustStatus: DecryptionTrustStatus = if (isSignatureValid) DecryptionTrustStatus.VERIFIED else DecryptionTrustStatus.INVALID_SIGNATURE
 )
 
@@ -32,6 +33,13 @@ class PeerKeyUnavailableException(val recipientId: String) : Exception("Recipien
 class CryptoRepository(
     val userRepository: UserRepository
 ) {
+
+    companion object {
+        // v3 payload envelope: MAGIC || HMAC(32) || IV(12) || CT, with GCM AAD bound
+        // to the canonical header (chat, sender, recipient, message id). Prevents
+        // cross-chat replay and context substitution that v2 (raw HMAC||IV||CT) allowed.
+        private val V3_MAGIC = byteArrayOf(0x48, 0x58, 0x33) // "HX3"
+    }
 
     fun createCanonicalEnvelope(
         protocolVersion: Int,
@@ -42,12 +50,21 @@ class CryptoRepository(
         idempotencyKey: String,
         payloadBytes: ByteArray
     ): ByteArray {
-        val header = "v$protocolVersion\n$conversationId\n$messageId\n$senderId\n$recipientId\n$idempotencyKey\n".toByteArray(Charsets.UTF_8)
+        val header = canonicalHeader(protocolVersion, conversationId, messageId, senderId, recipientId, idempotencyKey)
         val envelope = ByteArray(header.size + payloadBytes.size)
         System.arraycopy(header, 0, envelope, 0, header.size)
         System.arraycopy(payloadBytes, 0, envelope, header.size, payloadBytes.size)
         return envelope
     }
+
+    private fun canonicalHeader(
+        protocolVersion: Int,
+        conversationId: String,
+        messageId: String,
+        senderId: String,
+        recipientId: String,
+        idempotencyKey: String
+    ): ByteArray = "v$protocolVersion\n$conversationId\n$messageId\n$senderId\n$recipientId\n$idempotencyKey\n".toByteArray(Charsets.UTF_8)
 
     /**
      * Encrypts an outbound message using ECDH shared secret + per-message HMAC KDF + AES-GCM-256,
@@ -74,27 +91,30 @@ class CryptoRepository(
             }
         }
 
-        val messageKey = if (idempotencyKey.isNotBlank()) {
-            E2ECryptoManager.deriveMessageKey(sharedSecret, idempotencyKey)
-        } else {
-            sharedSecret
-        }
+        // v3 key schedule: separate encryption and MAC keys, KDF-bound even for a
+        // blank idempotency nonce (v2 fell back to the RAW ECDH secret as AES key).
+        val encKey = E2ECryptoManager.deriveEncryptionKey(sharedSecret, idempotencyKey)
+        val macKey = E2ECryptoManager.deriveMacKey(sharedSecret, idempotencyKey)
 
-        val (iv, cipherText) = E2ECryptoManager.encryptMessage(plainText, messageKey)
+        // AAD binds the ciphertext to (chat, sender, recipient, message id):
+        // a payload replayed into another conversation fails GCM authentication.
+        val aad = canonicalHeader(3, conversationId, idempotencyKey, currentUserId, recipientId, idempotencyKey)
+        val (iv, cipherText) = E2ECryptoManager.encryptMessage(plainText, encKey, aad)
 
-        // Envelope: 32 bytes HMAC || IV || CipherText
+        // Envelope v3: MAGIC(3) || HMAC(32) || IV(12) || CipherText
         val ivAndCipher = ByteArray(iv.size + cipherText.size)
         System.arraycopy(iv, 0, ivAndCipher, 0, iv.size)
         System.arraycopy(cipherText, 0, ivAndCipher, iv.size, cipherText.size)
-        val hmac = E2ECryptoManager.createHMAC(ivAndCipher, messageKey)
+        val hmac = E2ECryptoManager.createHMAC(ivAndCipher, macKey)
 
-        val combined = ByteArray(32 + ivAndCipher.size)
-        System.arraycopy(hmac, 0, combined, 0, 32)
-        System.arraycopy(ivAndCipher, 0, combined, 32, ivAndCipher.size)
+        val combined = ByteArray(V3_MAGIC.size + 32 + ivAndCipher.size)
+        System.arraycopy(V3_MAGIC, 0, combined, 0, V3_MAGIC.size)
+        System.arraycopy(hmac, 0, combined, V3_MAGIC.size, 32)
+        System.arraycopy(ivAndCipher, 0, combined, V3_MAGIC.size + 32, ivAndCipher.size)
 
         // Sender digital signature over canonical envelope
         val canonicalEnvelope = createCanonicalEnvelope(
-            protocolVersion = 2,
+            protocolVersion = 3,
             conversationId = conversationId,
             messageId = idempotencyKey,
             senderId = currentUserId,
@@ -127,26 +147,6 @@ class CryptoRepository(
         E2ECryptoManager.generateKeyPairIfNeeded(recipientId)
 
         val isSelf = senderId == recipientId || senderId == "self" || senderId == "me"
-        val sharedSecret = if (isSelf) {
-            E2ECryptoManager.deriveSelfStorageSecret(recipientId)
-        } else {
-            val senderPubKey = userRepository.getOrFetchUserPublicKey(senderId)
-            if (senderPubKey != null) {
-                E2ECryptoManager.deriveSharedSecret(senderPubKey, recipientId)
-            } else {
-                return DecryptedResult(
-                    plainText = "[Waiting for sender public key...]",
-                    isSignatureValid = false,
-                    trustStatus = DecryptionTrustStatus.MISSING_KEY
-                )
-            }
-        }
-
-        val messageKey = if (idempotencyKey.isNotBlank()) {
-            E2ECryptoManager.deriveMessageKey(sharedSecret, idempotencyKey)
-        } else {
-            sharedSecret
-        }
 
         val combinedBytes = try {
             Base64.getDecoder().decode(base64Payload)
@@ -158,24 +158,54 @@ class CryptoRepository(
             )
         }
 
-        if (combinedBytes.size < 44) { // 32 bytes HMAC + 12 bytes IV
-            return DecryptedResult(
-                plainText = "[Corrupt payload: truncated envelope]",
-                isSignatureValid = false,
-                trustStatus = DecryptionTrustStatus.CORRUPT_PAYLOAD
-            )
+        val isV3 = startsWithV3Magic(combinedBytes)
+
+        // TOFU-guarded sender keys: prefer the PINNED key when the server presents
+        // a different one, and let the caller warn the user about the rotation.
+        var senderKeyChanged = false
+        var sharedSecret: ByteArray? = null
+        if (isSelf) {
+            sharedSecret = E2ECryptoManager.deriveSelfStorageSecret(recipientId)
+        } else {
+            val trusted = userRepository.getTrustedUserPublicKey(senderId)
+            if (trusted == null) {
+                return DecryptedResult(
+                    plainText = "[Waiting for sender public key...]",
+                    isSignatureValid = false,
+                    trustStatus = DecryptionTrustStatus.MISSING_KEY
+                )
+            }
+            senderKeyChanged = trusted.keyChanged
+            // Verify/decrypt against the PINNED identity, not the newly served one:
+            // the server is untrusted for identity decisions.
+            val keyForCrypto = trusted.pinnedKey ?: trusted.key
+            sharedSecret = try {
+                E2ECryptoManager.deriveSharedSecret(keyForCrypto, recipientId)
+            } catch (e: Exception) {
+                Timber.w(e, "Shared secret derivation failed for sender $senderId")
+                null
+            }
         }
 
-        // Verify digital signature - fail-closed for peer messages
-        var signatureValid = false
-        val isLegacyMessage = base64Signature.isNullOrBlank() && !isSelf
+        val masterSecret = sharedSecret
+            ?: return DecryptedResult(
+                plainText = "[Decryption Error: Key mismatch or corrupted data]",
+                isSignatureValid = false,
+                senderKeyChanged = senderKeyChanged,
+                trustStatus = DecryptionTrustStatus.DECRYPTION_FAILED
+            )
 
-        if (!base64Signature.isNullOrBlank() && !isSelf) {
+        // Signature verification (TOFU-guarded signing key, fail-closed for peers).
+        var signatureValid = false
+        val signaturePresent = !base64Signature.isNullOrBlank()
+        if (signaturePresent && !isSelf) {
             try {
-                val senderSigningKey = userRepository.getOrFetchUserSigningKey(senderId)
+                val trustedSign = userRepository.getTrustedUserSigningKey(senderId)
+                val senderSigningKey = trustedSign?.pinnedKey ?: trustedSign?.key
+                if (trustedSign?.keyChanged == true) senderKeyChanged = true
                 if (senderSigningKey != null) {
                     val canonicalEnvelope = createCanonicalEnvelope(
-                        protocolVersion = 2,
+                        protocolVersion = if (isV3) 3 else 2,
                         conversationId = conversationId,
                         messageId = idempotencyKey,
                         senderId = senderId,
@@ -195,7 +225,115 @@ class CryptoRepository(
             signatureValid = true
         }
 
-        // Extract HMAC, IV, and CipherText
+        if (isV3) {
+            return decryptV3Payload(
+                combinedBytes, masterSecret, conversationId, idempotencyKey,
+                senderId, recipientId, isSelf, signatureValid, senderKeyChanged
+            )
+        }
+        return decryptV2Payload(
+            combinedBytes, masterSecret, idempotencyKey, isSelf,
+            signatureValid, signaturePresent, senderKeyChanged
+        )
+    }
+
+    /** v3 envelope: MAGIC || HMAC(macKey) || IV || CT, GCM AAD = canonical header. */
+    private fun decryptV3Payload(
+        combinedBytes: ByteArray,
+        masterSecret: ByteArray,
+        conversationId: String,
+        idempotencyKey: String,
+        senderId: String,
+        recipientId: String,
+        isSelf: Boolean,
+        signatureValid: Boolean,
+        senderKeyChanged: Boolean
+    ): DecryptedResult {
+        val body = combinedBytes.copyOfRange(V3_MAGIC.size, combinedBytes.size)
+        if (body.size < 44) { // 32 bytes HMAC + 12 bytes IV
+            return DecryptedResult(
+                plainText = "[Corrupt payload: truncated envelope]",
+                isSignatureValid = false,
+                senderKeyChanged = senderKeyChanged,
+                trustStatus = DecryptionTrustStatus.CORRUPT_PAYLOAD
+            )
+        }
+
+        val encKey = E2ECryptoManager.deriveEncryptionKey(masterSecret, idempotencyKey)
+        val macKey = E2ECryptoManager.deriveMacKey(masterSecret, idempotencyKey)
+
+        val receivedHmac = body.copyOfRange(0, 32)
+        val ivAndCipher = body.copyOfRange(32, body.size)
+
+        if (!E2ECryptoManager.verifyHMAC(ivAndCipher, receivedHmac, macKey)) {
+            return DecryptedResult(
+                plainText = "[Message integrity verification failed: tampered ciphertext]",
+                isSignatureValid = false,
+                senderKeyChanged = senderKeyChanged,
+                trustStatus = DecryptionTrustStatus.CORRUPT_PAYLOAD
+            )
+        }
+
+        val iv = ivAndCipher.copyOfRange(0, 12)
+        val cipherText = ivAndCipher.copyOfRange(12, ivAndCipher.size)
+        val aad = canonicalHeader(3, conversationId, idempotencyKey, senderId, recipientId, idempotencyKey)
+
+        return try {
+            val decrypted = E2ECryptoManager.decryptMessage(iv, cipherText, encKey, aad)
+            when {
+                isSelf || signatureValid -> DecryptedResult(
+                    plainText = decrypted,
+                    isSignatureValid = true,
+                    senderKeyChanged = senderKeyChanged,
+                    trustStatus = DecryptionTrustStatus.VERIFIED
+                )
+                else -> {
+                    // v3 contract: signature is mandatory. A stripped signature means
+                    // the relay tampered with the record — content must NOT be shown.
+                    DecryptedResult(
+                        plainText = "[⚠️ Security Alert: Message signature missing or invalid. Content withheld.]",
+                        isSignatureValid = false,
+                        senderKeyChanged = senderKeyChanged,
+                        trustStatus = DecryptionTrustStatus.INVALID_SIGNATURE
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "v3 decryption failure")
+            DecryptedResult(
+                plainText = "[Decryption Error: Key mismatch or corrupted data]",
+                isSignatureValid = false,
+                senderKeyChanged = senderKeyChanged,
+                trustStatus = DecryptionTrustStatus.DECRYPTION_FAILED
+            )
+        }
+    }
+
+    /** v2 legacy envelope: HMAC(messageKey) || IV || CT, no AAD. Kept for old messages. */
+    private fun decryptV2Payload(
+        combinedBytes: ByteArray,
+        masterSecret: ByteArray,
+        idempotencyKey: String,
+        isSelf: Boolean,
+        signatureValid: Boolean,
+        signaturePresent: Boolean,
+        senderKeyChanged: Boolean
+    ): DecryptedResult {
+        val messageKey = if (idempotencyKey.isNotBlank()) {
+            E2ECryptoManager.deriveMessageKey(masterSecret, idempotencyKey)
+        } else {
+            masterSecret
+        }
+
+        if (combinedBytes.size < 44) { // 32 bytes HMAC + 12 bytes IV
+            return DecryptedResult(
+                plainText = "[Corrupt payload: truncated envelope]",
+                isSignatureValid = false,
+                senderKeyChanged = senderKeyChanged,
+                trustStatus = DecryptionTrustStatus.CORRUPT_PAYLOAD
+            )
+        }
+
         val payloadLength = combinedBytes.size - 32
         val ivAndCipher = ByteArray(payloadLength)
         System.arraycopy(combinedBytes, 32, ivAndCipher, 0, payloadLength)
@@ -207,6 +345,7 @@ class CryptoRepository(
             return DecryptedResult(
                 plainText = "[Message integrity verification failed: tampered ciphertext]",
                 isSignatureValid = false,
+                senderKeyChanged = senderKeyChanged,
                 trustStatus = DecryptionTrustStatus.CORRUPT_PAYLOAD
             )
         }
@@ -219,18 +358,18 @@ class CryptoRepository(
         return try {
             val decrypted = E2ECryptoManager.decryptMessage(iv, cipherText, messageKey)
             when {
-                isSelf || signatureValid -> {
-                    DecryptedResult(
-                        plainText = decrypted,
-                        isSignatureValid = true,
-                        trustStatus = DecryptionTrustStatus.VERIFIED
-                    )
-                }
-                isLegacyMessage -> {
-                    // Legacy message without signature: explicitly tagged as unverified
+                isSelf || signatureValid -> DecryptedResult(
+                    plainText = decrypted,
+                    isSignatureValid = true,
+                    senderKeyChanged = senderKeyChanged,
+                    trustStatus = DecryptionTrustStatus.VERIFIED
+                )
+                !signaturePresent -> {
+                    // Legacy v2 message without signature: shown, explicitly unverified
                     DecryptedResult(
                         plainText = decrypted,
                         isSignatureValid = false,
+                        senderKeyChanged = senderKeyChanged,
                         trustStatus = DecryptionTrustStatus.UNVERIFIED_LEGACY
                     )
                 }
@@ -240,17 +379,27 @@ class CryptoRepository(
                     DecryptedResult(
                         plainText = "[⚠️ Security Alert: Message digital signature verification failed. Content unverified.]",
                         isSignatureValid = false,
+                        senderKeyChanged = senderKeyChanged,
                         trustStatus = DecryptionTrustStatus.INVALID_SIGNATURE
                     )
                 }
             }
         } catch (e: Exception) {
-            Timber.e(e, "Decryption failure")
+            Timber.e(e, "v2 decryption failure")
             DecryptedResult(
                 plainText = "[Decryption Error: Key mismatch or corrupted data]",
                 isSignatureValid = false,
+                senderKeyChanged = senderKeyChanged,
                 trustStatus = DecryptionTrustStatus.DECRYPTION_FAILED
             )
         }
+    }
+
+    private fun startsWithV3Magic(bytes: ByteArray): Boolean {
+        if (bytes.size < V3_MAGIC.size) return false
+        for (i in V3_MAGIC.indices) {
+            if (bytes[i] != V3_MAGIC[i]) return false
+        }
+        return true
     }
 }

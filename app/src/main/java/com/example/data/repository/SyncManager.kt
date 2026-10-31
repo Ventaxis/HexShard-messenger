@@ -39,6 +39,10 @@ class SyncManager(
     private val syncScope = CoroutineScope(Dispatchers.IO + syncJob)
     private var syncJobInstance: Job? = null
     private val syncMutex = Mutex()
+    private val flushMutex = Mutex()
+
+    @Volatile
+    private var realtimeStarted = false
 
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -55,6 +59,14 @@ class SyncManager(
     fun startRealtimeSync() {
         val currentUserId = context?.let { SecurePrefsManager.getUserId(it) } ?: ""
         if (currentUserId.isBlank()) return
+
+        // Re-entry guard: ChatRepository calls this from init and public API paths;
+        // a second call without stopRealtimeSync would pile up workers and collectors.
+        if (realtimeStarted) {
+            triggerCatchUpSync()
+            return
+        }
+        realtimeStarted = true
 
         // 1. Recover stale sending outbox entries on startup
         syncScope.launch {
@@ -161,6 +173,7 @@ class SyncManager(
     }
 
     fun stopRealtimeSync() {
+        realtimeStarted = false
         realtimeManager?.disconnect()
         realtimeManager = null
         syncJobInstance?.cancel()
@@ -604,6 +617,14 @@ class SyncManager(
     }
 
     private suspend fun flushOutbox(currentUserId: String) = withContext(Dispatchers.IO) {
+        // Single-flight: maintenance loop, catch-up sync and manual triggers can all
+        // reach this concurrently; two flushers would send the same entries twice.
+        flushMutex.withLock {
+            flushOutboxLocked(currentUserId)
+        }
+    }
+
+    private suspend fun flushOutboxLocked(currentUserId: String) = withContext(Dispatchers.IO) {
         // 1. Resolve any outbox entries waiting for recipient's public key
         resolveWaitingKeyOutboxEntries(currentUserId)
 
@@ -689,8 +710,12 @@ class SyncManager(
                 val newAttempts = entry.attempts + 1
                 val newStatus = if (newAttempts >= 5) "failed" else "pending"
                 chatDao.updateOutboxAttempt(entry.id, newStatus, System.currentTimeMillis(), "Delivery attempt $newAttempts failed", currentUserId)
+                // Roll the message status back out of "sending" so it doesn't hang there
+                // between retries; "failed" marks the terminal state.
                 if (newStatus == "failed") {
                     chatDao.updateMessageStatusByIdempotencyKey(entry.idempotencyKey, "error", currentUserId)
+                } else {
+                    chatDao.updateMessageStatusByIdempotencyKey(entry.idempotencyKey, "pending", currentUserId)
                 }
             }
         }

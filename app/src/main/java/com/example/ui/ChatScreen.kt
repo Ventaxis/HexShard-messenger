@@ -265,6 +265,12 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
                         )
                     } else {
                         val activeChat = chats.find { it.id == currentId }
+                        if (activeChat == null) {
+                            // Selected chat vanished (deleted, or hidden by the active search
+                            // filter, or the chat list has not loaded yet). Bounce back to the
+                            // list instead of rendering an empty screen with no way out.
+                            LaunchedEffect(currentId) { viewModel.deselectChat() }
+                        }
                         if (activeChat != null) {
                             ChatArea(
                                 modifier = Modifier.fillMaxSize(),
@@ -611,7 +617,10 @@ fun SidebarPanel(
                             isDark = isDark
                         )
                     }
-                    items(searchResults.users, key = { "user_${it.userId}" }) { user ->
+                    // userId can legitimately be blank (VM falls back to username):
+                    // combine both fields so two identical results never collide and
+                    // crash LazyColumn with duplicate keys.
+                    items(searchResults.users, key = { "user_${it.userId}_${it.username}" }) { user ->
                         SearchUserResultItem(
                             user = user,
                             isDark = isDark,

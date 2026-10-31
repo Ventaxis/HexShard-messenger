@@ -138,13 +138,21 @@ class MessageRepository(
         val serverId = msg.serverMessageId.ifBlank { msg.idempotencyKey }
 
         val originalText = msg.text
+        // Fail-closed: edits are not durable-outboxed, so without a session token the
+        // local change would silently diverge from the server (and other devices)
+        // forever. Reject the edit instead of letting the histories diverge.
+        val ctx = context
+        val sessionToken = ctx?.let { SecurePrefsManager.getSupabaseAccessToken(ctx) }.orEmpty()
+        if (ctx == null || sessionToken.isBlank() || serverId.isBlank()) {
+            Timber.w("editMessage rejected: offline or unsynced message cannot be edited consistently")
+            return@withContext false
+        }
+        val token = sessionToken
         // Local cache optimistic update
         chatDao.editMessage(messageId, newText, System.currentTimeMillis(), accountId)
 
-        val ctx = context ?: return@withContext true
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(ctx)
-        val token = SecurePrefsManager.getSupabaseAccessToken(ctx)
         if (token.isNotBlank() && serverId.isNotBlank()) {
             try {
                 val chat = chatDao.getChatById(msg.chatId, accountId)
@@ -448,7 +456,13 @@ class MessageRepository(
 
             val token = context?.let { SecurePrefsManager.getSupabaseAccessToken(it) }?.takeIf { it.isNotBlank() }
             val isRemoteAuthed = currentUserId.isNotBlank() && token != null
-            val initialStatus = if (isRemoteAuthed) "sending" else "pending"
+            // AI messages don't travel through sendRemoteMessage — their transcript is
+            // persisted by the dedicated AI flow, so they must never sit in "sending".
+            val initialStatus = when {
+                !isRemoteAuthed -> "pending"
+                isAiChat -> "delivered"
+                else -> "sending"
+            }
 
             val message = MessageEntity(
                 accountId = currentUserId,
@@ -464,16 +478,22 @@ class MessageRepository(
                 duration = duration,
                 status = initialStatus,
                 iv = encryptedPayload.iv,
-                encryptionVersion = 2,
+                encryptionVersion = 3,
                 idempotencyKey = idempotencyKey,
                 conversationId = conversationId,
-                serverMessageId = idempotencyKey,
+                // Server message id stays blank until the server confirms; callers fall
+                // back to idempotencyKey where a client key is acceptable.
+                serverMessageId = "",
                 signatureValid = true,
                 personaId = resolvedPersona
             )
             val messageId: Long
             val outboxRowId: Long
-            if (isMe && idempotencyKey.isNotEmpty()) {
+            // AI prompts are persisted server-side by sendAiTranscript's dedicated flow —
+            // a generic outbox entry would be flushed later WITHOUT personaId and
+            // corrupt the AI conversation. AI chats never enter the generic outbox.
+            val needsGenericOutbox = isMe && idempotencyKey.isNotEmpty() && !isAiChat
+            if (needsGenericOutbox) {
                 val outboxEntry = OutboxEntity(
                     accountId = currentUserId,
                     localMessageId = 0,
@@ -544,6 +564,9 @@ class MessageRepository(
 
             messageId
         } catch (e: Exception) {
+            // Cancellation must propagate: swallowing it here turns coroutine cancellation
+            // into a fake "-1 = error" and makes the caller retry an already-persisted row.
+            if (e is kotlinx.coroutines.CancellationException) throw e
             Timber.e(e, "MessageRepository.sendMessage failed")
             -1L
         } finally {
@@ -554,13 +577,20 @@ class MessageRepository(
     suspend fun retryMessage(msgId: Int, chatId: Int, text: String) = withContext(Dispatchers.IO) {
         val currentUserId = context?.let { SecurePrefsManager.getUserId(it) } ?: return@withContext
         val msg = chatDao.getMessageById(msgId, currentUserId) ?: return@withContext
-        
-        updateMessageStatus(msgId, "sending", currentUserId)
+
         val outboxList = chatDao.getPendingOutboxEntries(currentUserId)
         // Never send a blank payload: WAITING_FOR_PEER_KEY entries carry no ciphertext yet
         val existingOutbox = outboxList.find {
             it.payload.isNotBlank() && (it.idempotencyKey == msg.idempotencyKey || it.localMessageId == msgId)
         }
+        if (existingOutbox == null) {
+            // Nothing sendable (e.g. still waiting for the peer's public key): restore
+            // the previous status instead of leaving the message stuck in "sending".
+            updateMessageStatus(msgId, "pending", currentUserId)
+            return@withContext
+        }
+
+        updateMessageStatus(msgId, "sending", currentUserId)
 
         if (existingOutbox != null) {
             chatDao.retryOutboxEntry(existingOutbox.id, currentUserId)

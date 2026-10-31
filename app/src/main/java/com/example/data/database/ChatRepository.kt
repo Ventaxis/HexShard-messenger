@@ -275,6 +275,7 @@ open class ChatRepository(
             userRepository.clearCache()
             if (currentAccount.isNotBlank()) {
                 E2ECryptoManager.deleteKeys(currentAccount)
+                com.example.data.PeerKeyTrustStore.clearForAccount(context, currentAccount)
                 chatDao.clearAllChatsForAccount(currentAccount)
                 chatDao.clearAllMessagesForAccount(currentAccount)
                 chatDao.clearAllOutboxForAccount(currentAccount)

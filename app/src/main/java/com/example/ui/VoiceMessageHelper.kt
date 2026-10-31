@@ -33,16 +33,32 @@ class VoiceMessageHelper(private val context: Context) {
     }
 
     fun stopRecording(): File? {
-        try {
-            mediaRecorder?.apply {
-                stop()
-                release()
+        var stopSucceeded = false
+        val recorder = mediaRecorder
+        if (recorder != null) {
+            try {
+                recorder.stop()
+                stopSucceeded = true
+            } catch (e: Exception) {
+                // stop() fails when the recording is shorter than one encoder frame:
+                // the output file is incomplete and must never be sent.
+                timber.log.Timber.e(e, "Error stopping MediaRecorder")
+            } finally {
+                // release() must run even when stop() threw, or the recorder leaks
+                try {
+                    recorder.release()
+                } catch (e: Exception) {
+                    timber.log.Timber.w(e, "Error releasing MediaRecorder")
+                }
             }
-        } catch (e: Exception) {
-            timber.log.Timber.e(e, "Error stopping MediaRecorder")
         }
         mediaRecorder = null
-        return audioFile
+        val file = audioFile
+        audioFile = null
+        return if (stopSucceeded && file != null && file.length() > 0) file else {
+            file?.delete()
+            null
+        }
     }
 
     fun cancelRecording() {
@@ -53,6 +69,10 @@ class VoiceMessageHelper(private val context: Context) {
             }
         } catch (e: Exception) {
             // Ignore stop errors if cancelled early
+        } finally {
+            try {
+                mediaRecorder?.release()
+            } catch (_: Exception) {}
         }
         mediaRecorder = null
         audioFile?.delete()

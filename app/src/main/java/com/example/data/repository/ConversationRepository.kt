@@ -939,8 +939,14 @@ class ConversationRepository(
         if (userId.isBlank() || chat.isSavedMessages || chat.isAiAssistant) return@withContext
         val returnedId = createOrGetConversationRemote(chat.conversationType, chat.recipientId, chat.name)
         if (returnedId != null) {
-            if (returnedId != chat.conversationId) {
-                chatDao.updateChat(chat.copy(conversationId = returnedId))
+            // Guard: never run a re-bind against a blank id — it would rewrite every
+            // conversation-less chat row of the account.
+            if (returnedId != chat.conversationId && chat.conversationId.isNotBlank()) {
+                // Bind by the deterministic local conversation id — the freshly inserted
+                // entity still has id == 0, so an @Update on its PK would match nothing
+                // and the server UUID would be lost.
+                chatDao.updateChatConversationId(chat.conversationId, returnedId, userId)
+                chatDao.updateMessagesConversationId(chat.conversationId, returnedId, userId)
             }
         } else {
             Timber.w("Could not immediately persist conversation to cloud; queueing in durable outbox")

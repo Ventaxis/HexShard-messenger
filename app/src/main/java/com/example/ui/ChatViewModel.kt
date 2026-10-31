@@ -276,13 +276,29 @@ class ChatViewModel @Inject constructor(
     suspend fun downloadVoiceMessage(url: String, idempotencyKey: String = ""): ByteArray? {
         val cid = _selectedChatId.value ?: return null
         val chat = repository.getChatById(cid) ?: return null
-        return repository.downloadVoiceMessage(url, chat.recipientId.ifEmpty { chat.name }, idempotencyKey)
+        // Must never throw into a LaunchedEffect — that kills the whole process
+        return try {
+            repository.downloadVoiceMessage(url, chat.recipientId.ifEmpty { chat.name }, idempotencyKey)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            timber.log.Timber.e(e, "Voice download failed")
+            null
+        }
     }
 
     suspend fun downloadMediaMessage(url: String, idempotencyKey: String = ""): ByteArray? {
         val cid = _selectedChatId.value ?: return null
         val chat = repository.getChatById(cid) ?: return null
-        return repository.downloadMediaMessage(url, chat.recipientId.ifEmpty { chat.name }, idempotencyKey)
+        // Must never throw into a LaunchedEffect — that kills the whole process
+        return try {
+            repository.downloadMediaMessage(url, chat.recipientId.ifEmpty { chat.name }, idempotencyKey)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            timber.log.Timber.e(e, "Media download failed")
+            null
+        }
     }
 
     fun sendMediaMessage(context: android.content.Context, uri: android.net.Uri, type: String) {
@@ -431,15 +447,10 @@ class ChatViewModel @Inject constructor(
 
         viewModelScope.launch {
             try {
-                val chat = chats.value.find { it.id == cid } ?: run {
-                    _isSending.value = false
-                    return@launch
-                }
+                // Repository lookup, NOT the search-filtered `chats` flow
+                val chat = repository.getChatById(cid) ?: return@launch
                 val locationData = com.example.util.LocationHelper.getCurrentLocation(context)
-                if (locationData == null) {
-                    _isSending.value = false
-                    return@launch
-                }
+                if (locationData == null) return@launch
                 val timeStr = getFormattedTime()
                 val idempotencyKey = generateIdempotencyKey()
                 val isSelfChat = chat.isSavedMessages
@@ -459,12 +470,12 @@ class ChatViewModel @Inject constructor(
                     recipientId = chat.recipientId.ifEmpty { chat.name },
                     idempotencyKey = idempotencyKey
                 )
-                _isSending.value = false
                 if (msgId != -1L && (isSelfChat || isAiChat)) {
                     repository.updateMessageStatus(msgId.toInt(), "delivered")
                 }
             } catch (e: Exception) {
                 timber.log.Timber.e(e, "Failed to send location message")
+            } finally {
                 _isSending.value = false
             }
         }
@@ -535,6 +546,7 @@ class ChatViewModel @Inject constructor(
 
             } catch (e: Exception) {
                 timber.log.Timber.e(e, "Failed to send message")
+            } finally {
                 _isSending.value = false
             }
         }

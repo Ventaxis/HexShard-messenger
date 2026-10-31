@@ -30,6 +30,8 @@ class FakeChatDao : ChatDao {
     override suspend fun updateChat(chat: ChatEntity) {}
     override suspend fun deleteChatById(id: Int, accountId: String) {}
     override suspend fun reassignMessagesChatId(sourceChatId: Int, targetChatId: Int, accountId: String) {}
+    override suspend fun updateChatConversationId(oldConversationId: String, newConversationId: String, accountId: String) {}
+    override suspend fun updateMessagesConversationId(oldConversationId: String, newConversationId: String, accountId: String) {}
     override suspend fun insertMessages(messages: List<MessageEntity>) {}
     override suspend fun toggleChatPin(chatId: Int, accountId: String) {}
     override suspend fun updateChatPreview(chatId: Int, preview: String, time: String, timestamp: Long, accountId: String) {}

@@ -163,7 +163,10 @@ class AttachmentRepository(
                 .build()
 
             val resp = httpClient.newCall(req).execute()
-            if (resp.isSuccessful) {
+            // Close eagerly: the body is never read, and unclosed responses leak pool connections
+            val uploadOk = resp.isSuccessful
+            resp.close()
+            if (uploadOk) {
                 // Register attachment metadata in attachments table
                 var metaSuccess = false
                 try {
@@ -303,7 +306,10 @@ class AttachmentRepository(
                 .build()
 
             val resp = httpClient.newCall(req).execute()
-            if (resp.isSuccessful) {
+            // Close eagerly: the body is never read, and unclosed responses leak pool connections
+            val uploadOk = resp.isSuccessful
+            resp.close()
+            if (uploadOk) {
                 // Register voice metadata in attachments table
                 try {
                     val attachBody = JSONObject().apply {
@@ -390,8 +396,12 @@ class AttachmentRepository(
 
         try {
             val resp = httpClient.newCall(req).execute()
-            if (!resp.isSuccessful) return@withContext null
-            val respBody = resp.body ?: return@withContext null
+            if (!resp.isSuccessful) {
+                // Drain and close so the connection returns to the pool
+                resp.close()
+                return@withContext null
+            }
+            val respBody = resp.body ?: run { resp.close(); return@withContext null }
 
             // Download encrypted stream to temp file
             val tempEncFile = File.createTempFile("down_enc_", ".bin", accountCacheDir)
