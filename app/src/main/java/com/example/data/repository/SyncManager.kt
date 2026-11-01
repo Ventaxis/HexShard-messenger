@@ -408,6 +408,29 @@ class SyncManager(
             resolvedText = decryptedResult.plainText
             signatureValid = decryptedResult.isSignatureValid
 
+            // TOFU: the served key differs from the pinned one. Verification above used
+            // the pinned key; warn the user once per peer so a server-side substitution
+            // never passes silently.
+            if (decryptedResult.senderKeyChanged && ctx != null) {
+                val alertKey = "tofu_alert_${effectiveCryptoPeer}_$currentUserId"
+                val prefs = SecurePrefsManager.getPrefs(ctx)
+                if (!prefs.getBoolean(alertKey, false)) {
+                    prefs.edit().putBoolean(alertKey, true).apply()
+                    Timber.w("SECURITY: identity key of peer $effectiveCryptoPeer changed vs pinned key!")
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        try {
+                            android.widget.Toast.makeText(
+                                ctx.applicationContext,
+                                "⚠️ Security: $effectiveCryptoPeer's identity key changed. Verify this contact!",
+                                android.widget.Toast.LENGTH_LONG
+                            ).show()
+                        } catch (e: Exception) {
+                            Timber.w(e, "Failed to show key-change alert")
+                        }
+                    }
+                }
+            }
+
             if (!isDecryptionError && decryptedResult.plainText.startsWith("{") && decryptedResult.plainText.endsWith("}")) {
                 try {
                     val json = JSONObject(decryptedResult.plainText)

@@ -29,7 +29,8 @@ import javax.crypto.spec.SecretKeySpec
  */
 object AiBackupManager {
 
-    private const val PBKDF2_ITERATIONS = 100_000
+    private const val PBKDF2_ITERATIONS_CURRENT = 600_000
+    private const val PBKDF2_ITERATIONS_LEGACY = 100_000
     private const val KEY_LENGTH_BITS = 256
     private const val GCM_TAG_LENGTH_BITS = 128
     private const val SALT_BYTES = 16
@@ -99,8 +100,8 @@ object AiBackupManager {
             val salt = ByteArray(SALT_BYTES).also { random.nextBytes(it) }
             val iv = ByteArray(IV_BYTES).also { random.nextBytes(it) }
 
-            // Derive key via PBKDF2
-            val keySpec = PBEKeySpec(passphrase, salt, PBKDF2_ITERATIONS, KEY_LENGTH_BITS)
+            // Derive key via PBKDF2 (current hardened iteration count)
+            val keySpec = PBEKeySpec(passphrase, salt, PBKDF2_ITERATIONS_CURRENT, KEY_LENGTH_BITS)
             val keyFactory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
             val secretKeyBytes = keyFactory.generateSecret(keySpec).encoded
             val secretKey = SecretKeySpec(secretKeyBytes, "AES")
@@ -109,6 +110,7 @@ object AiBackupManager {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
             val ciphertext = cipher.doFinal(plaintextBytes)
+            java.util.Arrays.fill(secretKeyBytes, 0.toByte())
 
             // Package encrypted container
             val container = JSONObject().apply {
@@ -166,19 +168,26 @@ object AiBackupManager {
             val iv = Base64.getDecoder().decode(container.getString("iv"))
             val ciphertext = Base64.getDecoder().decode(container.getString("ciphertext"))
 
-            // Derive key via PBKDF2
-            val keySpec = PBEKeySpec(passphrase, salt, PBKDF2_ITERATIONS, KEY_LENGTH_BITS)
+            // Derive key via PBKDF2. The container does not record the iteration count:
+            // try the current hardened count first, then the legacy one (old backups).
             val keyFactory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-            val secretKeyBytes = keyFactory.generateSecret(keySpec).encoded
-            val secretKey = SecretKeySpec(secretKeyBytes, "AES")
-
-            // Decrypt via AES-256-GCM
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
-            val plaintextBytes = try {
-                cipher.doFinal(ciphertext)
-            } catch (e: Exception) {
-                Timber.w(e, "Decryption failed (invalid passphrase or corrupted tag)")
+            val plaintextBytes: ByteArray = run {
+                for (iterations in intArrayOf(PBKDF2_ITERATIONS_CURRENT, PBKDF2_ITERATIONS_LEGACY)) {
+                    val keySpec = PBEKeySpec(passphrase, salt, iterations, KEY_LENGTH_BITS)
+                    val secretKeyBytes = keyFactory.generateSecret(keySpec).encoded
+                    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                    cipher.init(
+                        Cipher.DECRYPT_MODE,
+                        SecretKeySpec(secretKeyBytes, "AES"),
+                        GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv)
+                    )
+                    try {
+                        return@run cipher.doFinal(ciphertext)
+                    } catch (authEx: javax.crypto.AEADBadTagException) {
+                        java.util.Arrays.fill(secretKeyBytes, 0.toByte())
+                    }
+                }
+                Timber.w("AI backup decryption failed under both iteration counts")
                 return@withContext BackupResult(false, "Invalid password or corrupted backup file")
             }
 

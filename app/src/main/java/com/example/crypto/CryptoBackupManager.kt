@@ -36,7 +36,7 @@ class KeyIntegrityException(message: String) : Exception(message)
  * Manages secure user-passphrase encrypted cloud backup and recovery of E2EE identity key material.
  *
  * Security properties:
- * - KDF: PBKDF2WithHmacSHA256 (100,000 iterations) with cryptographic 16-byte random salt.
+ * - KDF: PBKDF2WithHmacSHA256 (600,000 iterations; legacy 100k envelopes still restorable) with cryptographic 16-byte random salt.
  * - AEAD Cipher: AES-256-GCM (12-byte IV, 128-bit authentication tag).
  * - Zero-Knowledge Cloud: Server stores ONLY ciphertext envelope, salt, and IV; never plaintext keys.
  * - Integrity Verification: Reconstructed public key is verified against cloud envelope metadata.
@@ -44,7 +44,10 @@ class KeyIntegrityException(message: String) : Exception(message)
  */
 object CryptoBackupManager {
 
-    private const val PBKDF2_ITERATIONS = 100_000
+    // OWASP 2023+ recommends >=600k PBKDF2-SHA256 for passphrase-encrypted envelopes.
+    // New backups use CURRENT; restore tries CURRENT first, then LEGACY (old envelopes).
+    private const val PBKDF2_ITERATIONS_CURRENT = 600_000
+    private const val PBKDF2_ITERATIONS_LEGACY = 100_000
     private const val KEY_LENGTH_BITS = 256
     private const val GCM_TAG_LENGTH_BITS = 128
     private const val SALT_BYTES = 16
@@ -152,8 +155,8 @@ object CryptoBackupManager {
             val salt = ByteArray(SALT_BYTES).also { random.nextBytes(it) }
             val iv = ByteArray(IV_BYTES).also { random.nextBytes(it) }
 
-            // 4. Derive PBKDF2 encryption key
-            val keySpec = PBEKeySpec(passphrase, salt, PBKDF2_ITERATIONS, KEY_LENGTH_BITS)
+            // 4. Derive PBKDF2 encryption key (current hardened iteration count)
+            val keySpec = PBEKeySpec(passphrase, salt, PBKDF2_ITERATIONS_CURRENT, KEY_LENGTH_BITS)
             val secretKeyFactory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
             derivedKeyBytes = secretKeyFactory.generateSecret(keySpec).encoded
             val secretKey = SecretKeySpec(derivedKeyBytes, "AES")
@@ -264,21 +267,36 @@ object CryptoBackupManager {
             val salt = Base64.getDecoder().decode(saltB64)
             val iv = Base64.getDecoder().decode(ivB64)
 
-            // 2. Derive key using user's passphrase and stored salt
-            val keySpec = PBEKeySpec(passphrase, salt, PBKDF2_ITERATIONS, KEY_LENGTH_BITS)
+            // 2. Derive key using user's passphrase and stored salt.
+            // The envelope does not record the iteration count, so try the current
+            // hardened count first and fall back to the legacy count for old backups.
             val secretKeyFactory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-            derivedKeyBytes = secretKeyFactory.generateSecret(keySpec).encoded
-            val secretKey = SecretKeySpec(derivedKeyBytes, "AES")
-
-            // 3. Decrypt ciphertext (AES-256-GCM)
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
-            val decryptedBytes = try {
-                cipher.doFinal(ciphertext)
-            } catch (authEx: javax.crypto.AEADBadTagException) {
-                return@withContext Result.failure(InvalidPassphraseException("Invalid recovery passphrase or corrupted backup envelope"))
-            } catch (ex: Exception) {
-                return@withContext Result.failure(InvalidPassphraseException("Decryption error: ${ex.message}"))
+            val decryptedBytes: ByteArray = run {
+                var lastAuthFailure: Exception? = null
+                for (iterations in intArrayOf(PBKDF2_ITERATIONS_CURRENT, PBKDF2_ITERATIONS_LEGACY)) {
+                    val keySpec = PBEKeySpec(passphrase, salt, iterations, KEY_LENGTH_BITS)
+                    val candidate = secretKeyFactory.generateSecret(keySpec).encoded
+                    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                    cipher.init(
+                        Cipher.DECRYPT_MODE,
+                        SecretKeySpec(candidate, "AES"),
+                        GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv)
+                    )
+                    try {
+                        val plain = cipher.doFinal(ciphertext)
+                        derivedKeyBytes = candidate
+                        return@run plain
+                    } catch (authEx: javax.crypto.AEADBadTagException) {
+                        lastAuthFailure = authEx
+                        // Wipe the failed candidate key (the successful one stays live
+                        // for the caller's post-restore zeroization)
+                        java.util.Arrays.fill(candidate, 0.toByte())
+                    }
+                }
+                // Neither iteration count produced a valid GCM tag: wrong passphrase
+                return@withContext Result.failure(
+                    InvalidPassphraseException("Invalid recovery passphrase or corrupted backup envelope")
+                )
             }
 
             // 4. Parse payload and reconstruct keys

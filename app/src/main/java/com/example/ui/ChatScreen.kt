@@ -193,32 +193,37 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
                         if (selectedId != null) {
                             val activeChat = chats.find { it.id == selectedId }
                             if (activeChat != null) {
-                                ChatArea(
-                                    modifier = Modifier.fillMaxSize(),
-                                    chat = activeChat,
-                                    messages = messages,
-                                    isSending = isSending,
-                                    isTyping = typingChatId == selectedId,
-                                    isDark = isDark,
-                                    showBackButton = false,
-                                    onBackClicked = { viewModel.deselectChat() },
-                                    onMessageSent = { viewModel.sendMessage(it) },
-                                    onAttachmentSent = { viewModel.sendMessage("", isAttachment = true) },
-                                    onSendVoiceMessage = { file, dur -> viewModel.sendVoiceMessage(file, dur) },
-                                    onSendMediaMessage = { uri, type -> viewModel.sendMediaMessage(context, uri, type) },
-                                    onDownloadVoice = { url, key -> viewModel.downloadVoiceMessage(url, key) },
-                                    onDownloadMedia = { url, key -> viewModel.downloadMediaMessage(url, key) },
-                                    onRetryMessage = { msgId, chatId, text -> viewModel.retryMessage(msgId, chatId, text) },
-                                    onSendLocation = { viewModel.sendLocationMessage(context) },
-                                    selectedAiModel = selectedAiModel,
-                                    onSwitchAiModel = { model -> viewModel.switchToAiChat(model) },
-                                    aiError = aiErrorState,
-                                    onDismissAiError = { viewModel.dismissAiError() },
-                                    onEditMessage = { msgId, text -> viewModel.editMessage(msgId, text) },
-                                    onDeleteMessage = { msgId -> viewModel.deleteMessage(msgId) },
-                                    onForwardMessage = { targetId, msg -> viewModel.forwardMessage(targetId, msg) },
-                                    allChats = chats
-                                )
+                                // key(chat.id): without it, reply/edit/draft state of the
+                                // input bar survives switching chats in the two-pane layout
+                                // (a quote from chat A would be sent into chat B).
+                                key(activeChat.id) {
+                                    ChatArea(
+                                        modifier = Modifier.fillMaxSize(),
+                                        chat = activeChat,
+                                        messages = messages,
+                                        isSending = isSending,
+                                        isTyping = typingChatId == selectedId,
+                                        isDark = isDark,
+                                        showBackButton = false,
+                                        onBackClicked = { viewModel.deselectChat() },
+                                        onMessageSent = { viewModel.sendMessage(it) },
+                                        onAttachmentSent = { viewModel.sendMessage("", isAttachment = true) },
+                                        onSendVoiceMessage = { file, dur -> viewModel.sendVoiceMessage(file, dur) },
+                                        onSendMediaMessage = { uri, type -> viewModel.sendMediaMessage(context, uri, type) },
+                                        onDownloadVoice = { url, key -> viewModel.downloadVoiceMessage(url, key) },
+                                        onDownloadMedia = { url, key -> viewModel.downloadMediaMessage(url, key) },
+                                        onRetryMessage = { msgId, chatId, text -> viewModel.retryMessage(msgId, chatId, text) },
+                                        onSendLocation = { viewModel.sendLocationMessage(context) },
+                                        selectedAiModel = selectedAiModel,
+                                        onSwitchAiModel = { model -> viewModel.switchToAiChat(model) },
+                                        aiError = aiErrorState,
+                                        onDismissAiError = { viewModel.dismissAiError() },
+                                        onEditMessage = { msgId, text -> viewModel.editMessage(msgId, text) },
+                                        onDeleteMessage = { msgId -> viewModel.deleteMessage(msgId) },
+                                        onForwardMessage = { targetId, msg -> viewModel.forwardMessage(targetId, msg) },
+                                        allChats = chats
+                                    )
+                                }
                             }
                         } else {
                             EmptyStatePlaceholder(isDark = isDark)
@@ -1994,14 +1999,19 @@ fun MessageBubble(
                         leadingIcon = { Icon(Icons.Default.ArrowForward, null) }
                     )
                     if (message.isMe) {
-                        DropdownMenuItem(
-                            text = { Text(strings.edit) },
-                            onClick = {
-                                expanded = false
-                                onEdit(message)
-                            },
-                            leadingIcon = { Icon(Icons.Default.Edit, null) }
-                        )
+                        // Editing only applies to the text part: voice/location/media
+                        // payloads would lose their structured rendering after an edit.
+                        val canEditMessage = message.type == "text"
+                        if (canEditMessage) {
+                            DropdownMenuItem(
+                                text = { Text(strings.edit) },
+                                onClick = {
+                                    expanded = false
+                                    onEdit(message)
+                                },
+                                leadingIcon = { Icon(Icons.Default.Edit, null) }
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text(strings.delete, color = Color.Red) },
                             onClick = {
