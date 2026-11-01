@@ -44,24 +44,6 @@ jobs:
       - name: Grant execute permission to gradlew
         run: chmod +x gradlew
 
-      # A STABLE debug keystore keeps APK signatures consistent across builds —
-      # Android refuses to update an installed app signed with a different key
-      # ("package conflicts with another package"). The keystore is pinned in the
-      # DEBUG_KEYSTORE_B64 secret; regenerate only deliberately.
-      - name: Restore pinned debug keystore
-        env:
-          DEBUG_KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_B64 }}
-        run: |
-          if [ -n "$DEBUG_KEYSTORE_B64" ]; then
-            echo "$DEBUG_KEYSTORE_B64" | base64 -d > debug.keystore
-          else
-            keytool -genkeypair -v \
-              -keystore debug.keystore \
-              -storepass android -keypass android \
-              -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          fi
-
       - name: Run unit tests
         run: ./gradlew :app:testDebugUnitTest --stacktrace --console=plain
 
