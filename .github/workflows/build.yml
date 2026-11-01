@@ -1,0 +1,60 @@
+name: Build HexShard
+
+on:
+  push:
+    branches: [ main-fixed ]
+  pull_request:
+    branches: [ main-fixed ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Test & Assemble Debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      # BuildConfig reads SUPABASE_URL / SUPABASE_ANON_KEY from .env (secrets plugin).
+      # The app has a baked-in default publishable key, so a missing secret is fine;
+      # set SUPABASE_ANON_KEY in repo secrets to override it.
+      - name: Create .env
+        run: |
+          {
+            echo "SUPABASE_URL=${SUPABASE_URL:-https://zqyipemjvzcxjpglmegy.supabase.co}"
+            echo "SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY:-sb_publishable_NNLyZlCPko3fbD4ibBjeQw_7OV0OpcS}"
+          } > .env
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+
+      - name: Grant execute permission to gradlew
+        run: chmod +x gradlew
+
+      - name: Run unit tests
+        run: ./gradlew :app:testDebugUnitTest --stacktrace --console=plain
+
+      - name: Assemble debug APK
+        run: ./gradlew :app:assembleDebug --stacktrace --console=plain
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: hexshard-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
