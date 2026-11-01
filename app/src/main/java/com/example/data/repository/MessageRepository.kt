@@ -662,7 +662,7 @@ class MessageRepository(
                 put("p_type", type)
                 put("p_time_str", timeStr)
                 if (personaId != null) put("p_persona_id", personaId)
-                put("p_encryption_version", 2)
+                put("p_encryption_version", 3)
             }
 
             val rpcReq = Request.Builder()

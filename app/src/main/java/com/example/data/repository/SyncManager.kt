@@ -400,13 +400,24 @@ class SyncManager(
                 conversationId = conversationId,
                 idempotencyKey = idempotencyKey,
                 base64Payload = payloadString,
-                base64Signature = signatureStr
+                base64Signature = signatureStr,
+                // The canonical envelope/AAD was built with the identities as recorded
+                // server-side at send time; for this account's own outbound messages
+                // (sender == me) the crypto peer and the envelope pair are reversed.
+                envelopeSenderId = if (isOutboundFromAnotherDevice) currentUserId else sender,
+                envelopeRecipientId = if (isOutboundFromAnotherDevice) recipient else currentUserId
             )
 
             isDecryptionError = decryptedResult.trustStatus == DecryptionTrustStatus.CORRUPT_PAYLOAD ||
                                 decryptedResult.trustStatus == DecryptionTrustStatus.DECRYPTION_FAILED
             resolvedText = decryptedResult.plainText
             signatureValid = decryptedResult.isSignatureValid
+
+            // MISSING_KEY is transient (peer key not cached, network blip): do NOT persist
+            // a stub row — the next sync pass will re-fetch the key and decrypt properly.
+            if (decryptedResult.trustStatus == DecryptionTrustStatus.MISSING_KEY) {
+                return@withContext
+            }
 
             // TOFU: the served key differs from the pinned one. Verification above used
             // the pinned key; warn the user once per peer so a server-side substitution
@@ -457,9 +468,14 @@ class SyncManager(
 
             if (existing != null) {
                 if (editedAt != null) {
-                    chatDao.updateMessageText(existing.id, resolvedText, System.currentTimeMillis(), currentUserId)
-                    chatDao.updateMessageStatus(existing.id, messageStatus, currentUserId)
-                    conversationRepository.updateChatPreview(existing.chatId, resolvedText, timeStr, System.currentTimeMillis())
+                    // Only overwrite a good local text with a GOOD decryption: a failed
+                    // pass (peer key rotated, cache cold) must never replace readable
+                    // content with a decryption-error stub.
+                    if (!isDecryptionError) {
+                        chatDao.updateMessageText(existing.id, resolvedText, System.currentTimeMillis(), currentUserId)
+                        chatDao.updateMessageStatus(existing.id, messageStatus, currentUserId)
+                        conversationRepository.updateChatPreview(existing.chatId, resolvedText, timeStr, System.currentTimeMillis())
+                    }
                 }
                 return@withContext
             }

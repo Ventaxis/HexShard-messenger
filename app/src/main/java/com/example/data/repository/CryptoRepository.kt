@@ -83,7 +83,10 @@ class CryptoRepository(
         val sharedSecret = if (isSelfOrAi) {
             E2ECryptoManager.deriveSelfStorageSecret(currentUserId)
         } else {
-            val recipientPubKey = userRepository.getOrFetchUserPublicKey(recipientId)
+            // TOFU: encrypt to the PINNED key, not whatever the server serves now —
+            // otherwise a substituted key would silently re-encrypt traffic to an attacker
+            val trusted = userRepository.getTrustedUserPublicKey(recipientId)
+            val recipientPubKey = trusted?.pinnedKey ?: trusted?.key
             if (recipientPubKey != null) {
                 E2ECryptoManager.deriveSharedSecret(recipientPubKey, currentUserId)
             } else {
@@ -135,6 +138,12 @@ class CryptoRepository(
     /**
      * Decrypts an inbound message payload, verifies sender signature, checks HMAC, and decrypts ciphertext.
      * Uses recipientId as the local accountId for keystore isolation.
+     *
+     * [envelopeSenderId]/[envelopeRecipientId] are the identities written into the
+     * canonical envelope/AAD at encryption time. They normally equal [senderId]/
+     * [recipientId], but for messages sent BY this account (outbox resync) the crypto
+     * peer and the envelope identities differ, and the v3 AAD binding fails without
+     * the exact original pair.
      */
     suspend fun decryptInboundMessage(
         senderId: String,
@@ -142,7 +151,9 @@ class CryptoRepository(
         conversationId: String,
         idempotencyKey: String,
         base64Payload: String,
-        base64Signature: String?
+        base64Signature: String?,
+        envelopeSenderId: String = senderId,
+        envelopeRecipientId: String = recipientId
     ): DecryptedResult {
         E2ECryptoManager.generateKeyPairIfNeeded(recipientId)
 
@@ -208,8 +219,8 @@ class CryptoRepository(
                         protocolVersion = if (isV3) 3 else 2,
                         conversationId = conversationId,
                         messageId = idempotencyKey,
-                        senderId = senderId,
-                        recipientId = recipientId,
+                        senderId = envelopeSenderId,
+                        recipientId = envelopeRecipientId,
                         idempotencyKey = idempotencyKey,
                         payloadBytes = combinedBytes
                     )
@@ -228,7 +239,7 @@ class CryptoRepository(
         if (isV3) {
             return decryptV3Payload(
                 combinedBytes, masterSecret, conversationId, idempotencyKey,
-                senderId, recipientId, isSelf, signatureValid, senderKeyChanged
+                envelopeSenderId, envelopeRecipientId, isSelf, signatureValid, senderKeyChanged
             )
         }
         return decryptV2Payload(

@@ -25,11 +25,20 @@ object PeerKeyTrustStore {
     private const val PREF_CHANGED = "tofu_key_changed_"
 
     fun pinEcdhKey(context: Context, accountId: String, peerId: String, encodedKey: ByteArray): Boolean {
-        return pin(context, accountId, peerId, PREF_ECDH, encodedKey)
+        return pin(context, accountId, peerId, PREF_ECDH, encodedKey, force = false)
     }
 
     fun pinSigningKey(context: Context, accountId: String, peerId: String, encodedKey: ByteArray): Boolean {
-        return pin(context, accountId, peerId, PREF_SIGN, encodedKey)
+        return pin(context, accountId, peerId, PREF_SIGN, encodedKey, force = false)
+    }
+
+    /** Explicitly replaces the pinned key after the user accepted a key change. */
+    fun forceRepinEcdhKey(context: Context, accountId: String, peerId: String, encodedKey: ByteArray): Boolean {
+        return pin(context, accountId, peerId, PREF_ECDH, encodedKey, force = true)
+    }
+
+    fun forceRepinSigningKey(context: Context, accountId: String, peerId: String, encodedKey: ByteArray): Boolean {
+        return pin(context, accountId, peerId, PREF_SIGN, encodedKey, force = true)
     }
 
     fun getPinnedEcdhKey(context: Context, accountId: String, peerId: String): ByteArray? {
@@ -65,15 +74,19 @@ object PeerKeyTrustStore {
         return digest.take(8).joinToString(" ") { String.format("%02X", it) }
     }
 
-    private fun pin(context: Context, accountId: String, peerId: String, prefix: String, encodedKey: ByteArray): Boolean {
+    private fun pin(context: Context, accountId: String, peerId: String, prefix: String, encodedKey: ByteArray, force: Boolean): Boolean {
         if (accountId.isBlank() || peerId.isBlank() || encodedKey.isEmpty()) return false
         val prefs = SecurePrefsManager.getPrefs(context)
         val key = prefix + accountId + "_" + peerId
         val newB64 = Base64.getEncoder().encodeToString(encodedKey)
         val existing = prefs.getString(key, null)
-        return if (existing == null) {
+        return if (existing == null || force) {
+            if (existing != null && existing != newB64) {
+                Timber.w("TOFU: pinned key REPLACED for peer $peerId (account $accountId) — user accepted rotation")
+                prefs.edit().putBoolean(PREF_CHANGED + accountId + "_" + peerId, false).apply()
+            }
             prefs.edit().putString(key, newB64).apply()
-            true // first sighting: pinned
+            true
         } else if (existing != newB64) {
             // Key rotation or substitution. Keep the ORIGINAL pinned key for verification;
             // the caller decides when to explicitly re-pin. Record the change event.

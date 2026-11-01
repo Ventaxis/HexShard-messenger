@@ -106,8 +106,8 @@ class UserRepository(
         try {
             val ecdh = publicKeyCache[peerId]
             val sign = signingKeyCache[peerId]
-            if (ecdh != null) PeerKeyTrustStore.pinEcdhKey(ctx, accountId, peerId, ecdh.key.encoded)
-            if (sign != null) PeerKeyTrustStore.pinSigningKey(ctx, accountId, peerId, sign.key.encoded)
+            if (ecdh != null) PeerKeyTrustStore.forceRepinEcdhKey(ctx, accountId, peerId, ecdh.key.encoded)
+            if (sign != null) PeerKeyTrustStore.forceRepinSigningKey(ctx, accountId, peerId, sign.key.encoded)
         } catch (e: Exception) {
             Timber.w(e, "Failed to accept rotated peer keys")
         }
