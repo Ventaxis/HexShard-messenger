@@ -396,14 +396,16 @@ fun SidebarPanel(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.weight(1f)
             ) {
-                HexagonLogo(size = 44.dp)
+                HexagonLogo(size = 32.dp)
                 Text(
                     text = "HexShard",
                     color = txtMain,
-                    fontSize = 22.sp,
+                    fontSize = 20.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.SansSerif,
-                    letterSpacing = 0.5.sp
+                    letterSpacing = 0.5.sp,
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
 
@@ -420,6 +422,7 @@ fun SidebarPanel(
                         border = androidx.compose.foundation.BorderStroke(1.dp, HexShardTeal.copy(alpha = 0.5f)),
                         modifier = Modifier
                             .height(32.dp)
+                            .widthIn(max = 72.dp)
                             .testTag("claim_hexshard_id_header_btn")
                     ) {
                         Row(
@@ -434,10 +437,11 @@ fun SidebarPanel(
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = "+999 • HexShard ID",
+                                text = "+999 ID",
                                 fontSize = 11.sp,
                                 maxLines = 1,
                                 softWrap = false,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                                 fontWeight = FontWeight.SemiBold,
                                 color = HexShardTealLight
                             )

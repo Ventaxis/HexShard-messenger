@@ -417,8 +417,12 @@ class AttachmentRepository(
                     }
                 }
 
-                // Deterministic shared secret derivation scoped to current account
-                val isSelf = senderId == "self" || senderId == "me" || senderId == currentUserId || senderId.isBlank()
+                // Deterministic shared secret derivation scoped to current account.
+                // Must mirror uploadAttachment exactly: AI chats encrypt with the
+                // self-storage secret (there is no AI peer key), so their downloads
+                // must resolve to isSelf as well, or decryption always fails.
+                val isSelf = senderId == "self" || senderId == "me" || senderId == currentUserId || senderId.isBlank() ||
+                        senderId == "ai_assistant" || senderId.startsWith("ai_")
                 val sharedSecret = if (isSelf) {
                     E2ECryptoManager.deriveSelfStorageSecret(currentUserId)
                 } else {
