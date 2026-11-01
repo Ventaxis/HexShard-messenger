@@ -6,7 +6,7 @@
 set -u
 TOKEN="$1"; REF="$2"
 API="https://api.supabase.com/v1/projects/$REF/database/query"
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 for f in supabase/migrations/*.sql; do
   name=$(basename "$f")
