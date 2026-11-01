@@ -15,8 +15,12 @@ import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.ui.input.pointer.PointerEventTimeoutCancellationException
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -1896,12 +1900,25 @@ fun MessageBubble(
                             .shadow(1.dp, shape = bubbleShape)
                             .background(bubbleColor, shape = bubbleShape)
                             .pointerInput(Unit) {
-                                detectTapGestures(
-                                    onLongPress = {
+                                // Custom long-press that ignores child gesture consumption:
+                                // clickable/link children inside the bubble (MarkdownText)
+                                // otherwise swallow the press and the context menu never
+                                // opens on text messages.
+                                awaitEachGesture {
+                                    awaitFirstDown(requireUnconsumed = false)
+                                    var longPressFired = false
+                                    try {
+                                        withTimeout(viewConfiguration.longPressTimeoutMillis) {
+                                            waitForUpOrCancellation()
+                                        }
+                                    } catch (_: PointerEventTimeoutCancellationException) {
+                                        longPressFired = true
+                                    }
+                                    if (longPressFired) {
                                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                         expanded = true
                                     }
-                                )
+                                }
                             }
                             .padding(horizontal = 14.dp, vertical = 10.dp)
                     ) {
