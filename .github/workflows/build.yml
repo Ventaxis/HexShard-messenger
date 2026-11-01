@@ -44,15 +44,21 @@ jobs:
       - name: Grant execute permission to gradlew
         run: chmod +x gradlew
 
-      # debug.keystore is gitignored locally; the debug signing config expects it at
-      # the repo root with the standard Android debug credentials (android/android).
-      - name: Generate debug keystore
+      # A STABLE debug keystore keeps APK signatures consistent across builds —
+      # Android refuses to update an installed app signed with a different key
+      # ("package conflicts with another package"). The keystore is pinned in the
+      # DEBUG_KEYSTORE_B64 secret; regenerate only deliberately.
+      - name: Restore pinned debug keystore
         run: |
-          keytool -genkeypair -v \
-            -keystore debug.keystore \
-            -storepass android -keypass android \
-            -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US"
+          if [ -n "${{ secrets.DEBUG_KEYSTORE_B64 }}" ]; then
+            echo "${{ secrets.DEBUG_KEYSTORE_B64 }}" | base64 -d > debug.keystore
+          else
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android -keypass android \
+              -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
 
       - name: Run unit tests
         run: ./gradlew :app:testDebugUnitTest --stacktrace --console=plain
