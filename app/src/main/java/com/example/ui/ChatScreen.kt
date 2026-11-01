@@ -396,7 +396,7 @@ fun SidebarPanel(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.weight(1f)
             ) {
-                HexagonLogo(size = 26.dp)
+                HexagonLogo(size = 44.dp)
                 Text(
                     text = "HexShard",
                     color = txtMain,
