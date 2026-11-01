@@ -49,9 +49,11 @@ jobs:
       # ("package conflicts with another package"). The keystore is pinned in the
       # DEBUG_KEYSTORE_B64 secret; regenerate only deliberately.
       - name: Restore pinned debug keystore
+        env:
+          DEBUG_KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_B64 }}
         run: |
-          if [ -n "${{ secrets.DEBUG_KEYSTORE_B64 }}" ]; then
-            echo "${{ secrets.DEBUG_KEYSTORE_B64 }}" | base64 -d > debug.keystore
+          if [ -n "$DEBUG_KEYSTORE_B64" ]; then
+            echo "$DEBUG_KEYSTORE_B64" | base64 -d > debug.keystore
           else
             keytool -genkeypair -v \
               -keystore debug.keystore \
