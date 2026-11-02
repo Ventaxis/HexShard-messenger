@@ -50,6 +50,38 @@ class UserRepository(
     private val publicKeyCache = ConcurrentHashMap<String, CachedKey>()
     private val signingKeyCache = ConcurrentHashMap<String, CachedKey>()
 
+    /**
+     * Queries the device key directory via the get_active_device_keys SECURITY DEFINER
+     * RPC (the active_device_keys view was replaced by this function to satisfy
+     * Supabase linter). Returns the JSON array of device key rows, or null on failure.
+     */
+    private suspend fun fetchActiveDeviceKeysJson(accountId: String, deviceId: String?): JSONArray? = withContext(Dispatchers.IO) {
+        val baseUrl = SupabaseConfig.getBaseUrl()
+        val anonKey = SupabaseConfig.getAnonKey(context)
+        val token = context?.let { SecurePrefsManager.getSupabaseAccessToken(it) } ?: ""
+        if (anonKey.isBlank()) return@withContext null
+        try {
+            val payload = JSONObject().apply {
+                put("p_account_id", accountId)
+                if (!deviceId.isNullOrBlank()) put("p_device_id", deviceId)
+            }
+            val req = Request.Builder()
+                .url("$baseUrl/rest/v1/rpc/get_active_device_keys")
+                .header("apikey", anonKey)
+                .header("Authorization", "Bearer $token")
+                .header("Content-Type", "application/json")
+                .post(payload.toString().toRequestBody(JSON_MEDIA))
+                .build()
+            val resp = httpClient.newCall(req).execute()
+            val body = resp.body?.string() ?: ""
+            resp.close()
+            if (resp.isSuccessful && body.isNotEmpty() && body != "null") JSONArray(body) else null
+        } catch (e: Exception) {
+            Timber.w(e, "get_active_device_keys RPC failed for $accountId")
+            null
+        }
+    }
+
     /** Result wrapper exposing TOFU pin state alongside the key material. */
     data class TrustedKey(
         val key: java.security.PublicKey,
@@ -412,28 +444,15 @@ class UserRepository(
         if (anonKey.isBlank()) return@withContext cached?.key
 
         try {
-            // 1. Authoritative: Query active_device_keys view (ordered by key_version.desc)
-            val devUrl = "$baseUrl/rest/v1/active_device_keys?account_id=eq.$cleanId&select=public_key,key_version&order=key_version.desc&limit=1"
-            val devReqBuilder = Request.Builder()
-                .url(devUrl)
-                .header("apikey", anonKey)
-            if (token.isNotBlank()) {
-                devReqBuilder.header("Authorization", "Bearer $token")
-            }
-            val devReq = devReqBuilder.get().build()
-
-            val devResp = httpClient.newCall(devReq).execute()
-            val devBody = devResp.body?.string() ?: ""
-            if (devResp.isSuccessful && devBody.isNotEmpty()) {
-                val arr = JSONArray(devBody)
-                if (arr.length() > 0) {
-                    val keyPem = arr.getJSONObject(0).optString("public_key")
-                    if (keyPem.isNotBlank()) {
-                        val key = parsePublicKey(keyPem)
-                        if (key != null) {
-                            publicKeyCache[cleanId] = CachedKey(key, now)
-                            return@withContext key
-                        }
+            // 1. Authoritative: device key directory RPC (ordered by key_version.desc)
+            val devArr = fetchActiveDeviceKeysJson(cleanId, null)
+            if (devArr != null && devArr.length() > 0) {
+                val keyPem = devArr.getJSONObject(0).optString("public_key")
+                if (keyPem.isNotBlank()) {
+                    val key = parsePublicKey(keyPem)
+                    if (key != null) {
+                        publicKeyCache[cleanId] = CachedKey(key, now)
+                        return@withContext key
                     }
                 }
             }
@@ -494,56 +513,30 @@ class UserRepository(
         if (anonKey.isBlank()) return@withContext cached?.key
 
         try {
-            // 1. If deviceId is provided, query specific device signing key
+            // 1. If deviceId is provided, query that specific device signing key
             if (!deviceId.isNullOrBlank()) {
-                val devSpecificUrl = "$baseUrl/rest/v1/active_device_keys?account_id=eq.$cleanId&device_id=eq.$deviceId&select=signing_key"
-                val devReqBuilder = Request.Builder()
-                    .url(devSpecificUrl)
-                    .header("apikey", anonKey)
-                if (token.isNotBlank()) {
-                    devReqBuilder.header("Authorization", "Bearer $token")
-                }
-                val devReq = devReqBuilder.get().build()
-
-                val devResp = httpClient.newCall(devReq).execute()
-                val devBody = devResp.body?.string() ?: ""
-                if (devResp.isSuccessful && devBody.isNotEmpty()) {
-                    val arr = JSONArray(devBody)
-                    if (arr.length() > 0) {
-                        val keyPem = arr.getJSONObject(0).optString("signing_key")
-                        if (keyPem.isNotBlank()) {
-                            val key = parsePublicKey(keyPem)
-                            if (key != null) {
-                                signingKeyCache[cacheKey] = CachedKey(key, now)
-                                return@withContext key
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 2. Query active_device_keys view for latest active device signing key
-            val devUrl = "$baseUrl/rest/v1/active_device_keys?account_id=eq.$cleanId&select=signing_key,key_version&order=key_version.desc&limit=1"
-            val devReqBuilder = Request.Builder()
-                .url(devUrl)
-                .header("apikey", anonKey)
-            if (token.isNotBlank()) {
-                devReqBuilder.header("Authorization", "Bearer $token")
-            }
-            val devReq = devReqBuilder.get().build()
-
-            val devResp = httpClient.newCall(devReq).execute()
-            val devBody = devResp.body?.string() ?: ""
-            if (devResp.isSuccessful && devBody.isNotEmpty()) {
-                val arr = JSONArray(devBody)
-                if (arr.length() > 0) {
-                    val keyPem = arr.getJSONObject(0).optString("signing_key")
+                val devArr = fetchActiveDeviceKeysJson(cleanId, deviceId)
+                if (devArr != null && devArr.length() > 0) {
+                    val keyPem = devArr.getJSONObject(0).optString("signing_key")
                     if (keyPem.isNotBlank()) {
                         val key = parsePublicKey(keyPem)
                         if (key != null) {
                             signingKeyCache[cacheKey] = CachedKey(key, now)
                             return@withContext key
                         }
+                    }
+                }
+            }
+
+            // 2. Latest active device signing key via key directory RPC
+            val devArr = fetchActiveDeviceKeysJson(cleanId, null)
+            if (devArr != null && devArr.length() > 0) {
+                val keyPem = devArr.getJSONObject(0).optString("signing_key")
+                if (keyPem.isNotBlank()) {
+                    val key = parsePublicKey(keyPem)
+                    if (key != null) {
+                        signingKeyCache[cacheKey] = CachedKey(key, now)
+                        return@withContext key
                     }
                 }
             }

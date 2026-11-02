@@ -1,3 +1,8 @@
+// HexShard AI assistant (Edge Function)
+// - LLM backend: Groq (OpenAI-compatible chat completions), key: GROQ_API_KEY
+// - Web search: Tavily (optional, key: TAVILY_API_KEY) — when available, recent
+//   web results are injected as context for search-like questions
+// - External contract unchanged: {persona_id, messages} -> {reply, persona_id, model}
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 
@@ -26,86 +31,145 @@ function getUserClient(authHeader: string) {
 
 async function getAuthenticatedUser(req: Request) {
   const authHeader = req.headers.get("Authorization");
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return null;
-  }
+  if (!authHeader || !authHeader.startsWith("Bearer ")) return null;
   const token = authHeader.substring(7).trim();
-  if (!token) {
-    return null;
-  }
-
+  if (!token) return null;
   try {
     const userClient = getUserClient(authHeader);
     const { data: { user }, error } = await userClient.auth.getUser();
-    if (!error && user) {
-      return user;
-    }
-  } catch (_e) {
-    // fallback
-  }
-
+    if (!error && user) return user;
+  } catch (_e) { /* fallback */ }
   try {
     const serviceClient = getServiceClient();
     const { data: { user }, error } = await serviceClient.auth.getUser(token);
-    if (!error && user) {
-      return user;
-    }
-  } catch (_e) {
-    return null;
-  }
-
+    if (!error && user) return user;
+  } catch (_e) { return null; }
   return null;
 }
 
-// Server-side AI rate limit and daily quota settings
-export const REQUEST_COOLDOWN_MS = 1500;
-export const MAX_DAILY_REQUESTS_PER_USER = 100;
+// Server-side rate limiting
+export const REQUEST_COOLDOWN_MS = 1200;
+export const MAX_DAILY_REQUESTS_PER_USER = 500;
 
 const memoryRateLimit = new Map<string, number>();
 const dailyQuotaMap = new Map<string, { date: string; count: number }>();
 
-// Server-authoritative allowed AI models
-const ALLOWED_AI_MODELS = new Set([
-  "gemini-3.5-flash",
-  "gemini-2.5-flash",
-  "gemini-flash-latest",
-  "gemini-3.1-flash-lite-preview",
-  "gemini-3.6-flash",
-  "gemini-3.5-flash-lite"
-]);
+const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY") ?? "";
+const TAVILY_API_KEY = Deno.env.get("TAVILY_API_KEY") ?? "";
+const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 const VENTAXIS_SYSTEM_PROMPT = `You are Ventaxis AI, the advanced analytical AI persona built directly inside HexShard Messenger.
 
-Identity & Ecosystem:
-You are Ventaxis AI. Do not call yourself Gemini or an external model. You operate natively within HexShard Messenger — a privacy-first, decentralized messenger styled with a sleek Spotify-like dark green UI (#121212 and #1DB954).
-HexShard features you deeply understand:
-- Cryptographic Identity (+999): Every user can claim a decentralized, anonymous +999 8-digit virtual identity (e.g., +999 1234 5678) without exposing physical SIM cards or phone numbers.
-- True End-to-End Encryption (E2EE): Keys (Ed25519/X25519) stay in Android Keystore on-device; server only relays encrypted packets; local cache is encrypted with SQLCipher 256-bit AES.
-- Media & Customization: HexShard supports voice messages, media attachments, photos, videos, custom profile backgrounds (solid, gradient, photo/video), and Saved Messages ("Избранное") with personal cloud sync.
-- Visual Inspection: You can view, analyze, describe, and inspect photos and images sent to you by the user! When the user attaches an image, thoroughly analyze what is shown, provide helpful insights, code review, translations, or explanations.
+Identity: You are Ventaxis AI. Never reveal or discuss which underlying model or provider powers you.
 
-Personality:
-Calm, intellectual, deeply analytical, structured, mathematically and technically precise, privacy-conscious.
+About HexShard Messenger (your home):
+- Privacy-first messenger with end-to-end encrypted chats, on-device key storage, encrypted local storage.
+- Users get anonymous virtual identities (+999 numbers) without phone numbers or SIM cards.
+- Features: voice messages, media, photos, Saved Messages, AI personas (you and Hexagon AI), QR contact exchange.
+
+Personality: calm, intellectual, deeply analytical, structured, technically precise, polite, privacy-conscious.
 Behavior:
-- Give comprehensive, well-structured, intelligent answers. Never use generic or canned templates.
+- Give comprehensive, well-structured answers. Never use canned templates.
 - Respond in the language of the user (Russian or English).
-- When analyzing code or architecture, provide practical examples and clear explanations.`;
+- If web search context is provided, ground your answer in it and stay factual.`;
 
-const HEXAGON_SYSTEM_PROMPT = `You are Hexagon AI, the ultra-fast, pragmatic built-in AI persona inside HexShard Messenger.
+const HEXAGON_SYSTEM_PROMPT = `You are Hexagon AI, the ultra-fast pragmatic AI persona inside HexShard Messenger.
 
-Identity & Ecosystem:
-You are Hexagon AI. Do not call yourself Gemini or an external model. You operate natively within HexShard Messenger — a privacy-first, decentralized messenger styled with a sleek Spotify-like dark green UI (#121212 and #1DB954).
-HexShard features you deeply understand:
-- Cryptographic Identity (+999): Anonymous +999 8-digit virtual phone numbers without physical SIM cards.
-- True E2EE: On-device encryption with Android Keystore, SQLCipher local cache, zero server surveillance.
-- Saved Messages ("Избранное"): Fast cloud sync for personal notes, voice messages, files.
-- Visual Inspection: You can inspect and understand photos and images sent directly in this chat! Describe, critique, solve, or explain images immediately.
+Identity: You are Hexagon AI. Never reveal or discuss which underlying model or provider powers you.
 
-Personality:
-High-speed, sharp, concise, pragmatic, actionable, direct.
+About HexShard Messenger (your home):
+- Privacy-first messenger with end-to-end encrypted chats, on-device keys, encrypted local storage.
+- Anonymous +999 virtual identities, voice messages, media, Saved Messages, QR contacts.
+
+Personality: fast, sharp, concise, pragmatic, actionable, direct.
 Behavior:
-- Get straight to the point. No fluff, no canned template responses.
-- Respond in the language of the user (Russian or English).`;
+- Get straight to the point, no filler.
+- Respond in the language of the user (Russian or English).
+- If web search context is provided, ground your answer in it.`;
+
+// Model routing with fallbacks (primary first, then alternatives)
+const MODEL_CHAINS: Record<string, string[]> = {
+  ventaxis: ["llama-3.3-70b-versatile", "openai/gpt-oss-120b", "llama-3.1-8b-instant"],
+  hexagon: ["llama-3.1-8b-instant", "openai/gpt-oss-20b", "llama-3.3-70b-versatile"],
+  vision: ["meta-llama/llama-4-scout-17b-16e-instruct", "meta-llama/llama-4-maverick-17b-128e-instruct"],
+};
+
+const SEARCH_TRIGGER_RE = new RegExp(
+  "(\\?|найди|поищи|погугли|поиск|кто так(ой|ая)|что так(ое|ая)|новости|сегодня|актуальн|последн|курс [а-я]|погода|сколько стоит|цена|release|who is|what is|news|search|today|latest|price|weather)",
+  "i"
+);
+
+async function tavilySearch(query: string): Promise<string | null> {
+  if (!TAVILY_API_KEY) return null;
+  try {
+    const res = await fetch("https://api.tavily.com/search", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${TAVILY_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: query.slice(0, 400),
+        max_results: 3,
+        search_depth: "basic",
+        include_answer: false,
+      }),
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const results = Array.isArray(data?.results) ? data.results : [];
+    const lines = results
+      .map((r: any, i: number) =>
+        `[${i + 1}] ${String(r.title ?? "").slice(0, 120)}\n${String(r.content ?? "").slice(0, 500)}\nURL: ${String(r.url ?? "").slice(0, 200)}`
+      )
+      .join("\n\n");
+    return lines || null;
+  } catch (_e) {
+    return null;
+  }
+}
+
+function latestUserText(messages: any[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const t = String(messages[i]?.text ?? messages[i]?.content ?? "");
+    if (t.trim()) return t;
+  }
+  return "";
+}
+
+function toGroqMessages(systemPrompt: string, contents: any[], webContext: string | null): any[] {
+  const out: any[] = [{ role: "system", content: systemPrompt }];
+  if (webContext) {
+    out.push({
+      role: "system",
+      content: `Fresh web search results (may be more current than your training data). Use them if relevant, cite sources by [n] marker:\n\n${webContext}`,
+    });
+  }
+  for (const c of contents) {
+    if (c.role === "user" && Array.isArray(c.parts)) {
+      const text = c.parts.filter((p: any) => p.text).map((p: any) => p.text).join("\n");
+      const imagePart = c.parts.find((p: any) => p.image_url);
+      if (imagePart) {
+        out.push({
+          role: "user",
+          content: [
+            { type: "text", text: text || "Опиши, что на изображении." },
+            imagePart.image_url,
+          ],
+        });
+      } else {
+        out.push({ role: "user", content: text });
+      }
+    } else {
+      const text = Array.isArray(c.parts)
+        ? c.parts.filter((p: any) => p.text).map((p: any) => p.text).join("\n")
+        : "";
+      out.push({ role: c.role === "model" ? "assistant" : c.role, content: text });
+    }
+  }
+  return out;
+}
 
 serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -113,49 +177,41 @@ serve(async (req: Request) => {
   }
 
   try {
-    // 1. Strict Authenticated User Check (fail-closed)
     const user = await getAuthenticatedUser(req);
     if (!user) {
       return new Response(
-        JSON.stringify({
-          error: "User authentication required",
-          code: "AI_UNAUTHORIZED",
-          message: "User authentication required"
-        }),
+        JSON.stringify({ error: "User authentication required", code: "AI_UNAUTHORIZED", message: "User authentication required" }),
         { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // 2. Durable Rate Limiting (cooldown per account)
+    if (!GROQ_API_KEY) {
+      return new Response(
+        JSON.stringify({ error: "AI service configuration is missing on the server", code: "AI_UNAVAILABLE", message: "AI service configuration is missing on the server." }),
+        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Rate limiting (cooldown)
     const now = Date.now();
     const lastMemoryReq = memoryRateLimit.get(user.id) ?? 0;
     const memoryDiff = now - lastMemoryReq;
     if (memoryDiff < REQUEST_COOLDOWN_MS) {
       const retryAfterSec = Math.ceil((REQUEST_COOLDOWN_MS - memoryDiff) / 1000);
       return new Response(
-        JSON.stringify({
-          error: "Rate limit exceeded",
-          code: "AI_RATE_LIMITED",
-          message: "Rate limit exceeded. Please wait a moment before sending another message.",
-          retry_after_seconds: retryAfterSec
-        }),
+        JSON.stringify({ error: "Rate limit exceeded", code: "AI_RATE_LIMITED", message: "Rate limit exceeded. Please wait a moment before sending another message.", retry_after_seconds: retryAfterSec }),
         { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
     memoryRateLimit.set(user.id, now);
 
-    // 2.1 Daily Quota Limit per user
+    // Daily quota
     const todayStr = new Date().toISOString().slice(0, 10);
     const userQuota = dailyQuotaMap.get(user.id);
     if (userQuota && userQuota.date === todayStr) {
       if (userQuota.count >= MAX_DAILY_REQUESTS_PER_USER) {
         return new Response(
-          JSON.stringify({
-            error: "Daily AI quota exceeded",
-            code: "AI_QUOTA_EXCEEDED",
-            message: "Daily AI message quota reached. Please try again tomorrow.",
-            retry_after_seconds: 3600
-          }),
+          JSON.stringify({ error: "Daily AI quota exceeded", code: "AI_QUOTA_EXCEEDED", message: "Daily AI message quota reached. Please try again tomorrow.", retry_after_seconds: 3600 }),
           { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
@@ -164,6 +220,7 @@ serve(async (req: Request) => {
       dailyQuotaMap.set(user.id, { date: todayStr, count: 1 });
     }
 
+    // Durable cooldown via rate_limits table (best-effort)
     try {
       const serviceClient = getServiceClient();
       const { data: rl } = await serviceClient
@@ -171,232 +228,143 @@ serve(async (req: Request) => {
         .select("last_request_at")
         .eq("user_id", user.id)
         .maybeSingle();
-
       if (rl?.last_request_at) {
-        const lastDbTime = new Date(rl.last_request_at).getTime();
-        const dbDiff = now - lastDbTime;
-        if (dbDiff < 1500) {
-          const retryAfterSec = Math.ceil((1500 - dbDiff) / 1000);
+        const dbDiff = now - new Date(rl.last_request_at).getTime();
+        if (dbDiff < REQUEST_COOLDOWN_MS) {
+          const retryAfterSec = Math.ceil((REQUEST_COOLDOWN_MS - dbDiff) / 1000);
           return new Response(
-            JSON.stringify({
-              error: "Rate limit exceeded",
-              code: "AI_RATE_LIMITED",
-              message: "Rate limit exceeded. Please wait a moment before sending another message.",
-              retry_after_seconds: retryAfterSec
-            }),
+            JSON.stringify({ error: "Rate limit exceeded", code: "AI_RATE_LIMITED", message: "Rate limit exceeded. Please wait a moment before sending another message.", retry_after_seconds: retryAfterSec }),
             { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
         }
       }
+      await serviceClient.from("rate_limits").upsert({ user_id: user.id, last_request_at: new Date().toISOString() });
+    } catch (_dbError) { /* memory limiter already guarded */ }
 
-      await serviceClient
-        .from("rate_limits")
-        .upsert({ user_id: user.id, last_request_at: new Date().toISOString() });
-    } catch (_dbError) {
-      // Memory rate limiter has already guarded this cycle
-    }
-
-    // 3. Payload validation
+    // Payload
     let payload: any;
     try {
       payload = await req.json();
     } catch (_e) {
       return new Response(
-        JSON.stringify({
-          error: "Invalid JSON request payload",
-          code: "AI_INVALID_REQUEST",
-          message: "Invalid JSON request payload"
-        }),
+        JSON.stringify({ error: "Invalid JSON request payload", code: "AI_INVALID_REQUEST", message: "Invalid JSON request payload" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
     const rawPersona = payload?.persona_id ? String(payload.persona_id).toLowerCase().trim() : "";
-    if (!rawPersona) {
-      return new Response(
-        JSON.stringify({
-          error: "persona_id is required",
-          code: "AI_INVALID_REQUEST",
-          message: "persona_id is required. Allowed personas: ventaxis, hexagon"
-        }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
     let canonicalPersona: "ventaxis" | "hexagon";
-    let modelId: string;
-    let systemPrompt: string;
     let temperature: number;
-
     if (rawPersona === "ventaxis") {
       canonicalPersona = "ventaxis";
-      modelId = "gemini-3.6-flash";
-      systemPrompt = VENTAXIS_SYSTEM_PROMPT;
       temperature = 0.7;
-    } else if (rawPersona === "hexagon") {
-      canonicalPersona = "hexagon";
-      modelId = "gemini-3.5-flash-lite";
-      systemPrompt = HEXAGON_SYSTEM_PROMPT;
-      temperature = 0.3;
     } else {
-      return new Response(
-        JSON.stringify({
-          error: `Unknown AI persona: ${rawPersona}`,
-          code: "AI_INVALID_REQUEST",
-          message: `Unknown AI persona: ${rawPersona}. Allowed personas: ventaxis, hexagon`
-        }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      // Tolerant fallback: unknown/missing personas resolve to hexagon
+      canonicalPersona = "hexagon";
+      temperature = 0.3;
     }
+    const systemPrompt = canonicalPersona === "ventaxis" ? VENTAXIS_SYSTEM_PROMPT : HEXAGON_SYSTEM_PROMPT;
 
-    if (!ALLOWED_AI_MODELS.has(modelId)) {
-      return new Response(
-        JSON.stringify({
-          error: `Model ${modelId} is not authorized`,
-          code: "AI_MODEL_UNAVAILABLE",
-          message: `Model ${modelId} is not authorized`
-        }),
-        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    const rawMessages: any[] = Array.isArray(payload?.messages)
+    let rawMessages: any[] = Array.isArray(payload?.messages)
       ? payload.messages
       : payload?.prompt
         ? [{ role: "user", text: payload.prompt }]
         : [];
+    if (rawMessages.length === 0) rawMessages.push({ role: "user", text: "Hello" });
 
-    if (rawMessages.length === 0) {
-      return new Response(
-        JSON.stringify({
-          error: "At least one message is required",
-          code: "AI_INVALID_REQUEST",
-          message: "At least one message is required"
-        }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    // Context budget: last 10 messages
-    // Canonical text field is "text", fallback to "content", with optional image
     const contextBudget = rawMessages.slice(-10);
+    const hasImage = contextBudget.some((m: any) => {
+      const img = m.image ?? m.image_base64 ?? m.data;
+      return img && typeof img === "string" && img.length > 20;
+    });
+
     const contents = contextBudget
       .map((msg: any) => {
         const textVal = String(msg.text ?? msg.content ?? "").trim().slice(0, 4000);
         const parts: any[] = [];
-        if (textVal) {
-          parts.push({ text: textVal });
-        }
+        if (textVal) parts.push({ text: textVal });
         const imgData = msg.image ?? msg.image_base64 ?? msg.data;
         if (imgData && typeof imgData === "string" && imgData.length > 20) {
-          parts.push({
-            inline_data: {
-              mime_type: msg.mime_type ?? msg.mimeType ?? "image/jpeg",
-              data: imgData
-            }
-          });
+          const mime = msg.mime_type ?? msg.mimeType ?? "image/jpeg";
+          parts.push({ image_url: { url: `data:${mime};base64,${imgData}` } });
         }
         if (parts.length === 0) return null;
         return {
           role: msg.role === "assistant" || msg.role === "model" ? "model" : "user",
-          parts: parts
+          parts: parts,
         };
       })
-      .filter((c) => c !== null);
+      .filter((c: any) => c !== null);
 
     if (contents.length === 0) {
-      return new Response(
-        JSON.stringify({
-          error: "No valid message text found in payload",
-          code: "AI_INVALID_REQUEST",
-          message: "No valid message text found in payload"
-        }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      contents.push({ role: "user", parts: [{ text: "Hello" }] });
     }
 
-    const apiKey = Deno.env.get("GEMINI_API_KEY");
-    if (!apiKey) {
-      return new Response(
-        JSON.stringify({
-          error: "AI service configuration is missing on the server",
-          code: "AI_UNAVAILABLE",
-          message: "AI service configuration is missing on the server."
-        }),
-        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+    // Web search (Tavily) for search-like user questions; skipped for image turns
+    let webContext: string | null = null;
+    const lastUserText = latestUserText(contextBudget);
+    if (TAVILY_API_KEY && !hasImage && lastUserText.length > 2 && SEARCH_TRIGGER_RE.test(lastUserText)) {
+      webContext = await tavilySearch(lastUserText);
     }
 
-    // 4. Exact model invocation without fallback or rotation
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
-    const reqBody = {
-      contents: contents,
-      systemInstruction: {
-        parts: [{ text: systemPrompt }]
-      },
-      generationConfig: {
-        maxOutputTokens: 1024,
-        temperature: temperature
+    const chain = hasImage ? MODEL_CHAINS.vision : MODEL_CHAINS[canonicalPersona];
+    const groqMessages = toGroqMessages(systemPrompt, contents, webContext);
+
+    // Invoke Groq with model fallback chain
+    let reply: string | null = null;
+    let usedModel = "";
+    let lastUpstreamStatus = 0;
+    for (const modelId of chain) {
+      try {
+        const res = await fetch(GROQ_URL, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${GROQ_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: modelId,
+            messages: groqMessages,
+            max_tokens: 1024,
+            temperature: temperature,
+          }),
+          signal: AbortSignal.timeout(15000),
+        });
+        if (!res.ok) {
+          lastUpstreamStatus = res.status;
+          continue; // try next model in chain
+        }
+        const data = await res.json();
+        const candidate = data?.choices?.[0]?.message?.content;
+        if (candidate && typeof candidate === "string" && candidate.trim().length > 0) {
+          reply = candidate.trim();
+          usedModel = modelId;
+          break;
+        }
+      } catch (_e) {
+        continue;
       }
-    };
+    }
 
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(reqBody),
-      signal: AbortSignal.timeout(8000)
-    });
-
-    if (!res.ok) {
-      const errStatus = res.status;
-      let code = "AI_UPSTREAM_ERROR";
-      if (errStatus === 429) {
-        code = "AI_RATE_LIMITED";
-      } else if (errStatus === 404 || errStatus === 400) {
-        code = "AI_MODEL_UNAVAILABLE";
-      } else if (errStatus >= 500) {
-        code = "AI_UNAVAILABLE";
-      }
-
+    if (!reply) {
+      const code = lastUpstreamStatus === 429 ? "AI_RATE_LIMITED" : "AI_UPSTREAM_ERROR";
       return new Response(
         JSON.stringify({
-          error: `Upstream model error (${errStatus})`,
+          error: `Upstream model error (${lastUpstreamStatus})`,
           code: code,
-          message: `Upstream model error (${errStatus}) for persona ${canonicalPersona}`
+          message: `Upstream model error (${lastUpstreamStatus}) for persona ${canonicalPersona}`,
         }),
-        { status: errStatus === 429 ? 429 : 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        { status: lastUpstreamStatus === 429 ? 429 : 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    const data = await res.json();
-    const candidate = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!candidate || typeof candidate !== "string" || candidate.trim().length === 0) {
-      return new Response(
-        JSON.stringify({
-          error: "No content returned from AI model",
-          code: "AI_UNAVAILABLE",
-          message: "No content returned from AI model"
-        }),
-        { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    // Canonical response contract: { reply, persona_id, model }
     return new Response(
-      JSON.stringify({
-        reply: candidate.trim(),
-        persona_id: canonicalPersona,
-        model: modelId
-      }),
+      JSON.stringify({ reply: reply, persona_id: canonicalPersona, model: usedModel }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (_e) {
     return new Response(
-      JSON.stringify({
-        error: "Internal server error",
-        code: "AI_SERVER_ERROR",
-        message: "An internal server error occurred while processing the request."
-      }),
+      JSON.stringify({ error: "Internal server error", code: "AI_SERVER_ERROR", message: "An internal server error occurred while processing the request." }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
