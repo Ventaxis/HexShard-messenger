@@ -239,11 +239,38 @@ object ProfileBackgroundManager {
         }
 
         // Read bytes safely
-        val bytes = try {
+        var bytes = try {
             context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                 ?: return@withContext Result.failure(IllegalStateException("Failed to read file data"))
         } catch (e: Exception) {
             return@withContext Result.failure(e)
+        }
+
+        // The bucket rejects anything over 512KB and validation caps at 2 MiB: raw phone
+        // photos fail both. Downscale raster images to max 1280px JPEG(85) so real photos
+        // fit; non-image types (video/WebM) pass through untouched.
+        if (bytes.size > 400_000 && validation.mimeType.startsWith("image/") &&
+            !validation.mimeType.contains("gif")
+        ) {
+            try {
+                val bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                if (bitmap != null) {
+                    val maxDim = 1280
+                    val scale = (maxDim.toFloat() / maxOf(bitmap.width, bitmap.height)).coerceAtMost(1f)
+                    val scaled = if (scale < 1f) {
+                        android.graphics.Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).toInt(), (bitmap.height * scale).toInt(), true)
+                    } else bitmap
+                    val bos = java.io.ByteArrayOutputStream()
+                    scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, bos)
+                    val compressed = bos.toByteArray()
+                    if (compressed.size < bytes.size) {
+                        Timber.i("Profile background compressed: ${bytes.size} -> ${compressed.size} bytes")
+                        bytes = compressed
+                    }
+                }
+            } catch (_: Exception) {
+                // keep original bytes if decoding fails
+            }
         }
 
         if (bytes.size > MAX_FILE_SIZE_BYTES) {

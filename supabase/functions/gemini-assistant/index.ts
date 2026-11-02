@@ -87,11 +87,29 @@ Behavior:
 - Respond in the language of the user (Russian or English).
 - If web search context is provided, ground your answer in it.`;
 
-// Model routing with fallbacks (primary first, then alternatives)
-const MODEL_CHAINS: Record<string, string[]> = {
-  ventaxis: ["llama-3.3-70b-versatile", "openai/gpt-oss-120b", "llama-3.1-8b-instant"],
-  hexagon: ["llama-3.1-8b-instant", "openai/gpt-oss-20b", "llama-3.3-70b-versatile"],
-  vision: ["meta-llama/llama-4-scout-17b-16e-instruct", "meta-llama/llama-4-maverick-17b-128e-instruct"],
+// Model routing: per-persona parameters with fallback chain (primary first)
+interface ModelSpec {
+  model: string;
+  temperature: number;
+  max_completion_tokens: number;
+  top_p: number;
+  reasoning_effort?: string;
+}
+const MODEL_CHAINS: Record<string, ModelSpec[]> = {
+  ventaxis: [
+    { model: "openai/gpt-oss-120b", temperature: 2.0, max_completion_tokens: 8192, top_p: 1, reasoning_effort: "medium" },
+    { model: "qwen/qwen3.8-27b", temperature: 0.9, max_completion_tokens: 4096, top_p: 0.95, reasoning_effort: "low" },
+  ],
+  hexagon: [
+    { model: "qwen/qwen3.8-27b", temperature: 0.6, max_completion_tokens: 2048, top_p: 0.95, reasoning_effort: "low" },
+    { model: "openai/gpt-oss-120b", temperature: 1.0, max_completion_tokens: 4096, top_p: 1, reasoning_effort: "low" },
+  ],
+  vision: [
+    { model: "meta-llama/llama-4-scout-17b-16e-instruct", temperature: 0.5, max_completion_tokens: 2048, top_p: 0.95 },
+    { model: "meta-llama/llama-4-maverick-17b-128e-instruct", temperature: 0.5, max_completion_tokens: 2048, top_p: 0.95 },
+    // vision models unavailable -> graceful text-only answer from the primary model
+    { model: "qwen/qwen3.8-27b", temperature: 0.6, max_completion_tokens: 2048, top_p: 0.95, reasoning_effort: "low" },
+  ],
 };
 
 const SEARCH_TRIGGER_RE = new RegExp(
@@ -254,14 +272,11 @@ serve(async (req: Request) => {
 
     const rawPersona = payload?.persona_id ? String(payload.persona_id).toLowerCase().trim() : "";
     let canonicalPersona: "ventaxis" | "hexagon";
-    let temperature: number;
     if (rawPersona === "ventaxis") {
       canonicalPersona = "ventaxis";
-      temperature = 0.7;
     } else {
       // Tolerant fallback: unknown/missing personas resolve to hexagon
       canonicalPersona = "hexagon";
-      temperature = 0.3;
     }
     const systemPrompt = canonicalPersona === "ventaxis" ? VENTAXIS_SYSTEM_PROMPT : HEXAGON_SYSTEM_PROMPT;
 
@@ -309,36 +324,46 @@ serve(async (req: Request) => {
 
     const chain = hasImage ? MODEL_CHAINS.vision : MODEL_CHAINS[canonicalPersona];
     const groqMessages = toGroqMessages(systemPrompt, contents, webContext);
+    const visionFallbackNotice = hasImage
+      ? "\n\n(Analysis of the attached image is temporarily unavailable; answering the text part.)"
+      : "";
 
     // Invoke Groq with model fallback chain
     let reply: string | null = null;
     let usedModel = "";
     let lastUpstreamStatus = 0;
-    for (const modelId of chain) {
+    for (const spec of chain) {
       try {
+        const reqBody: any = {
+          model: spec.model,
+          messages: groqMessages,
+          max_completion_tokens: spec.max_completion_tokens,
+          temperature: spec.temperature,
+          top_p: spec.top_p,
+          stop: null,
+        };
+        if (spec.reasoning_effort) reqBody.reasoning_effort = spec.reasoning_effort;
+        if (hasImage && spec.model.startsWith("meta-llama/")) {
+          reqBody.messages = groqMessages;
+        }
         const res = await fetch(GROQ_URL, {
           method: "POST",
           headers: {
             "Authorization": `Bearer ${GROQ_API_KEY}`,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({
-            model: modelId,
-            messages: groqMessages,
-            max_tokens: 1024,
-            temperature: temperature,
-          }),
-          signal: AbortSignal.timeout(15000),
+          body: JSON.stringify(reqBody),
+          signal: AbortSignal.timeout(20000),
         });
         if (!res.ok) {
           lastUpstreamStatus = res.status;
           continue; // try next model in chain
         }
         const data = await res.json();
-        const candidate = data?.choices?.[0]?.message?.content;
+        let candidate = data?.choices?.[0]?.message?.content;
         if (candidate && typeof candidate === "string" && candidate.trim().length > 0) {
-          reply = candidate.trim();
-          usedModel = modelId;
+          reply = candidate.trim() + (hasImage && spec.model.startsWith("qwen/") ? visionFallbackNotice : "");
+          usedModel = spec.model;
           break;
         }
       } catch (_e) {

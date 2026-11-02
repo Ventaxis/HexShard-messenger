@@ -7,6 +7,7 @@ import com.example.util.DateOfBirthFormatter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -527,17 +528,35 @@ class ProfileRepository(private val context: Context?) {
         val anonKey = SupabaseConfig.getAnonKey(ctx)
 
         try {
-            val extension = when {
-                mimeType.contains("png", ignoreCase = true) -> "png"
-                mimeType.contains("webp", ignoreCase = true) -> "webp"
-                mimeType.contains("gif", ignoreCase = true) -> "gif"
-                else -> "jpg"
+            // Avatars bucket limit is 5MB — raw phone photos routinely exceed it and the
+            // upload silently degraded to a base64 data-URL avatar. Downscale first.
+            val compressed = try {
+                val bitmap = android.graphics.BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+                if (bitmap != null) {
+                    val maxDim = 512
+                    val scale = (maxDim.toFloat() / maxOf(bitmap.width, bitmap.height)).coerceAtMost(1f)
+                    val scaled = if (scale < 1f) {
+                        android.graphics.Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).toInt(), (bitmap.height * scale).toInt(), true)
+                    } else bitmap
+                    val bos = java.io.ByteArrayOutputStream()
+                    scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, bos)
+                    bos.toByteArray()
+                } else imageBytes
+            } catch (_: Exception) {
+                imageBytes
             }
+            if (compressed.size < imageBytes.size) {
+                Timber.i("Avatar compressed for upload: ${imageBytes.size} -> ${compressed.size} bytes")
+            }
+            val uploadBytes = compressed
+            val mimeType = "image/jpeg"
+
+            val extension = "jpg"
             val objectPath = "$userId/avatar_${System.currentTimeMillis()}.$extension"
             val uploadUrl = "$baseUrl/storage/v1/object/avatars/$objectPath"
 
-            val mediaType = mimeType.toMediaType()
-            val requestBody = imageBytes.toRequestBody(mediaType)
+            val mediaType = mimeType.toMediaTypeOrNull()
+            val requestBody = uploadBytes.toRequestBody(mediaType)
 
             val uploadRequest = Request.Builder()
                 .url(uploadUrl)
