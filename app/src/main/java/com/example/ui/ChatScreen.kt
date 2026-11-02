@@ -36,6 +36,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
@@ -46,6 +47,7 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import com.example.ui.theme.HexShardTeal
+import com.example.ui.theme.HexAiPurple
 import com.example.ui.theme.HexShardTealLight
 import com.example.ui.theme.HexShardTealContainer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -545,7 +547,7 @@ fun SidebarPanel(
                     }
                 },
                 singleLine = true,
-                shape = RoundedCornerShape(24.dp),
+                shape = RoundedCornerShape(12.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedContainerColor = if (isDark) Color(0xFF1E1E1E) else Color(0xFFF9F9F9),
                     unfocusedContainerColor = if (isDark) Color(0xFF151515) else Color(0xFFF0F0F0),
@@ -778,8 +780,8 @@ fun ChatListItem(
     }
 
     val itemAvatarBrush = when {
-        isAiChat -> Brush.linearGradient(listOf(SpotifyGreen, Color(0xFF00897B)))
-        else -> Brush.linearGradient(listOf(SpotifyGreen, Color(0xFF0D5E29)))
+        isAiChat -> SolidColor(HexShardTeal)
+        else -> SolidColor(HexShardTeal)
     }
     
     Box {
@@ -954,7 +956,7 @@ fun SearchSectionHeader(
             )
             Spacer(modifier = Modifier.width(6.dp))
             Text(
-                text = title.uppercase(),
+                text = title,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
                 color = SpotifyGreen,
@@ -990,7 +992,7 @@ fun SearchUserResultItem(
             modifier = Modifier
                 .size(42.dp)
                 .clip(CircleShape)
-                .background(Brush.linearGradient(listOf(SpotifyGreen, Color(0xFF00897B)))),
+                .background(SolidColor(HexShardTeal)),
             contentAlignment = Alignment.Center
         ) {
             Text(
@@ -1163,9 +1165,9 @@ fun ChatArea(
     }
 
     val topAvatarBrush = when {
-        isHexagonActive -> Brush.linearGradient(listOf(Color(0xFF7C4DFF), Color(0xFF512DA8)))
-        isVentaxisActive -> Brush.linearGradient(listOf(SpotifyGreen, Color(0xFF00897B)))
-        else -> Brush.linearGradient(listOf(SpotifyGreen, Color(0xFF0D5E29)))
+        isHexagonActive -> SolidColor(HexAiPurple)
+        isVentaxisActive -> SolidColor(HexShardTeal)
+        else -> SolidColor(HexShardTeal)
     }
 
     val listState = rememberLazyListState()
@@ -1378,19 +1380,7 @@ fun ChatArea(
                                 fontSize = 13.sp,
                                 fontWeight = if (isHexagonActive) FontWeight.Bold else FontWeight.Medium
                             )
-                            Spacer(Modifier.width(5.dp))
-                            Surface(
-                                shape = RoundedCornerShape(4.dp),
-                                color = if (isHexagonActive) Color.White.copy(alpha = 0.25f) else Color(0xFF6750A4).copy(alpha = 0.25f)
-                            ) {
-                                Text(
-                                    text = com.example.network.AiModelOption.HEXAGON.badge,
-                                    color = if (isHexagonActive) Color.White else (if (isDark) Color(0xFFD0BCFF) else Color(0xFF6750A4)),
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                                )
-                            }
+
                         }
                     }
 
@@ -1413,19 +1403,7 @@ fun ChatArea(
                                 fontSize = 13.sp,
                                 fontWeight = if (isVentaxisActive) FontWeight.Bold else FontWeight.Medium
                             )
-                            Spacer(Modifier.width(5.dp))
-                            Surface(
-                                shape = RoundedCornerShape(4.dp),
-                                color = if (isVentaxisActive) Color.Black.copy(alpha = 0.16f) else SpotifyGreen.copy(alpha = 0.16f)
-                            ) {
-                                Text(
-                                    text = com.example.network.AiModelOption.VENTAXIS.badge,
-                                    color = if (isVentaxisActive) Color.Black else SpotifyGreen,
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                                )
-                            }
+
                         }
                     }
                 }
@@ -1489,7 +1467,7 @@ fun ChatArea(
                                         modifier = Modifier
                                             .background(
                                                 color = txtSec.copy(alpha = 0.15f),
-                                                shape = RoundedCornerShape(50)
+                                                shape = RoundedCornerShape(8.dp)
                                             )
                                             .padding(horizontal = 12.dp, vertical = 4.dp)
                                     ) {
@@ -1840,17 +1818,19 @@ fun MessageBubble(
 
     val bubbleAlignment = if (message.isMe) Alignment.CenterEnd else Alignment.CenterStart
 
-    var scaleState by remember { mutableStateOf(0.9f) }
+    var appearState by remember { mutableStateOf(0f) }
     LaunchedEffect(Unit) {
-        scaleState = 1.0f
+        appearState = 1f
     }
+    val animatedAlpha by animateFloatAsState(
+        targetValue = appearState,
+        animationSpec = tween(120),
+        label = "bubble_fade"
+    )
     val animatedScale by animateFloatAsState(
-        targetValue = scaleState,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioLowBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
-        label = "bubble_spring"
+        targetValue = appearState,
+        animationSpec = tween(120),
+        label = "bubble_rise"
     )
 
     val topPadding = if (isGroupedWithPrevious) 2.dp else 10.dp
@@ -1859,7 +1839,7 @@ fun MessageBubble(
         modifier = Modifier
             .fillMaxWidth()
             .padding(top = topPadding)
-            .graphicsLayer(scaleX = animatedScale, scaleY = animatedScale),
+            .graphicsLayer(alpha = animatedAlpha, translationY = (1f - animatedScale) * 12f),
         contentAlignment = bubbleAlignment
     ) {
         Row(
@@ -1950,7 +1930,7 @@ fun MessageBubble(
                                 AttachmentPayload(isDark = isDark)
                                 Spacer(modifier = Modifier.height(4.dp))
                             }
-                            if (message.text.isNotBlank() && (!message.isAttachment || message.text != "📎 Sent an attachment")) {
+                            if (message.text.isNotBlank() && (!message.isAttachment || message.text != "Attachment")) {
                                 val rawText = message.text
                                 val displayText = when {
                                     message.idempotencyKey.startsWith("init_saved_msg_") -> strings.welcomeSavedMessages
@@ -2123,7 +2103,7 @@ fun MessageBubble(
                     Text(
                         text = "Unverified",
                         color = Color(0xFFFF9800),
-                        fontSize = 9.sp,
+                        fontSize = 11.sp,
                         fontWeight = FontWeight.Medium
                     )
                 }
@@ -2451,7 +2431,7 @@ fun InputBarLayout(
                     .border(
                         width = 1.dp,
                         color = if (text.isNotBlank() || isRecording) SpotifyGreen.copy(alpha = 0.5f) else border,
-                        shape = RoundedCornerShape(24.dp)
+                        shape = RoundedCornerShape(12.dp)
                     )
                     .padding(horizontal = 16.dp, vertical = 10.dp),
                 contentAlignment = Alignment.CenterStart

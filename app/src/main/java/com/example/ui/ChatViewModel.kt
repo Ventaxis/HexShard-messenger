@@ -524,7 +524,7 @@ class ChatViewModel @Inject constructor(
                 val msgId = repository.sendMessage(
                     chatId = cid,
                     sender = "me",
-                    text = trimmed.ifBlank { "📎 Sent an attachment" },
+                    text = trimmed.ifBlank { "Attachment" },
                     isMe = true,
                     isAttachment = isAttachment,
                     timeStr = timeStr,

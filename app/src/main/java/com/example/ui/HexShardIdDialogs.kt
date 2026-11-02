@@ -118,7 +118,7 @@ fun HexShardIdMissingDialog(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
-                        text = if (strings == RussianStrings) "ВВЕДИТЕ ЖЕЛАЕМЫЙ НОМЕР (+999)" else "CHOOSE YOUR +999 NUMBER",
+                        text = if (strings == RussianStrings) "Введите желаемый номер (+999)" else "Choose your +999 number",
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
                         color = HexShardTealLight,
@@ -414,7 +414,7 @@ fun HexShardIdClaimDialog(
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Text(
-                                text = "HEXSHARD ID (+999)",
+                                text = "HexShard ID (+999)",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = HexShardTealLight,

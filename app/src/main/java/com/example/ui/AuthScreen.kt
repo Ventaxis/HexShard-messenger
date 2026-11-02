@@ -219,13 +219,13 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
     }
 
     val textFieldColors = OutlinedTextFieldDefaults.colors(
-        focusedBorderColor = Color(0xFF1DB954),
+        focusedBorderColor = Color(0xFF03A062),
         unfocusedBorderColor = Color(0xFF252538),
         focusedTextColor = Color.White,
         unfocusedTextColor = Color.White,
-        focusedLabelColor = Color(0xFF1DB954),
+        focusedLabelColor = Color(0xFF03A062),
         unfocusedLabelColor = Color(0xFF8B8B9E),
-        cursorColor = Color(0xFF1DB954),
+        cursorColor = Color(0xFF03A062),
         focusedContainerColor = Color(0xFF12121C),
         unfocusedContainerColor = Color(0xFF0F0F18)
     )
@@ -530,7 +530,7 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
                                         .weight(1f)
                                         .fillMaxHeight()
                                         .clip(RoundedCornerShape(10.dp))
-                                        .background(if (selectedTab == 0) Color(0xFF1DB954) else Color.Transparent)
+                                        .background(if (selectedTab == 0) Color(0xFF03A062) else Color.Transparent)
                                         .clickable {
                                             selectedTab = 0
                                             errorMessage = null
@@ -549,7 +549,7 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
                                         .weight(1f)
                                         .fillMaxHeight()
                                         .clip(RoundedCornerShape(10.dp))
-                                        .background(if (selectedTab == 1) Color(0xFF1DB954) else Color.Transparent)
+                                        .background(if (selectedTab == 1) Color(0xFF03A062) else Color.Transparent)
                                         .clickable {
                                             selectedTab = 1
                                             errorMessage = null
@@ -691,13 +691,13 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
                                         Icon(
                                             Icons.AutoMirrored.Filled.ArrowForward,
                                             contentDescription = null,
-                                            tint = Color(0xFF1DB954),
+                                            tint = Color(0xFF03A062),
                                             modifier = Modifier.size(16.dp)
                                         )
                                         Spacer(modifier = Modifier.width(6.dp))
                                         Text(
                                             text = if (isRussian) "Перейти ко входу" else "Switch to Sign In",
-                                            color = Color(0xFF1DB954),
+                                            color = Color(0xFF03A062),
                                             fontSize = 13.sp,
                                             fontWeight = FontWeight.SemiBold
                                         )
@@ -762,7 +762,7 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
                                 Icon(
                                     Icons.Default.Shield,
                                     contentDescription = null,
-                                    tint = Color(0xFF1DB954),
+                                    tint = Color(0xFF03A062),
                                     modifier = Modifier.size(20.dp)
                                 )
                                 Spacer(modifier = Modifier.width(10.dp))
@@ -906,7 +906,7 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(16.dp),
                                 colors = CardDefaults.cardColors(containerColor = Color(0xFF101520)),
-                                border = BorderStroke(1.dp, if (telegramVerified) Color(0xFF1DB954) else Color(0xFF222232))
+                                border = BorderStroke(1.dp, if (telegramVerified) Color(0xFF03A062) else Color(0xFF222232))
                             ) {
                                 Column(
                                     modifier = Modifier
@@ -928,7 +928,7 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
                                             Icon(
                                                 imageVector = if (telegramVerified) Icons.Default.Check else Icons.Default.Send,
                                                 contentDescription = null,
-                                                tint = if (telegramVerified) Color(0xFF1DB954) else Color(0xFF2990D6),
+                                                tint = if (telegramVerified) Color(0xFF03A062) else Color(0xFF2990D6),
                                                 modifier = Modifier.size(18.dp)
                                             )
                                         }
@@ -940,7 +940,7 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
                                                 text = if (telegramVerified) strings.telegramConnected else "@HexShardBot",
                                                 fontWeight = FontWeight.Bold,
                                                 fontSize = 15.sp,
-                                                color = if (telegramVerified) Color(0xFF1DB954) else Color.White
+                                                color = if (telegramVerified) Color(0xFF03A062) else Color.White
                                             )
                                             Text(
                                                 text = if (telegramVerified) {
@@ -1150,7 +1150,7 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
                                         text = strings.virtualNumberLabel.uppercase(),
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = Color(0xFF1DB954),
+                                        color = Color(0xFF03A062),
                                         letterSpacing = 1.2.sp
                                     )
 
@@ -1169,7 +1169,7 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
                                             text = "+999",
                                             fontSize = 20.sp,
                                             fontWeight = FontWeight.Bold,
-                                            color = Color(0xFF1DB954),
+                                            color = Color(0xFF03A062),
                                             fontFamily = FontFamily.Monospace
                                         )
 
@@ -1229,7 +1229,7 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
                                             Icon(
                                                 imageVector = Icons.Default.Refresh,
                                                 contentDescription = strings.generateNumber,
-                                                tint = Color(0xFF1DB954),
+                                                tint = Color(0xFF03A062),
                                                 modifier = Modifier.size(24.dp)
                                             )
                                         }
@@ -1242,7 +1242,7 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
                                     Text(
                                         text = if (raw8DigitsInput.length == 8) formattedPreview else if (strings == RussianStrings) "Введите 8 цифр или нажмите ⟳" else "Enter 8 digits or tap ⟳",
                                         fontSize = 14.sp,
-                                        color = if (raw8DigitsInput.length == 8) Color(0xFF1DB954) else Color(0xFF8B8B9E),
+                                        color = if (raw8DigitsInput.length == 8) Color(0xFF03A062) else Color(0xFF8B8B9E),
                                         fontFamily = FontFamily.Monospace
                                     )
                                 }
@@ -1320,13 +1320,13 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
                                     .size(64.dp)
                                     .clip(CircleShape)
                                     .background(Color(0xFF1B382B))
-                                    .border(1.5.dp, Color(0xFF1DB954), CircleShape),
+                                    .border(1.5.dp, Color(0xFF03A062), CircleShape),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Icon(
                                     Icons.Default.Check,
                                     contentDescription = null,
-                                    tint = Color(0xFF1DB954),
+                                    tint = Color(0xFF03A062),
                                     modifier = Modifier.size(34.dp)
                                 )
                             }
@@ -1396,7 +1396,7 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
                                             fontSize = 15.sp,
                                             fontWeight = FontWeight.Bold,
                                             fontFamily = if (confirmedVirtualNumber.isNotBlank()) FontFamily.Monospace else FontFamily.Default,
-                                            color = if (confirmedVirtualNumber.isNotBlank()) Color(0xFF1DB954) else Color(0xFF8B8B9E)
+                                            color = if (confirmedVirtualNumber.isNotBlank()) Color(0xFF03A062) else Color(0xFF8B8B9E)
                                         )
                                     }
 
@@ -1424,7 +1424,7 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
                                                 text = if (telegramVerified) strings.telegramConnected else strings.telegramNotConnected,
                                                 fontSize = 12.sp,
                                                 fontWeight = FontWeight.SemiBold,
-                                                color = if (telegramVerified) Color(0xFF1DB954) else Color(0xFF8B8B9E),
+                                                color = if (telegramVerified) Color(0xFF03A062) else Color(0xFF8B8B9E),
                                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                                             )
                                         }

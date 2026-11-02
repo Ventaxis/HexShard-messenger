@@ -220,9 +220,9 @@ fun HexSectionHeader(
             Text(
                 text = title.uppercase(),
                 fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
+                fontWeight = FontWeight.SemiBold,
                 color = HexTextSecondary,
-                letterSpacing = 1.1.sp
+                letterSpacing = 0.sp
             )
         }
         trailingContent?.invoke()
@@ -289,7 +289,7 @@ fun HexEmptyState(
         Text(
             text = title,
             style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
+            fontWeight = FontWeight.SemiBold,
             color = HexTextPrimary,
             textAlign = TextAlign.Center
         )
@@ -344,7 +344,7 @@ fun HexAvatar(
             Text(
                 text = initials.take(2).uppercase(),
                 color = Color.White,
-                fontWeight = FontWeight.Bold,
+                fontWeight = FontWeight.SemiBold,
                 fontSize = (size.value * 0.36f).sp
             )
         }
@@ -381,7 +381,7 @@ fun HexBadge(
             text = text,
             color = textColor,
             fontSize = 11.sp,
-            fontWeight = FontWeight.Bold,
+            fontWeight = FontWeight.SemiBold,
             modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
         )
     }

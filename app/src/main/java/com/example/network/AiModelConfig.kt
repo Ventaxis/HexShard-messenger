@@ -16,13 +16,13 @@ enum class AiModelOption(
     HEXAGON(
         persona = AiPersona.HEXAGON,
         shortName = "HexShard",
-        badge = "FAST",
+        badge = "",
         description = "Fast assistant"
     ),
     VENTAXIS(
         persona = AiPersona.VENTAXIS,
         shortName = "Ventaxis",
-        badge = "PRO",
+        badge = "",
         description = "Smart assistant"
     );
 

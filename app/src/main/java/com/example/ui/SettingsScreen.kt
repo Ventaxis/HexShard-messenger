@@ -235,7 +235,7 @@ fun SettingsScreen(
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = strings.accountIdLabel.uppercase(),
+                                    text = strings.accountIdLabel,
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.primary
@@ -1454,7 +1454,7 @@ fun SettingsScreen(
                         ) {
                             Column(modifier = Modifier.padding(12.dp)) {
                                 Text(
-                                    text = strings.serverVerifiedProfile.uppercase(),
+                                    text = strings.serverVerifiedProfile,
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = SpotifyGreen
@@ -1485,7 +1485,7 @@ fun SettingsScreen(
                                 try {
                                     val userRepo = com.example.data.repository.UserRepository(context)
                                     userRepo.registerVerifiedPeerKey(p.userId, p.publicKey)
-                                    Toast.makeText(context, "Contact added!", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "Contact added", Toast.LENGTH_SHORT).show()
                                     showScanQrDialog = false
                                     onBack()
                                 } catch (e: Exception) {
@@ -1678,7 +1678,7 @@ fun SettingsScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = strings.profileDetails.uppercase(),
+                            text = strings.profileDetails,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = HexShardTeal,
@@ -2149,7 +2149,7 @@ fun ProfileInfoRow(
                         Text(
                             text = badge,
                             color = HexShardOnTealContainer,
-                            fontSize = 9.sp,
+                            fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
                         )
@@ -2211,7 +2211,7 @@ fun SettingsItem(
         Icon(
             imageVector = icon,
             contentDescription = null,
-            tint = if (titleColor != Color.Unspecified) titleColor else HexShardTeal,
+            tint = if (titleColor != Color.Unspecified) titleColor else HexTextSecondary,
             modifier = Modifier.size(22.dp)
         )
         Spacer(modifier = Modifier.width(18.dp))
