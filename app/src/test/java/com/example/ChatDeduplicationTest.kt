@@ -76,6 +76,8 @@ class FakeChatDao : ChatDao {
     override suspend fun getWaitingKeyOutboxEntries(accountId: String): List<OutboxEntity> = emptyList()
     override suspend fun updateOutboxPayload(id: Long, payload: String, signature: String, accountId: String) {}
     override suspend fun updateOutboxStatus(id: Long, status: String, accountId: String) {}
+    override suspend fun getOutboxByIdempotencyKey(idempotencyKey: String, accountId: String): OutboxEntity? = null
+    override suspend fun getAllOutboxEntries(accountId: String): List<OutboxEntity> = emptyList()
 }
 
 class ChatDeduplicationTest {

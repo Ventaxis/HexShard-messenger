@@ -516,9 +516,13 @@ class ConversationRepository(
 
                         val previewText = when {
                             lastMsgObj != null -> {
+                                // Encrypted messages: the local vault already holds the
+                                // DECRYPTED preview — keep it. Only fall back to the
+                                // placeholder when there is nothing local to show.
                                 val encVer = lastMsgObj.optInt("encryption_version", 2)
                                 val rawText = lastMsgObj.optString("text", "")
-                                if (encVer == 0) rawText else "Зашифрованное сообщение"
+                                if (encVer == 0) rawText
+                                else existing?.preview?.takeIf { it.isNotBlank() } ?: "Зашифрованное сообщение"
                             }
                             else -> existing?.preview.orEmpty()
                         }

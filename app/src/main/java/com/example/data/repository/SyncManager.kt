@@ -274,8 +274,10 @@ class SyncManager(
             for (i in 0 until arr.length()) {
                 val obj = arr.getJSONObject(i)
                 val gSeq = obj.optLong("global_sequence", 0L)
-                processSingleMessageRecord(obj, currentUserId)
-                if (gSeq > maxGlob) maxGlob = gSeq
+                val processed = processSingleMessageRecord(obj, currentUserId)
+                // Advance the cursor ONLY past successfully processed records: a transient
+                // MISSING_KEY must be retried by the next sync instead of being skipped forever.
+                if (processed && gSeq > maxGlob) maxGlob = gSeq
             }
 
             if (maxGlob > globalCursor) {
@@ -289,7 +291,12 @@ class SyncManager(
         }
     }
 
-    private suspend fun processSingleMessageRecord(obj: JSONObject, currentUserId: String) = withContext(Dispatchers.IO) {
+    /**
+     * Returns false when the record was NOT persisted (e.g. MISSING_KEY transient) so
+     * the caller does not advance the sync cursor past it — otherwise the first
+     * message from a new peer is lost until their second message arrives.
+     */
+    private suspend fun processSingleMessageRecord(obj: JSONObject, currentUserId: String): Boolean = withContext(Dispatchers.IO) {
         val ctx = context
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = ctx?.let { SupabaseConfig.getAnonKey(it) } ?: ""
@@ -299,7 +306,7 @@ class SyncManager(
         val sender = obj.optString("sender_id")
         val recipient = obj.optString("recipient_id")
         val sequence = obj.optLong("sequence", 0L)
-        if (sender.isBlank()) return@withContext
+        if (sender.isBlank()) return@withContext true
 
         // P0-03: Process tombstones FIRST before checking payload, as server sets payload='' on delete
         val isDeleted = obj.optBoolean("is_deleted", false)
@@ -311,11 +318,11 @@ class SyncManager(
             if (clientMsgId.isNotBlank()) {
                 chatDao.deleteMessageByIdempotencyKey(clientMsgId, currentUserId)
             }
-            return@withContext
+            return@withContext true
         }
 
         val payloadString = obj.optString("payload")
-        if (payloadString.isBlank()) return@withContext
+        if (payloadString.isBlank()) return@withContext true
 
         val type = obj.optString("type", "text")
         val timeStr = obj.optString("time_str", "")
@@ -362,7 +369,7 @@ class SyncManager(
             }
             if (editedAt == null) {
                 // Not edited, already present in local database
-                return@withContext
+                return@withContext true
             }
         }
 
@@ -416,7 +423,7 @@ class SyncManager(
             // MISSING_KEY is transient (peer key not cached, network blip): do NOT persist
             // a stub row — the next sync pass will re-fetch the key and decrypt properly.
             if (decryptedResult.trustStatus == DecryptionTrustStatus.MISSING_KEY) {
-                return@withContext
+                return@withContext false
             }
 
             // TOFU: the served key differs from the pinned one. Verification above used
@@ -477,7 +484,7 @@ class SyncManager(
                         conversationRepository.updateChatPreview(existing.chatId, resolvedText, timeStr, System.currentTimeMillis())
                     }
                 }
-                return@withContext
+                return@withContext true
             }
 
             var chat = when {
@@ -560,8 +567,13 @@ class SyncManager(
                 if (token.isNotBlank() && !isMe && !isDecryptionError && signatureValid && !isAiConversation) {
                     markDeliveredOnRemote(docId, baseUrl, anonKey, token)
                 }
+                true
+            } else {
+                // Deduplicated insert (row already present): still a successful process
+                true
             }
         }
+        true
     }
 
     private suspend fun markDeliveredOnRemote(
@@ -716,7 +728,14 @@ class SyncManager(
                         if (convId != null) {
                             val localChat = chatDao.getChatById(entry.chatId, currentUserId)
                             if (localChat != null && localChat.conversationId != convId) {
-                                chatDao.updateChat(localChat.copy(conversationId = convId))
+                                if (localChat.conversationId.isNotBlank()) {
+                                    // Rebind BOTH the chat and its messages, or per-conversation
+                                    // sync/read-receipts keep using the stale deterministic id.
+                                    chatDao.updateChatConversationId(localChat.conversationId, convId, currentUserId)
+                                    chatDao.updateMessagesConversationId(localChat.conversationId, convId, currentUserId)
+                                } else {
+                                    chatDao.updateChat(localChat.copy(conversationId = convId))
+                                }
                             }
                             true
                         } else {

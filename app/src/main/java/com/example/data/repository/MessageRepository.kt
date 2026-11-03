@@ -578,14 +578,14 @@ class MessageRepository(
         val currentUserId = context?.let { SecurePrefsManager.getUserId(it) } ?: return@withContext
         val msg = chatDao.getMessageById(msgId, currentUserId) ?: return@withContext
 
-        val outboxList = chatDao.getPendingOutboxEntries(currentUserId)
+        // Look up the outbox entry REGARDLESS of status: after 5 failed attempts the
+        // entry is 'failed' and excluded from getPendingOutboxEntries — without this
+        // the user's retry button would strand the message forever.
+        val existingOutbox = chatDao.getOutboxByIdempotencyKey(msg.idempotencyKey, currentUserId)
+            ?: chatDao.getAllOutboxEntries(currentUserId).find { it.localMessageId == msgId }
         // Never send a blank payload: WAITING_FOR_PEER_KEY entries carry no ciphertext yet
-        val existingOutbox = outboxList.find {
-            it.payload.isNotBlank() && (it.idempotencyKey == msg.idempotencyKey || it.localMessageId == msgId)
-        }
-        if (existingOutbox == null) {
-            // Nothing sendable (e.g. still waiting for the peer's public key): restore
-            // the previous status instead of leaving the message stuck in "sending".
+        if (existingOutbox == null || existingOutbox.payload.isBlank()) {
+            // Nothing sendable (e.g. still waiting for the peer's public key)
             updateMessageStatus(msgId, "pending", currentUserId)
             return@withContext
         }

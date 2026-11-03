@@ -160,6 +160,18 @@ open class ChatRepository(
         return attachmentRepository.uploadVoiceFile(file, conversationId, idempotencyKey, recipientId)
     }
 
+    suspend fun uploadVoiceMessageBytes(data: ByteArray, chatId: Int, idempotencyKey: String = "", recipientId: String): String? {
+        val conversationId = computeConversationId(getCurrentUserId(), recipientId)
+        val ctx = context ?: return null
+        val temp = File.createTempFile("fwd_voice_", ".ogg", ctx.cacheDir)
+        try {
+            temp.writeBytes(data)
+            return attachmentRepository.uploadVoiceFile(temp, conversationId, idempotencyKey, recipientId)
+        } finally {
+            temp.delete()
+        }
+    }
+
     suspend fun uploadMediaMessage(
         context: Context,
         uri: Uri,
@@ -180,6 +192,17 @@ open class ChatRepository(
 
     suspend fun downloadMediaMessage(url: String, partnerId: String, idempotencyKey: String = ""): ByteArray? =
         attachmentRepository.downloadAttachmentBytes(url, partnerId, idempotencyKey)
+
+    suspend fun uploadAttachmentData(
+        data: ByteArray,
+        chatId: Int,
+        type: String,
+        idempotencyKey: String,
+        recipientId: String
+    ): String? {
+        val conversationId = computeConversationId(getCurrentUserId(), recipientId)
+        return attachmentRepository.uploadAttachmentData(data, conversationId, type, idempotencyKey, recipientId)
+    }
 
     suspend fun downloadVoiceMessage(url: String, partnerId: String, idempotencyKey: String = ""): ByteArray? {
         if (url.startsWith("file://")) {

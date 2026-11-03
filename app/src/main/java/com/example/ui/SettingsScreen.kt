@@ -49,6 +49,8 @@ import com.example.ui.theme.*
 import com.example.ui.HexCard
 import com.example.ui.HexSectionHeader
 import com.example.ui.hexPressEffect
+import com.example.data.database.AppDatabase
+import com.example.data.database.ChatRepository
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1485,7 +1487,16 @@ fun SettingsScreen(
                                 try {
                                     val userRepo = com.example.data.repository.UserRepository(context)
                                     userRepo.registerVerifiedPeerKey(p.userId, p.publicKey)
-                                    Toast.makeText(context, "Contact added", Toast.LENGTH_SHORT).show()
+                                    // A registered key alone is invisible to the user: the contact
+                                    // must also become a conversation, or the toast is a lie.
+                                    val db = AppDatabase.getDatabase(context)
+                                    val chatRepo = ChatRepository(db.chatDao(), context)
+                                    val result = chatRepo.getOrCreateDirectConversation(p.userId, p.displayName.ifBlank { p.username })
+                                    if (result.isSuccess) {
+                                        Toast.makeText(context, "Contact added", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        Toast.makeText(context, "Contact added, but the chat could not be created", Toast.LENGTH_SHORT).show()
+                                    }
                                     showScanQrDialog = false
                                     onBack()
                                 } catch (e: Exception) {

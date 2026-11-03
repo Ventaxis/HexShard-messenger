@@ -75,6 +75,28 @@ class AttachmentRepository(
      * Uses streaming CipherOutputStream (AES-256-GCM) into a temporary encrypted file
      * to completely avoid loading large files into memory and preventing OOM.
      */
+    /**
+     * Uploads already-owned raw bytes (e.g. decrypted media being forwarded).
+     * Writes them to a temp file and reuses the standard encrypted upload path,
+     * producing a NEW ciphertext bound to the target chat's key material.
+     */
+    suspend fun uploadAttachmentData(
+        data: ByteArray,
+        conversationId: String,
+        fileType: String,
+        idempotencyKey: String,
+        recipientId: String
+    ): String? = withContext(Dispatchers.IO) {
+        val ctx = context ?: return@withContext null
+        val temp = File.createTempFile("fwd_data_", ".bin", ctx.cacheDir)
+        try {
+            temp.writeBytes(data)
+            uploadAttachment(Uri.fromFile(temp), conversationId, fileType, idempotencyKey, recipientId)
+        } finally {
+            temp.delete()
+        }
+    }
+
     suspend fun uploadAttachment(
         inputUri: Uri,
         conversationId: String,

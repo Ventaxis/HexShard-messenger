@@ -2078,6 +2078,16 @@ fun MessageBubble(
                                 modifier = Modifier.clickable { onRetry() }
                             )
                         }
+                        "pending", "waiting_key" -> {
+                            // Offline queue / waiting for the peer's public key: the user
+                            // must see the message is NOT delivered yet.
+                            Icon(
+                                imageVector = Icons.Default.Schedule,
+                                contentDescription = "Queued",
+                                tint = (if (isDark) DarkTxtSec else LightTxtSec).copy(alpha = 0.55f),
+                                modifier = Modifier.size(12.dp)
+                            )
+                        }
                     }
                     if (message.status != "error") {
                         Spacer(modifier = Modifier.width(4.dp))

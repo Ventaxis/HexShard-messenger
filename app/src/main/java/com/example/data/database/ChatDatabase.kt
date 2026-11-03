@@ -357,6 +357,12 @@ interface ChatDao {
     @Query("UPDATE outbox SET status = :status WHERE id = :id AND accountId = :accountId")
     suspend fun updateOutboxStatus(id: Long, status: String, accountId: String)
 
+    @Query("SELECT * FROM outbox WHERE idempotencyKey = :idempotencyKey AND accountId = :accountId LIMIT 1")
+    suspend fun getOutboxByIdempotencyKey(idempotencyKey: String, accountId: String): OutboxEntity?
+
+    @Query("SELECT * FROM outbox WHERE accountId = :accountId ORDER BY createdAt ASC")
+    suspend fun getAllOutboxEntries(accountId: String): List<OutboxEntity>
+
     @Query("UPDATE outbox SET accountId = :targetAccountId WHERE accountId = ''")
     suspend fun backfillLegacyOutboxAccountId(targetAccountId: String): Int
 }
