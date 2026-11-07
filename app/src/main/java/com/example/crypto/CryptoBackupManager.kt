@@ -193,7 +193,8 @@ object CryptoBackupManager {
             resp.close()
 
             if (!isOk) {
-                Timber.w("backup_crypto_envelope failed HTTP $code: $body")
+                // Log the status code only — the response body may echo envelope fragments.
+                Timber.w("backup_crypto_envelope failed HTTP $code")
                 return@withContext Result.failure(Exception("Cloud backup upload failed (HTTP $code)"))
             }
 

@@ -1,0 +1,55 @@
+name: Release APK
+
+# Every pushed v* tag becomes a GitHub Release with an installable debug APK
+# (signed with the committed debug.keystore — consistent signatures, no secrets).
+on:
+  push:
+    tags: [ 'v*' ]
+
+jobs:
+  release:
+    name: Build & publish APK release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Accept SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      # BuildConfig reads SUPABASE_URL / SUPABASE_ANON_KEY from .env (secrets plugin).
+      - name: Create .env
+        run: |
+          {
+            echo "SUPABASE_URL=${SUPABASE_URL:-https://zqyipemjvzcxjpglmegy.supabase.co}"
+            echo "SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY:-sb_publishable_NNLyZlCPko3fbD4ibBjeQw_7OV0OpcS}"
+          } > .env
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+
+      - name: Grant execute permission to gradlew
+        run: chmod +x gradlew
+
+      - name: Assemble debug APK
+        run: ./gradlew :app:assembleDebug --stacktrace --console=plain
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            --title "HexShard $TAG" \
+            --generate-notes \
+            "app/build/outputs/apk/debug/app-debug.apk#HexShard-$TAG-debug.apk"
