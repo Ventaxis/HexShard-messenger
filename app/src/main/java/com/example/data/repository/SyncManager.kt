@@ -680,7 +680,7 @@ class SyncManager(
             serverSequence = record.sequence
         )
         val rowId = chatDao.insertMessageIfNotExists(msg)
-        if (rowId > 0) {
+        return if (rowId > 0) {
             val previewText = when (content.resolvedType) {
                 "voice" -> "🎤 Voice message"
                 "image" -> "📷 Photo"

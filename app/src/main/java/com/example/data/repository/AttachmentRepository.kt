@@ -223,7 +223,7 @@ class AttachmentRepository(
 
         // Stream encrypt from source to temp encrypted file
         val tempEncryptedFile = File.createTempFile(tempPrefix, ".bin", ctx.cacheDir)
-        try {
+        return try {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(fileKey, "AES"), GCMParameterSpec(128, iv))
 
