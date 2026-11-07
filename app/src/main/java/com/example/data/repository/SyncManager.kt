@@ -6,6 +6,7 @@ import com.example.data.database.ChatDao
 import com.example.data.database.ChatEntity
 import com.example.data.database.MessageEntity
 import com.example.data.database.isSavedMessages
+import com.example.network.SupabaseHttp
 import com.example.network.supabase.RealtimeConnectionState
 import com.example.network.supabase.SupabaseConfig
 import kotlinx.coroutines.CoroutineScope
@@ -19,14 +20,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import timber.log.Timber
-import java.util.concurrent.TimeUnit
 
 class SyncManager(
     private val chatDao: ChatDao,
@@ -43,15 +39,6 @@ class SyncManager(
 
     @Volatile
     private var realtimeStarted = false
-
-    private val httpClient: OkHttpClient by lazy {
-        OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .writeTimeout(20, TimeUnit.SECONDS)
-            .build()
-    }
-    private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
 
     // Server-derived ids are interpolated into PostgREST filter URLs; anything outside
     // this shape must never reach the query string (filter-injection guard).
@@ -220,14 +207,11 @@ class SyncManager(
                 convPageCount++
                 val pageStartSeq = maxSeq
                 val url = "$baseUrl/rest/v1/messages?conversation_id=eq.$convId&sequence=gt.$maxSeq&order=sequence.asc&limit=50"
-                val req = Request.Builder()
-                    .url(url)
-                    .header("apikey", anonKey)
-                    .header("Authorization", "Bearer $token")
+                val req = SupabaseHttp.request(url, token, anonKey)
                     .get()
                     .build()
 
-                val resp = try { httpClient.newCall(req).execute() } catch (_: Exception) { null } ?: break
+                val resp = try { SupabaseHttp.client.newCall(req).execute() } catch (_: Exception) { null } ?: break
                 val body = resp.body?.string().orEmpty()
                 val ok = resp.isSuccessful
                 resp.close()
@@ -273,14 +257,11 @@ class SyncManager(
                 "$baseUrl/rest/v1/messages?$filter&order=global_sequence.asc&limit=50"
             }
 
-            val req = Request.Builder()
-                .url(globalUrl)
-                .header("apikey", anonKey)
-                .header("Authorization", "Bearer $token")
+            val req = SupabaseHttp.request(globalUrl, token, anonKey)
                 .get()
                 .build()
 
-            val resp = try { httpClient.newCall(req).execute() } catch (_: Exception) { null } ?: break
+            val resp = try { SupabaseHttp.client.newCall(req).execute() } catch (_: Exception) { null } ?: break
             val body = resp.body?.string().orEmpty()
             val ok = resp.isSuccessful
             resp.close()
@@ -315,6 +296,11 @@ class SyncManager(
      * Returns false when the record was NOT persisted (e.g. MISSING_KEY transient) so
      * the caller does not advance the sync cursor past it — otherwise the first
      * message from a new peer is lost until their second message arrives.
+     *
+     * Split into phases called strictly in order: [parseIncomingRecord]
+     * (parsing/classification), [resolveMessageContent] (decryption + signature
+     * verification), [resolveOrCreateChat] (chat resolution) and
+     * [persistMessageRecord] (persistence, under [syncMutex]).
      */
     private suspend fun processSingleMessageRecord(obj: JSONObject, currentUserId: String): Boolean = withContext(Dispatchers.IO) {
         val ctx = context
@@ -322,11 +308,93 @@ class SyncManager(
         val anonKey = ctx?.let { SupabaseConfig.getAnonKey(it) } ?: ""
         val token = ctx?.let { SecurePrefsManager.getSupabaseAccessToken(it) }?.takeIf { it.isNotBlank() } ?: ""
 
+        // Phase 1: record parsing/classification — blank sender, tombstone and empty
+        // payload records are fully handled inside and report as processed
+        val record = parseIncomingRecord(obj, currentUserId) ?: return@withContext true
+
+        // P0-04: Existing message detection: update server metadata and check if edited
+        val existingMsg = (if (record.docId.isNotBlank()) chatDao.getMessageByServerId(record.docId, currentUserId) else null)
+            ?: (if (record.idempotencyKey.isNotBlank()) chatDao.getMessageByIdempotencyKey(record.idempotencyKey, currentUserId) else null)
+
+        if (existingMsg != null) {
+            if ((existingMsg.serverMessageId.isBlank() && record.docId.isNotBlank()) ||
+                (existingMsg.serverSequence == 0L && record.sequence > 0L) ||
+                (existingMsg.status != "read" && record.serverStatus == "read")
+            ) {
+                chatDao.updateMessageServerInfoByIdempotencyKey(
+                    idempotencyKey = record.idempotencyKey,
+                    serverId = record.docId,
+                    sequence = record.sequence,
+                    status = record.serverStatus,
+                    accountId = currentUserId
+                )
+            }
+            if (record.editedAt == null) {
+                // Not edited, already present in local database
+                return@withContext true
+            }
+        }
+
+        // Phase 2: decryption + signature verification (null = transient MISSING_KEY,
+        // do not advance the cursor so the next sync pass can retry)
+        val content = resolveMessageContent(record, currentUserId, ctx) ?: return@withContext false
+
+        val messageStatus = when {
+            content.isDecryptionError || !content.signatureValid -> "integrity_error"
+            content.isMe -> "sent"
+            else -> "delivered"
+        }
+
+        // Phases 3+4: chat resolution and persistence, serialized under syncMutex
+        syncMutex.withLock {
+            persistMessageRecord(record, content, messageStatus, currentUserId, baseUrl, anonKey, token)
+        }
+        true
+    }
+
+    /** Parsed and classified fields of one incoming message record. */
+    private data class IncomingRecord(
+        val obj: JSONObject,
+        val docId: String,
+        val sender: String,
+        val recipient: String,
+        val sequence: Long,
+        val payloadString: String,
+        val type: String,
+        val timeStr: String,
+        val idempotencyKey: String,
+        val personaId: String?,
+        val editedAt: String?,
+        val serverStatus: String,
+        val isSelfMessage: Boolean,
+        val isOutboundFromAnotherDevice: Boolean,
+        val isAiConversation: Boolean,
+        val peerId: String,
+        val conversationId: String
+    )
+
+    /** Decryption/verification outcome shared by the AI and E2EE branches. */
+    private data class ResolvedContent(
+        val isMe: Boolean,
+        val resolvedSender: String,
+        val resolvedText: String,
+        val resolvedAudioUrl: String?,
+        val resolvedDuration: Int?,
+        val resolvedType: String,
+        val signatureValid: Boolean,
+        val isDecryptionError: Boolean
+    )
+
+    /**
+     * Phase 1: record parsing/classification. Returns null when the record needs no
+     * persistence — blank sender, tombstone (deletes applied here), or blank payload.
+     */
+    private suspend fun parseIncomingRecord(obj: JSONObject, currentUserId: String): IncomingRecord? {
         val docId = obj.optString("id")
         val sender = obj.optString("sender_id")
         val recipient = obj.optString("recipient_id")
         val sequence = obj.optLong("sequence", 0L)
-        if (sender.isBlank()) return@withContext true
+        if (sender.isBlank()) return null
 
         // P0-03: Process tombstones FIRST before checking payload, as server sets payload='' on delete
         val isDeleted = obj.optBoolean("is_deleted", false)
@@ -338,11 +406,11 @@ class SyncManager(
             if (clientMsgId.isNotBlank()) {
                 chatDao.deleteMessageByIdempotencyKey(clientMsgId, currentUserId)
             }
-            return@withContext true
+            return null
         }
 
         val payloadString = obj.optString("payload")
-        if (payloadString.isBlank()) return@withContext true
+        if (payloadString.isBlank()) return null
 
         val type = obj.optString("type", "text")
         val timeStr = obj.optString("time_str", "")
@@ -370,69 +438,73 @@ class SyncManager(
             }
         }
 
-        // P0-04: Existing message detection: update server metadata and check if edited
-        val existingMsg = (if (docId.isNotBlank()) chatDao.getMessageByServerId(docId, currentUserId) else null)
-            ?: (if (idempotencyKey.isNotBlank()) chatDao.getMessageByIdempotencyKey(idempotencyKey, currentUserId) else null)
+        return IncomingRecord(
+            obj = obj,
+            docId = docId,
+            sender = sender,
+            recipient = recipient,
+            sequence = sequence,
+            payloadString = payloadString,
+            type = type,
+            timeStr = timeStr,
+            idempotencyKey = idempotencyKey,
+            personaId = personaId,
+            editedAt = editedAt,
+            serverStatus = serverStatus,
+            isSelfMessage = isSelfMessage,
+            isOutboundFromAnotherDevice = isOutboundFromAnotherDevice,
+            isAiConversation = isAiConversation,
+            peerId = peerId,
+            conversationId = conversationId
+        )
+    }
 
-        if (existingMsg != null) {
-            if ((existingMsg.serverMessageId.isBlank() && docId.isNotBlank()) ||
-                (existingMsg.serverSequence == 0L && sequence > 0L) ||
-                (existingMsg.status != "read" && serverStatus == "read")
-            ) {
-                chatDao.updateMessageServerInfoByIdempotencyKey(
-                    idempotencyKey = idempotencyKey,
-                    serverId = docId,
-                    sequence = sequence,
-                    status = serverStatus,
-                    accountId = currentUserId
-                )
-            }
-            if (editedAt == null) {
-                // Not edited, already present in local database
-                return@withContext true
-            }
-        }
-
-        var isMe = sender == currentUserId
-        var resolvedSender = sender
-        var resolvedText = payloadString
+    /**
+     * Phase 2: decryption + signature verification (or the AI-author branch, which
+     * needs no crypto). Returns null for the transient MISSING_KEY case — the caller
+     * must not persist a stub row and must report the record as unprocessed.
+     */
+    private suspend fun resolveMessageContent(record: IncomingRecord, currentUserId: String, ctx: Context?): ResolvedContent? {
+        var isMe = record.sender == currentUserId
+        var resolvedSender = record.sender
+        var resolvedText = record.payloadString
         var resolvedAudioUrl: String? = null
         var resolvedDuration: Int? = null
-        var resolvedType = type
+        var resolvedType = record.type
         var signatureValid = true
         var isDecryptionError = false
 
-        if (isAiConversation) {
-            if (recipient.startsWith("ai_") || recipient == "ai_assistant") {
+        if (record.isAiConversation) {
+            if (record.recipient.startsWith("ai_") || record.recipient == "ai_assistant") {
                 isMe = true
                 resolvedSender = "me"
             } else {
                 isMe = false
-                resolvedSender = if (personaId?.lowercase() == "ventaxis") "Ventaxis AI" else "Hexagon AI"
+                resolvedSender = if (record.personaId?.lowercase() == "ventaxis") "Ventaxis AI" else "Hexagon AI"
             }
         } else {
             // E2EE message decryption
             // P0-06: For outbound message from another device of same account,
             // the ECDH shared secret was derived with peerId (recipient), not self.
             val effectiveCryptoPeer = when {
-                isSelfMessage -> currentUserId
-                isOutboundFromAnotherDevice -> recipient
-                else -> sender
+                record.isSelfMessage -> currentUserId
+                record.isOutboundFromAnotherDevice -> record.recipient
+                else -> record.sender
             }
 
-            val signatureStr = obj.optString("signature").takeIf { it.isNotBlank() }
+            val signatureStr = record.obj.optString("signature").takeIf { it.isNotBlank() }
             val decryptedResult = cryptoRepository.decryptInboundMessage(
                 senderId = effectiveCryptoPeer,
                 recipientId = currentUserId,
-                conversationId = conversationId,
-                idempotencyKey = idempotencyKey,
-                base64Payload = payloadString,
+                conversationId = record.conversationId,
+                idempotencyKey = record.idempotencyKey,
+                base64Payload = record.payloadString,
                 base64Signature = signatureStr,
                 // The canonical envelope/AAD was built with the identities as recorded
                 // server-side at send time; for this account's own outbound messages
                 // (sender == me) the crypto peer and the envelope pair are reversed.
-                envelopeSenderId = if (isOutboundFromAnotherDevice) currentUserId else sender,
-                envelopeRecipientId = if (isOutboundFromAnotherDevice) recipient else currentUserId
+                envelopeSenderId = if (record.isOutboundFromAnotherDevice) currentUserId else record.sender,
+                envelopeRecipientId = if (record.isOutboundFromAnotherDevice) record.recipient else currentUserId
             )
 
             isDecryptionError = decryptedResult.trustStatus == DecryptionTrustStatus.CORRUPT_PAYLOAD ||
@@ -443,7 +515,7 @@ class SyncManager(
             // MISSING_KEY is transient (peer key not cached, network blip): do NOT persist
             // a stub row — the next sync pass will re-fetch the key and decrypt properly.
             if (decryptedResult.trustStatus == DecryptionTrustStatus.MISSING_KEY) {
-                return@withContext false
+                return null
             }
 
             // TOFU: the served key differs from the pinned one. Verification above used
@@ -476,124 +548,154 @@ class SyncManager(
                         resolvedText = json.optString("text", resolvedText)
                         resolvedAudioUrl = json.optString("audioUrl").takeIf { it.isNotBlank() }
                         if (json.has("duration")) resolvedDuration = json.optInt("duration")
-                        resolvedType = json.optString("type", type)
+                        resolvedType = json.optString("type", record.type)
                     }
                 } catch (_: Exception) {}
             }
         }
 
-        val messageStatus = when {
-            isDecryptionError || !signatureValid -> "integrity_error"
-            isMe -> "sent"
-            else -> "delivered"
+        return ResolvedContent(
+            isMe = isMe,
+            resolvedSender = resolvedSender,
+            resolvedText = resolvedText,
+            resolvedAudioUrl = resolvedAudioUrl,
+            resolvedDuration = resolvedDuration,
+            resolvedType = resolvedType,
+            signatureValid = signatureValid,
+            isDecryptionError = isDecryptionError
+        )
+    }
+
+    /**
+     * Phase 3: chat resolution — finds the existing chat for the classified record
+     * or creates the appropriate stub (Saved Messages / AI assistant / direct peer).
+     */
+    private suspend fun resolveOrCreateChat(record: IncomingRecord, content: ResolvedContent, currentUserId: String): ChatEntity? {
+        var chat = when {
+            record.isSelfMessage -> chatDao.getSavedMessagesChat(currentUserId)
+            record.isAiConversation -> chatDao.getAiAssistantChat(currentUserId)
+            else -> chatDao.getChatByConversationId(record.conversationId, currentUserId) ?: chatDao.getChatByRecipientId(record.peerId, currentUserId)
         }
 
-        // Synchronize local database insert under syncMutex
-        syncMutex.withLock {
-            val existing = (if (docId.isNotBlank()) chatDao.getMessageByServerId(docId, currentUserId) else null)
-                ?: (if (idempotencyKey.isNotBlank()) chatDao.getMessageByIdempotencyKey(idempotencyKey, currentUserId) else null)
-
-            if (existing != null) {
-                if (editedAt != null) {
-                    // Only overwrite a good local text with a GOOD decryption: a failed
-                    // pass (peer key rotated, cache cold) must never replace readable
-                    // content with a decryption-error stub.
-                    if (!isDecryptionError) {
-                        chatDao.updateMessageText(existing.id, resolvedText, System.currentTimeMillis(), currentUserId)
-                        chatDao.updateMessageStatus(existing.id, messageStatus, currentUserId)
-                        conversationRepository.updateChatPreview(existing.chatId, resolvedText, timeStr, System.currentTimeMillis())
-                    }
-                }
-                return@withContext true
+        if (chat == null) {
+            val newChat = when {
+                record.isSelfMessage -> ChatEntity(
+                    accountId = currentUserId,
+                    name = "Saved Messages",
+                    ava = "🔖",
+                    status = "",
+                    preview = if (content.isDecryptionError) "⚠️ Corrupted message" else content.resolvedText,
+                    time = record.timeStr,
+                    recipientId = "self",
+                    conversationId = "self_$currentUserId",
+                    conversationType = com.example.data.ConversationType.SAVED_MESSAGES.name
+                )
+                record.isAiConversation -> ChatEntity(
+                    accountId = currentUserId,
+                    name = "HexShard AI",
+                    ava = "HX",
+                    status = "online",
+                    preview = content.resolvedText,
+                    time = record.timeStr,
+                    recipientId = "ai_assistant",
+                    conversationId = "ai_$currentUserId",
+                    conversationType = com.example.data.ConversationType.AI_ASSISTANT.name
+                )
+                else -> ChatEntity(
+                    accountId = currentUserId,
+                    name = record.peerId,
+                    ava = record.peerId.take(2).uppercase(),
+                    status = "offline",
+                    preview = if (content.isDecryptionError) "⚠️ Corrupted message" else content.resolvedText,
+                    time = record.timeStr,
+                    recipientId = record.peerId,
+                    conversationId = record.conversationId,
+                    conversationType = com.example.data.ConversationType.DIRECT.name
+                )
             }
-
-            var chat = when {
-                isSelfMessage -> chatDao.getSavedMessagesChat(currentUserId)
-                isAiConversation -> chatDao.getAiAssistantChat(currentUserId)
-                else -> chatDao.getChatByConversationId(conversationId, currentUserId) ?: chatDao.getChatByRecipientId(peerId, currentUserId)
-            }
-
-            if (chat == null) {
-                val newChat = when {
-                    isSelfMessage -> ChatEntity(
-                        accountId = currentUserId,
-                        name = "Saved Messages",
-                        ava = "🔖",
-                        status = "",
-                        preview = if (isDecryptionError) "⚠️ Corrupted message" else resolvedText,
-                        time = timeStr,
-                        recipientId = "self",
-                        conversationId = "self_$currentUserId",
-                        conversationType = com.example.data.ConversationType.SAVED_MESSAGES.name
-                    )
-                    isAiConversation -> ChatEntity(
-                        accountId = currentUserId,
-                        name = "HexShard AI",
-                        ava = "HX",
-                        status = "online",
-                        preview = resolvedText,
-                        time = timeStr,
-                        recipientId = "ai_assistant",
-                        conversationId = "ai_$currentUserId",
-                        conversationType = com.example.data.ConversationType.AI_ASSISTANT.name
-                    )
-                    else -> ChatEntity(
-                        accountId = currentUserId,
-                        name = peerId,
-                        ava = peerId.take(2).uppercase(),
-                        status = "offline",
-                        preview = if (isDecryptionError) "⚠️ Corrupted message" else resolvedText,
-                        time = timeStr,
-                        recipientId = peerId,
-                        conversationId = conversationId,
-                        conversationType = com.example.data.ConversationType.DIRECT.name
-                    )
-                }
-                val newChatId = chatDao.insertChat(newChat).toInt()
-                chat = chatDao.getChatById(newChatId, currentUserId)
-            }
-            val resolvedChatId = chat?.id ?: 1
-
-            val msg = MessageEntity(
-                accountId = currentUserId,
-                chatId = resolvedChatId,
-                sender = if (isMe) "me" else resolvedSender,
-                text = resolvedText,
-                time = timeStr,
-                timestamp = System.currentTimeMillis(),
-                isMe = isMe,
-                isAttachment = resolvedType != "text",
-                type = resolvedType,
-                audioUrl = resolvedAudioUrl,
-                duration = resolvedDuration,
-                status = messageStatus,
-                idempotencyKey = idempotencyKey,
-                conversationId = conversationId,
-                serverMessageId = docId,
-                signatureValid = signatureValid,
-                encryptionVersion = 2,
-                personaId = personaId,
-                serverSequence = sequence
-            )
-            val rowId = chatDao.insertMessageIfNotExists(msg)
-            if (rowId > 0) {
-                val previewText = when (resolvedType) {
-                    "voice" -> "🎤 Voice message"
-                    "image" -> "📷 Photo"
-                    "location" -> "📍 Location"
-                    else -> if (isDecryptionError) "⚠️ Corrupted message" else resolvedText
-                }
-                chatDao.updateChatPreview(resolvedChatId, previewText, timeStr, System.currentTimeMillis(), currentUserId)
-                if (token.isNotBlank() && !isMe && !isDecryptionError && signatureValid && !isAiConversation) {
-                    markDeliveredOnRemote(docId, baseUrl, anonKey, token)
-                }
-                true
-            } else {
-                // Deduplicated insert (row already present): still a successful process
-                true
-            }
+            val newChatId = chatDao.insertChat(newChat).toInt()
+            chat = chatDao.getChatById(newChatId, currentUserId)
         }
-        true
+        return chat
+    }
+
+    /**
+     * Phase 4: persistence — deduplicated insert of the message row, chat preview
+     * refresh and delivery receipt. Returns true when the record is fully handled.
+     */
+    private suspend fun persistMessageRecord(
+        record: IncomingRecord,
+        content: ResolvedContent,
+        messageStatus: String,
+        currentUserId: String,
+        baseUrl: String,
+        anonKey: String,
+        token: String
+    ): Boolean {
+        val existing = (if (record.docId.isNotBlank()) chatDao.getMessageByServerId(record.docId, currentUserId) else null)
+            ?: (if (record.idempotencyKey.isNotBlank()) chatDao.getMessageByIdempotencyKey(record.idempotencyKey, currentUserId) else null)
+
+        if (existing != null) {
+            if (record.editedAt != null) {
+                // Only overwrite a good local text with a GOOD decryption: a failed
+                // pass (peer key rotated, cache cold) must never replace readable
+                // content with a decryption-error stub.
+                if (!content.isDecryptionError) {
+                    chatDao.updateMessageText(existing.id, content.resolvedText, System.currentTimeMillis(), currentUserId)
+                    chatDao.updateMessageStatus(existing.id, messageStatus, currentUserId)
+                    conversationRepository.updateChatPreview(existing.chatId, content.resolvedText, record.timeStr, System.currentTimeMillis())
+                }
+            }
+            return true
+        }
+
+        val chat = resolveOrCreateChat(record, content, currentUserId)
+        // Never persist under a default chat id: if the chat row cannot be read back
+        // after creation, skip the message (and log) instead of filing it into chat 1.
+        if (chat == null) {
+            Timber.w("Chat resolution failed for conversation ${record.conversationId} (server id ${record.docId}); skipping message persistence")
+            return true
+        }
+        val resolvedChatId = chat.id
+
+        val msg = MessageEntity(
+            accountId = currentUserId,
+            chatId = resolvedChatId,
+            sender = if (content.isMe) "me" else content.resolvedSender,
+            text = content.resolvedText,
+            time = record.timeStr,
+            timestamp = System.currentTimeMillis(),
+            isMe = content.isMe,
+            isAttachment = content.resolvedType != "text",
+            type = content.resolvedType,
+            audioUrl = content.resolvedAudioUrl,
+            duration = content.resolvedDuration,
+            status = messageStatus,
+            idempotencyKey = record.idempotencyKey,
+            conversationId = record.conversationId,
+            serverMessageId = record.docId,
+            signatureValid = content.signatureValid,
+            encryptionVersion = 2,
+            personaId = record.personaId,
+            serverSequence = record.sequence
+        )
+        val rowId = chatDao.insertMessageIfNotExists(msg)
+        if (rowId > 0) {
+            val previewText = when (content.resolvedType) {
+                "voice" -> "🎤 Voice message"
+                "image" -> "📷 Photo"
+                "location" -> "📍 Location"
+                else -> if (content.isDecryptionError) "⚠️ Corrupted message" else content.resolvedText
+            }
+            chatDao.updateChatPreview(resolvedChatId, previewText, record.timeStr, System.currentTimeMillis(), currentUserId)
+            if (token.isNotBlank() && !content.isMe && !content.isDecryptionError && content.signatureValid && !record.isAiConversation) {
+                markDeliveredOnRemote(record.docId, baseUrl, anonKey, token)
+            }
+            true
+        } else {
+            // Deduplicated insert (row already present): still a successful process
+            true
+        }
     }
 
     private suspend fun markDeliveredOnRemote(
@@ -607,19 +709,19 @@ class SyncManager(
             return@withContext
         }
         try {
-            val body = JSONObject().apply {
+            val ackBody = JSONObject().apply {
                 put("status", "delivered")
-            }.toString().toRequestBody(JSON_MEDIA)
+            }.toString()
 
-            val ackReq = Request.Builder()
-                .url("$baseUrl/rest/v1/messages?id=eq.$docId")
-                .header("apikey", anonKey)
-                .header("Authorization", "Bearer $token")
-                .header("Content-Type", "application/json")
-                .patch(body)
-                .build()
+            val ackReq = SupabaseHttp.jsonRequest(
+                "$baseUrl/rest/v1/messages?id=eq.$docId",
+                token,
+                anonKey,
+                "PATCH",
+                ackBody
+            ).build()
 
-            httpClient.newCall(ackReq).execute().close()
+            SupabaseHttp.client.newCall(ackReq).execute().close()
         } catch (e: Exception) {
             Timber.d("Failed to send delivery receipt: ${e.message}")
         }
@@ -632,15 +734,12 @@ class SyncManager(
             ?: return@withContext
 
         val url = "$baseUrl/rest/v1/messages?sender_id=eq.$currentUserId&select=id,status&order=id.desc&limit=30"
-        val req = Request.Builder()
-            .url(url)
-            .header("apikey", anonKey)
-            .header("Authorization", "Bearer $token")
+        val req = SupabaseHttp.request(url, token, anonKey)
             .get()
             .build()
 
         try {
-            val resp = httpClient.newCall(req).execute()
+            val resp = SupabaseHttp.client.newCall(req).execute()
             val body = resp.body?.string() ?: "[]"
             if (!resp.isSuccessful) return@withContext
 

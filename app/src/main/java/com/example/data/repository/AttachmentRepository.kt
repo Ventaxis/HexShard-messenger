@@ -4,12 +4,12 @@ import android.content.Context
 import android.net.Uri
 import com.example.crypto.E2ECryptoManager
 import com.example.data.SecurePrefsManager
+import com.example.network.SupabaseHttp
 import com.example.network.supabase.SupabaseConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSink
@@ -19,6 +19,7 @@ import timber.log.Timber
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.security.SecureRandom
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -32,7 +33,7 @@ class AttachmentRepository(
     private val context: Context?,
     private val userRepository: UserRepository
 ) {
-    private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
+    // Deliberately longer timeouts than SupabaseHttp.client: large media upload/download streams
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
@@ -120,135 +121,21 @@ class AttachmentRepository(
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(ctx)
 
-        // Substring matching ("ai") would misclassify real peers and encrypt to the wrong key
-        val isSelf = recipientId == "self" || recipientId == "me" || recipientId.isBlank() ||
-                recipientId == "ai_assistant" || recipientId.startsWith("ai_")
-        val sharedSecret = if (isSelf) {
-            E2ECryptoManager.deriveSelfStorageSecret(currentUserId)
-        } else {
-            val recPubKey = userRepository.getOrFetchUserPublicKey(recipientId)
-            if (recPubKey == null) {
-                Timber.w("Recipient public key not found for attachment upload")
-                return@withContext null
-            }
-            E2ECryptoManager.deriveSharedSecret(recPubKey, currentUserId)
-        }
-
-        val fileKey = if (idempotencyKey.isNotBlank()) {
-            E2ECryptoManager.deriveMessageKey(sharedSecret, idempotencyKey)
-        } else {
-            sharedSecret
-        }
-
-        // Generate 12-byte IV for GCM
-        val iv = ByteArray(12)
-        secureRandom.nextBytes(iv)
-
-        // Stream encrypt from URI to temp encrypted file
-        val tempEncryptedFile = File.createTempFile("enc_attach_", ".bin", ctx.cacheDir)
-        try {
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(fileKey, "AES"), GCMParameterSpec(128, iv))
-
-            ctx.contentResolver.openInputStream(inputUri)?.use { input ->
-                FileOutputStream(tempEncryptedFile).use { fileOut ->
-                    // Write IV first
-                    fileOut.write(iv)
-                    CipherOutputStream(fileOut, cipher).use { cipherOut ->
-                        val buffer = ByteArray(32 * 1024)
-                        var bytesRead: Int
-                        while (input.read(buffer).also { bytesRead = it } != -1) {
-                            cipherOut.write(buffer, 0, bytesRead)
-                        }
-                    }
-                }
-            }
-
-            // Stream upload to Supabase Storage
-            val objectPath = "$conversationId/${UUID.randomUUID()}.bin"
-            val url = "$baseUrl/storage/v1/object/$BUCKET_NAME/$objectPath"
-
-            val requestBody = object : RequestBody() {
-                override fun contentType() = "application/octet-stream".toMediaType()
-                override fun contentLength() = tempEncryptedFile.length()
-                override fun writeTo(sink: BufferedSink) {
-                    tempEncryptedFile.source().use { source ->
-                        sink.writeAll(source)
-                    }
-                }
-            }
-
-            val req = Request.Builder()
-                .url(url)
-                .header("apikey", anonKey)
-                .header("Authorization", "Bearer $accessToken")
-                .header("Content-Type", "application/octet-stream")
-                .post(requestBody)
-                .build()
-
-            val resp = httpClient.newCall(req).execute()
-            // Close eagerly: the body is never read, and unclosed responses leak pool connections
-            val uploadOk = resp.isSuccessful
-            resp.close()
-            if (uploadOk) {
-                // Register attachment metadata in attachments table
-                var metaSuccess = false
-                try {
-                    val attachBody = JSONObject().apply {
-                        put("id", UUID.randomUUID().toString())
-                        put("conversation_id", conversationId)
-                        put("message_id", idempotencyKey.ifBlank { null })
-                        put("uploader_id", currentUserId)
-                        put("owner_id", currentUserId)
-                        put("storage_path", objectPath)
-                        put("mime_type", fileType)
-                        put("size_bytes", tempEncryptedFile.length())
-                        put("size", tempEncryptedFile.length())
-                        put("encryption_version", 2)
-                    }.toString().toRequestBody(JSON_MEDIA)
-
-                    val attachReq = Request.Builder()
-                        .url("$baseUrl/rest/v1/attachments")
-                        .header("apikey", anonKey)
-                        .header("Authorization", "Bearer $accessToken")
-                        .header("Content-Type", "application/json")
-                        .post(attachBody)
-                        .build()
-
-                    val attachResp = httpClient.newCall(attachReq).execute()
-                    metaSuccess = attachResp.isSuccessful
-                    attachResp.close()
-                } catch (metaEx: Exception) {
-                    Timber.w(metaEx, "Failed to register attachment metadata")
-                }
-
-                if (!metaSuccess) {
-                    Timber.w("Attachment metadata insert failed. Rolling back Storage object.")
-                    try {
-                        val delReq = Request.Builder()
-                            .url(url)
-                            .header("apikey", anonKey)
-                            .header("Authorization", "Bearer $accessToken")
-                            .delete()
-                            .build()
-                        httpClient.newCall(delReq).execute().close()
-                    } catch (delEx: Exception) {
-                        Timber.w(delEx, "Failed to rollback Storage object: $objectPath")
-                    }
-                    return@withContext null
-                }
-
-                objectPath
-            } else {
-                Timber.w("Supabase storage upload failed: HTTP ${resp.code}")
-                null
-            }
-        } catch (e: Exception) {
-            Timber.e(e, "Error streaming attachment upload")
-            null
-        } finally {
-            tempEncryptedFile.delete()
-        }
+        encryptAndUploadStream(
+            ctx = ctx,
+            currentUserId = currentUserId,
+            accessToken = accessToken,
+            baseUrl = baseUrl,
+            anonKey = anonKey,
+            conversationId = conversationId,
+            recipientId = recipientId,
+            idempotencyKey = idempotencyKey,
+            mimeType = fileType,
+            tempPrefix = "enc_attach_",
+            objectName = "${UUID.randomUUID()}.bin",
+            source = { ctx.contentResolver.openInputStream(inputUri) },
+            logLabel = "attachment"
+        )
     }
 
     /**
@@ -270,6 +157,46 @@ class AttachmentRepository(
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(ctx)
 
+        encryptAndUploadStream(
+            ctx = ctx,
+            currentUserId = currentUserId,
+            accessToken = accessToken,
+            baseUrl = baseUrl,
+            anonKey = anonKey,
+            conversationId = conversationId,
+            recipientId = recipientId,
+            idempotencyKey = idempotencyKey,
+            mimeType = "audio/mp4",
+            tempPrefix = "enc_voice_",
+            objectName = "voice_${UUID.randomUUID()}.bin",
+            source = { FileInputStream(file) },
+            logLabel = "voice"
+        )
+    }
+
+    /**
+     * Shared encrypted-upload pipeline for attachments and voice notes: derives the
+     * conversation key, streams AES-256-GCM ciphertext (12-byte IV prefix) into a
+     * temp file, PUTs it to Storage and registers the attachments-table metadata
+     * row. On metadata failure the Storage object is rolled back so no orphaned
+     * ciphertext is left behind (uploadVoiceFile previously skipped this rollback).
+     * Returns the storage object path, or null when anything failed.
+     */
+    private suspend fun encryptAndUploadStream(
+        ctx: Context,
+        currentUserId: String,
+        accessToken: String,
+        baseUrl: String,
+        anonKey: String,
+        conversationId: String,
+        recipientId: String,
+        idempotencyKey: String,
+        mimeType: String,
+        tempPrefix: String,
+        objectName: String,
+        source: () -> InputStream?,
+        logLabel: String
+    ): String? {
         // Substring matching ("ai") would misclassify real peers and encrypt to the wrong key
         val isSelf = recipientId == "self" || recipientId == "me" || recipientId.isBlank() ||
                 recipientId == "ai_assistant" || recipientId.startsWith("ai_")
@@ -277,7 +204,10 @@ class AttachmentRepository(
             E2ECryptoManager.deriveSelfStorageSecret(currentUserId)
         } else {
             val recPubKey = userRepository.getOrFetchUserPublicKey(recipientId)
-                ?: return@withContext null
+            if (recPubKey == null) {
+                Timber.w("Recipient public key not found for $logLabel upload")
+                return null
+            }
             E2ECryptoManager.deriveSharedSecret(recPubKey, currentUserId)
         }
 
@@ -287,16 +217,19 @@ class AttachmentRepository(
             sharedSecret
         }
 
+        // Generate 12-byte IV for GCM
         val iv = ByteArray(12)
         secureRandom.nextBytes(iv)
 
-        val tempEncryptedFile = File.createTempFile("enc_voice_", ".bin", ctx.cacheDir)
+        // Stream encrypt from source to temp encrypted file
+        val tempEncryptedFile = File.createTempFile(tempPrefix, ".bin", ctx.cacheDir)
         try {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(fileKey, "AES"), GCMParameterSpec(128, iv))
 
-            FileInputStream(file).use { input ->
+            source()?.use { input ->
                 FileOutputStream(tempEncryptedFile).use { fileOut ->
+                    // Write IV first
                     fileOut.write(iv)
                     CipherOutputStream(fileOut, cipher).use { cipherOut ->
                         val buffer = ByteArray(32 * 1024)
@@ -308,23 +241,21 @@ class AttachmentRepository(
                 }
             }
 
-            val objectPath = "$conversationId/voice_${UUID.randomUUID()}.bin"
+            // Stream upload to Supabase Storage
+            val objectPath = "$conversationId/$objectName"
             val url = "$baseUrl/storage/v1/object/$BUCKET_NAME/$objectPath"
 
             val requestBody = object : RequestBody() {
                 override fun contentType() = "application/octet-stream".toMediaType()
                 override fun contentLength() = tempEncryptedFile.length()
                 override fun writeTo(sink: BufferedSink) {
-                    tempEncryptedFile.source().use { source ->
-                        sink.writeAll(source)
+                    tempEncryptedFile.source().use { src ->
+                        sink.writeAll(src)
                     }
                 }
             }
 
-            val req = Request.Builder()
-                .url(url)
-                .header("apikey", anonKey)
-                .header("Authorization", "Bearer $accessToken")
+            val req = SupabaseHttp.request(url, accessToken, anonKey)
                 .header("Content-Type", "application/octet-stream")
                 .post(requestBody)
                 .build()
@@ -334,41 +265,53 @@ class AttachmentRepository(
             val uploadOk = resp.isSuccessful
             resp.close()
             if (uploadOk) {
-                // Register voice metadata in attachments table
+                // Register attachment metadata in attachments table
+                var metaSuccess = false
                 try {
                     val attachBody = JSONObject().apply {
                         put("id", UUID.randomUUID().toString())
                         put("conversation_id", conversationId)
                         put("message_id", idempotencyKey.ifBlank { null })
-                        put("owner_id", currentUserId)
                         put("uploader_id", currentUserId)
+                        put("owner_id", currentUserId)
                         put("storage_path", objectPath)
-                        put("mime_type", "audio/mp4")
-                        put("size", tempEncryptedFile.length())
+                        put("mime_type", mimeType)
                         put("size_bytes", tempEncryptedFile.length())
+                        put("size", tempEncryptedFile.length())
                         put("encryption_version", 2)
-                    }.toString().toRequestBody(JSON_MEDIA)
+                    }.toString().toRequestBody(SupabaseHttp.JSON_MEDIA)
 
-                    val attachReq = Request.Builder()
-                        .url("$baseUrl/rest/v1/attachments")
-                        .header("apikey", anonKey)
-                        .header("Authorization", "Bearer $accessToken")
-                        .header("Content-Type", "application/json")
+                    val attachReq = SupabaseHttp.request("$baseUrl/rest/v1/attachments", accessToken, anonKey)
                         .post(attachBody)
                         .build()
 
-                    httpClient.newCall(attachReq).execute().close()
+                    val attachResp = httpClient.newCall(attachReq).execute()
+                    metaSuccess = attachResp.isSuccessful
+                    attachResp.close()
                 } catch (metaEx: Exception) {
-                    Timber.w(metaEx, "Failed to register voice metadata")
+                    Timber.w(metaEx, "Failed to register $logLabel metadata")
+                }
+
+                if (!metaSuccess) {
+                    Timber.w("$logLabel metadata insert failed. Rolling back Storage object.")
+                    try {
+                        val delReq = SupabaseHttp.request(url, accessToken, anonKey)
+                            .delete()
+                            .build()
+                        httpClient.newCall(delReq).execute().close()
+                    } catch (delEx: Exception) {
+                        Timber.w(delEx, "Failed to rollback Storage object: $objectPath")
+                    }
+                    return null
                 }
 
                 objectPath
             } else {
-                Timber.w("Voice upload failed: HTTP ${resp.code}")
+                Timber.w("Supabase $logLabel upload failed: HTTP ${resp.code}")
                 null
             }
         } catch (e: Exception) {
-            Timber.e(e, "Error streaming voice upload")
+            Timber.e(e, "Error streaming $logLabel upload")
             null
         } finally {
             tempEncryptedFile.delete()
@@ -411,10 +354,7 @@ class AttachmentRepository(
         }
 
         val url = "$baseUrl/storage/v1/object/$BUCKET_NAME/$cleanPath"
-        val req = Request.Builder()
-            .url(url)
-            .header("apikey", anonKey)
-            .header("Authorization", "Bearer $accessToken")
+        val req = SupabaseHttp.request(url, accessToken, anonKey)
             .get()
             .build()
 
@@ -464,25 +404,7 @@ class AttachmentRepository(
                 var decryptedOk = false
                 // Attempt decryption with primary derived key
                 try {
-                    FileInputStream(tempEncFile).use { fileIn ->
-                        val iv = ByteArray(12)
-                        val ivRead = fileIn.read(iv)
-                        if (ivRead == 12) {
-                            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-                            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(primaryKey, "AES"), GCMParameterSpec(128, iv))
-
-                            CipherInputStream(fileIn, cipher).use { cipherIn ->
-                                FileOutputStream(tempDecFile).use { decOut ->
-                                    val buf = ByteArray(32 * 1024)
-                                    var readBytes: Int
-                                    while (cipherIn.read(buf).also { readBytes = it } != -1) {
-                                        decOut.write(buf, 0, readBytes)
-                                    }
-                                }
-                            }
-                            decryptedOk = tempDecFile.exists() && tempDecFile.length() > 0
-                        }
-                    }
+                    decryptedOk = decryptAttachmentWithKey(tempEncFile, tempDecFile, primaryKey)
                 } catch (decEx: Exception) {
                     tempDecFile.delete()
                     Timber.w(decEx, "Primary key decryption failed, attempting legacy sharedSecret fallback")
@@ -491,25 +413,7 @@ class AttachmentRepository(
                 // Fallback for legacy attachments encrypted directly with sharedSecret
                 if (!decryptedOk && primaryKey !== sharedSecret) {
                     try {
-                        FileInputStream(tempEncFile).use { fileIn ->
-                            val iv = ByteArray(12)
-                            val ivRead = fileIn.read(iv)
-                            if (ivRead == 12) {
-                                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-                                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(sharedSecret, "AES"), GCMParameterSpec(128, iv))
-
-                                CipherInputStream(fileIn, cipher).use { cipherIn ->
-                                    FileOutputStream(tempDecFile).use { decOut ->
-                                        val buf = ByteArray(32 * 1024)
-                                        var readBytes: Int
-                                        while (cipherIn.read(buf).also { readBytes = it } != -1) {
-                                            decOut.write(buf, 0, readBytes)
-                                        }
-                                    }
-                                }
-                                decryptedOk = tempDecFile.exists() && tempDecFile.length() > 0
-                            }
-                        }
+                        decryptedOk = decryptAttachmentWithKey(tempEncFile, tempDecFile, sharedSecret)
                     } catch (fallbackEx: Exception) {
                         tempDecFile.delete()
                         Timber.e(fallbackEx, "Attachment decryption fallback failed")
@@ -551,6 +455,32 @@ class AttachmentRepository(
         } catch (e: Exception) {
             Timber.e(e, "Failed to read downloaded attachment bytes")
             null
+        }
+    }
+
+    /**
+     * Streams [tempEncFile] (12-byte IV prefix + AES-256-GCM ciphertext) into
+     * [tempDecFile] using [key]. Returns true when the decrypted output is
+     * non-empty; cipher/IO failures propagate to the caller for logging.
+     */
+    private fun decryptAttachmentWithKey(tempEncFile: File, tempDecFile: File, key: ByteArray): Boolean {
+        FileInputStream(tempEncFile).use { fileIn ->
+            val iv = ByteArray(12)
+            val ivRead = fileIn.read(iv)
+            if (ivRead != 12) return false
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
+
+            CipherInputStream(fileIn, cipher).use { cipherIn ->
+                FileOutputStream(tempDecFile).use { decOut ->
+                    val buf = ByteArray(32 * 1024)
+                    var readBytes: Int
+                    while (cipherIn.read(buf).also { readBytes = it } != -1) {
+                        decOut.write(buf, 0, readBytes)
+                    }
+                }
+            }
+            return tempDecFile.exists() && tempDecFile.length() > 0
         }
     }
 }

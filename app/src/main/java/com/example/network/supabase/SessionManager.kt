@@ -42,8 +42,6 @@ data class SessionRecord(
     val virtualNumber: String = ""
 )
 
-typealias SessionData = SessionRecord
-
 object SessionManager {
 
     private val _authState = MutableStateFlow(AuthState.UNKNOWN)
@@ -69,13 +67,56 @@ object SessionManager {
 
     fun nextGeneration(): Long = sessionGeneration.incrementAndGet()
 
+    /**
+     * Single commit point for a freshly built session: publishes the SessionRecord
+     * (username / Telegram / virtual-number are read authoritatively from secure
+     * prefs) and transitions the auth state.
+     */
+    private fun commitSession(
+        context: Context,
+        userId: String,
+        accessToken: String,
+        refreshToken: String,
+        generation: Long,
+        state: AuthState
+    ) {
+        val session = SessionRecord(
+            userId = userId,
+            username = SecurePrefsManager.getUsername(context),
+            accessToken = accessToken,
+            refreshToken = refreshToken,
+            generation = generation,
+            isTelegramVerified = SecurePrefsManager.isTelegramVerified(context),
+            virtualNumber = SecurePrefsManager.getPrivateVirtualNumber(context, userId)
+        )
+        _currentSession.value = session
+        _authState.value = state
+    }
+
+    /**
+     * Normalizes the server-side hex_number metadata (raw 8 digits or legacy
+     * +999-prefixed 11-digit form) and persists it for [userId] when valid.
+     * Returns the clean 8-digit number, or null when absent/malformed.
+     */
+    private fun parseHexNumber(userMeta: JSONObject?, context: Context, userId: String): String? {
+        val metaHex = userMeta?.optString("hex_number", userMeta.optString("virtual_number", "")) ?: ""
+        var cleanMeta = metaHex.filter { it.isDigit() }
+        if (cleanMeta.length == 11 && cleanMeta.startsWith("999")) {
+            cleanMeta = cleanMeta.substring(3)
+        }
+        if (cleanMeta.length == 8) {
+            SecurePrefsManager.setPrivateVirtualNumber(context, cleanMeta, userId)
+            return cleanMeta
+        }
+        return null
+    }
+
     suspend fun checkSession(context: Context): AuthState = withContext(Dispatchers.IO) {
         _authState.value = AuthState.CHECKING
 
         val accessToken = SecurePrefsManager.getSupabaseAccessToken(context)
         val refreshToken = SecurePrefsManager.getSupabaseRefreshToken(context)
         val userId = SecurePrefsManager.getUserId(context)
-        val username = SecurePrefsManager.getUsername(context)
 
         if (accessToken.isBlank() || userId.isBlank()) {
             _currentSession.value = null
@@ -88,19 +129,7 @@ object SessionManager {
         val anonKey = SupabaseConfig.getAnonKey(context)
         if (anonKey.isBlank()) {
             Timber.w("Supabase anon key not configured; reporting CONFIGURATION_ERROR")
-            val vNum = SecurePrefsManager.getPrivateVirtualNumber(context, userId)
-            val isTg = SecurePrefsManager.isTelegramVerified(context)
-            val session = SessionRecord(
-                userId = userId,
-                username = username,
-                accessToken = accessToken,
-                refreshToken = refreshToken,
-                generation = sessionGeneration.get(),
-                isTelegramVerified = isTg,
-                virtualNumber = vNum
-            )
-            _currentSession.value = session
-            _authState.value = AuthState.CONFIGURATION_ERROR
+            commitSession(context, userId, accessToken, refreshToken, sessionGeneration.get(), AuthState.CONFIGURATION_ERROR)
             return@withContext AuthState.CONFIGURATION_ERROR
         }
 
@@ -137,48 +166,16 @@ object SessionManager {
                     }
 
                     // Restore authoritatively saved virtual number from Supabase user_metadata if available
-                    val userMeta = userObj?.optJSONObject("user_metadata")
-                    val metaHex = userMeta?.optString("hex_number", userMeta.optString("virtual_number", "")) ?: ""
-                    var cleanMeta = metaHex.filter { it.isDigit() }
-                    if (cleanMeta.length == 11 && cleanMeta.startsWith("999")) {
-                        cleanMeta = cleanMeta.substring(3)
-                    }
-                    if (cleanMeta.length == 8) {
-                        SecurePrefsManager.setPrivateVirtualNumber(context, cleanMeta, userId)
-                    }
+                    parseHexNumber(userObj?.optJSONObject("user_metadata"), context, userId)
 
-                    val vNum = SecurePrefsManager.getPrivateVirtualNumber(context, userId)
-                    val isTg = SecurePrefsManager.isTelegramVerified(context)
-                    val session = SessionRecord(
-                        userId = userId,
-                        username = username,
-                        accessToken = accessToken,
-                        refreshToken = refreshToken,
-                        generation = currentGen,
-                        isTelegramVerified = isTg,
-                        virtualNumber = vNum
-                    )
-                    _currentSession.value = session
-                    _authState.value = AuthState.AUTHENTICATED
+                    commitSession(context, userId, accessToken, refreshToken, currentGen, AuthState.AUTHENTICATED)
                     return@withContext AuthState.AUTHENTICATED
                 }
                 code == 401 -> {
                     val errLower = body.lowercase()
                     if (errLower.contains("invalid api key") || errLower.contains("invalid apikey")) {
                         Timber.w("Supabase public API key rejected by server (401: $body). Preserving user session as CONFIGURATION_ERROR.")
-                        val vNum = SecurePrefsManager.getPrivateVirtualNumber(context, userId)
-                        val isTg = SecurePrefsManager.isTelegramVerified(context)
-                        val session = SessionRecord(
-                            userId = userId,
-                            username = username,
-                            accessToken = accessToken,
-                            refreshToken = refreshToken,
-                            generation = currentGen,
-                            isTelegramVerified = isTg,
-                            virtualNumber = vNum
-                        )
-                        _currentSession.value = session
-                        _authState.value = AuthState.CONFIGURATION_ERROR
+                        commitSession(context, userId, accessToken, refreshToken, currentGen, AuthState.CONFIGURATION_ERROR)
                         return@withContext AuthState.CONFIGURATION_ERROR
                     }
                     // Token expired - attempt single-flight token refresh
@@ -193,19 +190,7 @@ object SessionManager {
                 code == 408 || code == 429 || code in 500..599 -> {
                     // VPN / transient rate-limit / server 5xx: NEVER wipe session or tokens!
                     Timber.w("Supabase returned status $code ($body). Preserving session as AUTHENTICATED_OFFLINE_CACHED.")
-                    val vNum = SecurePrefsManager.getPrivateVirtualNumber(context, userId)
-                    val isTg = SecurePrefsManager.isTelegramVerified(context)
-                    val session = SessionRecord(
-                        userId = userId,
-                        username = username,
-                        accessToken = accessToken,
-                        refreshToken = refreshToken,
-                        generation = currentGen,
-                        isTelegramVerified = isTg,
-                        virtualNumber = vNum
-                    )
-                    _currentSession.value = session
-                    _authState.value = AuthState.AUTHENTICATED_OFFLINE_CACHED
+                    commitSession(context, userId, accessToken, refreshToken, currentGen, AuthState.AUTHENTICATED_OFFLINE_CACHED)
                     return@withContext AuthState.AUTHENTICATED_OFFLINE_CACHED
                 }
                 code == 403 -> {
@@ -232,19 +217,7 @@ object SessionManager {
             }
         } catch (e: Exception) {
             Timber.w(e, "Network exception during Supabase session validation. Using AUTHENTICATED_OFFLINE_CACHED.")
-            val vNum = SecurePrefsManager.getPrivateVirtualNumber(context, userId)
-            val isTg = SecurePrefsManager.isTelegramVerified(context)
-            val session = SessionRecord(
-                userId = userId,
-                username = username,
-                accessToken = accessToken,
-                refreshToken = refreshToken,
-                generation = currentGen,
-                isTelegramVerified = isTg,
-                virtualNumber = vNum
-            )
-            _currentSession.value = session
-            _authState.value = AuthState.AUTHENTICATED_OFFLINE_CACHED
+            commitSession(context, userId, accessToken, refreshToken, currentGen, AuthState.AUTHENTICATED_OFFLINE_CACHED)
             return@withContext AuthState.AUTHENTICATED_OFFLINE_CACHED
         }
     }
@@ -257,20 +230,14 @@ object SessionManager {
             val currentStoredAccess = SecurePrefsManager.getSupabaseAccessToken(context)
             val currentStoredRefresh = SecurePrefsManager.getSupabaseRefreshToken(context)
             if (currentStoredRefresh.isNotBlank() && currentStoredRefresh != refreshToken && currentStoredAccess.isNotBlank()) {
-                val uid = SecurePrefsManager.getUserId(context)
-                val vNum = SecurePrefsManager.getPrivateVirtualNumber(context, uid)
-                val isTg = SecurePrefsManager.isTelegramVerified(context)
-                val session = SessionRecord(
-                    userId = uid,
-                    username = SecurePrefsManager.getUsername(context),
-                    accessToken = currentStoredAccess,
-                    refreshToken = currentStoredRefresh,
-                    generation = requestGen,
-                    isTelegramVerified = isTg,
-                    virtualNumber = vNum
+                commitSession(
+                    context,
+                    SecurePrefsManager.getUserId(context),
+                    currentStoredAccess,
+                    currentStoredRefresh,
+                    requestGen,
+                    AuthState.AUTHENTICATED
                 )
-                _currentSession.value = session
-                _authState.value = AuthState.AUTHENTICATED
                 return@withLock AuthState.AUTHENTICATED
             }
 
@@ -315,31 +282,11 @@ object SessionManager {
                     val userObj = json.optJSONObject("user")
                     val uid = userObj?.optString("id") ?: SecurePrefsManager.getUserId(context)
 
-                    val userMeta = userObj?.optJSONObject("user_metadata")
-                    val metaHex = userMeta?.optString("hex_number", userMeta.optString("virtual_number", "")) ?: ""
-                    var cleanMeta = metaHex.filter { it.isDigit() }
-                    if (cleanMeta.length == 11 && cleanMeta.startsWith("999")) {
-                        cleanMeta = cleanMeta.substring(3)
-                    }
-                    if (cleanMeta.length == 8) {
-                        SecurePrefsManager.setPrivateVirtualNumber(context, cleanMeta, uid)
-                    }
+                    parseHexNumber(userObj?.optJSONObject("user_metadata"), context, uid)
 
                     if (newAccess.isNotBlank()) {
                         SecurePrefsManager.saveSupabaseTokens(context, newAccess, finalRefresh)
-                        val vNum = SecurePrefsManager.getPrivateVirtualNumber(context, uid)
-                        val isTg = SecurePrefsManager.isTelegramVerified(context)
-                        val session = SessionRecord(
-                            userId = uid,
-                            username = SecurePrefsManager.getUsername(context),
-                            accessToken = newAccess,
-                            refreshToken = finalRefresh,
-                            generation = requestGen,
-                            isTelegramVerified = isTg,
-                            virtualNumber = vNum
-                        )
-                        _currentSession.value = session
-                        _authState.value = AuthState.AUTHENTICATED
+                        commitSession(context, uid, newAccess, finalRefresh, requestGen, AuthState.AUTHENTICATED)
                         return@withLock AuthState.AUTHENTICATED
                     }
                 } else if (code == 400 || code == 401) {
@@ -462,6 +409,10 @@ object SessionManager {
         _authState.value = AuthState.UNAUTHENTICATED
     }
 
+    /**
+     * Kept as an alias: still referenced by SupabaseAuthService.deleteAccount and
+     * the unit tests (AuthServiceTest, VirtualNumberIdentityTest).
+     */
     fun clearSession(context: Context) {
         clearSessionHard(context)
     }

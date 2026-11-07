@@ -8,6 +8,7 @@ import com.example.data.database.MessageEntity
 import com.example.data.database.OutboxEntity
 import com.example.data.database.isAiConversation
 import com.example.data.database.isSelfConversation
+import com.example.network.SupabaseHttp
 import com.example.network.supabase.SupabaseConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -16,14 +17,9 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import timber.log.Timber
 import java.util.Base64
-import java.util.concurrent.TimeUnit
 
 sealed class RemoteMessageSendResult {
     data class Success(
@@ -48,14 +44,6 @@ class MessageRepository(
     private val conversationRepository: ConversationRepository,
     private val context: Context? = null
 ) {
-    private val httpClient: OkHttpClient by lazy {
-        OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .writeTimeout(20, TimeUnit.SECONDS)
-            .build()
-    }
-    private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
     private val messageWriteLimiter = Semaphore(10)
     private val backgroundScope = CoroutineScope(Dispatchers.IO)
 
@@ -117,14 +105,14 @@ class MessageRepository(
                         put("p_conversation_id", chat.conversationId)
                         put("p_sequence", maxSeq)
                     }
-                    val req = Request.Builder()
-                        .url("$baseUrl/rest/v1/rpc/mark_conversation_read")
-                        .header("apikey", anonKey)
-                        .header("Authorization", "Bearer $token")
-                        .header("Content-Type", "application/json")
-                        .post(payload.toString().toRequestBody(JSON_MEDIA))
-                        .build()
-                    httpClient.newCall(req).execute().close()
+                    val req = SupabaseHttp.jsonRequest(
+                        "$baseUrl/rest/v1/rpc/mark_conversation_read",
+                        token,
+                        anonKey,
+                        "POST",
+                        payload.toString()
+                    ).build()
+                    SupabaseHttp.client.newCall(req).execute().close()
                 } catch (e: Exception) {
                     Timber.w(e, "markAllAsRead server RPC failed")
                 }
@@ -174,14 +162,14 @@ class MessageRepository(
                     put("p_payload", encrypted.base64Payload)
                     put("p_signature", encrypted.base64Signature)
                 }
-                val req = Request.Builder()
-                    .url("$baseUrl/rest/v1/rpc/edit_message")
-                    .header("apikey", anonKey)
-                    .header("Authorization", "Bearer $token")
-                    .header("Content-Type", "application/json")
-                    .post(payload.toString().toRequestBody(JSON_MEDIA))
-                    .build()
-                val resp = httpClient.newCall(req).execute()
+                val req = SupabaseHttp.jsonRequest(
+                    "$baseUrl/rest/v1/rpc/edit_message",
+                    token,
+                    anonKey,
+                    "POST",
+                    payload.toString()
+                ).build()
+                val resp = SupabaseHttp.client.newCall(req).execute()
                 val ok = resp.isSuccessful
                 val bodyStr = resp.body?.string().orEmpty()
                 resp.close()
@@ -222,14 +210,14 @@ class MessageRepository(
                 val payload = JSONObject().apply {
                     put("p_message_id", serverId)
                 }
-                val req = Request.Builder()
-                    .url("$baseUrl/rest/v1/rpc/delete_message")
-                    .header("apikey", anonKey)
-                    .header("Authorization", "Bearer $token")
-                    .header("Content-Type", "application/json")
-                    .post(payload.toString().toRequestBody(JSON_MEDIA))
-                    .build()
-                val resp = httpClient.newCall(req).execute()
+                val req = SupabaseHttp.jsonRequest(
+                    "$baseUrl/rest/v1/rpc/delete_message",
+                    token,
+                    anonKey,
+                    "POST",
+                    payload.toString()
+                ).build()
+                val resp = SupabaseHttp.client.newCall(req).execute()
                 val ok = resp.isSuccessful
                 val bodyStr = resp.body?.string().orEmpty()
                 resp.close()
@@ -283,14 +271,14 @@ class MessageRepository(
                 put("p_persona_id", personaId)
                 put("p_time_str", timeStr)
             }
-            val req = Request.Builder()
-                .url("$baseUrl/rest/v1/rpc/send_ai_message")
-                .header("apikey", anonKey)
-                .header("Authorization", "Bearer $token")
-                .header("Content-Type", "application/json")
-                .post(payload.toString().toRequestBody(JSON_MEDIA))
-                .build()
-            val resp = httpClient.newCall(req).execute()
+            val req = SupabaseHttp.jsonRequest(
+                "$baseUrl/rest/v1/rpc/send_ai_message",
+                token,
+                anonKey,
+                "POST",
+                payload.toString()
+            ).build()
+            val resp = SupabaseHttp.client.newCall(req).execute()
             val ok = resp.isSuccessful
             resp.close()
             ok
@@ -299,6 +287,51 @@ class MessageRepository(
             false
         }
     }
+
+    /**
+     * Single construction point for outgoing MessageEntity rows: the waiting-key
+     * path and the encrypted-send path build the same entity and differ only in
+     * status/iv/encryptionVersion/serverMessageId (see call sites).
+     */
+    private fun buildOutgoingMessage(
+        accountId: String,
+        chatId: Int,
+        sender: String,
+        isMe: Boolean,
+        text: String,
+        timeStr: String,
+        isAttachment: Boolean,
+        type: String,
+        audioUrl: String?,
+        duration: Int?,
+        idempotencyKey: String,
+        conversationId: String,
+        personaId: String?,
+        status: String,
+        iv: String,
+        encryptionVersion: Int,
+        serverMessageId: String
+    ): MessageEntity = MessageEntity(
+        accountId = accountId,
+        chatId = chatId,
+        sender = if (isMe) accountId else sender,
+        text = text,
+        time = timeStr,
+        timestamp = System.currentTimeMillis(),
+        isMe = isMe,
+        isAttachment = isAttachment,
+        type = type,
+        audioUrl = audioUrl,
+        duration = duration,
+        status = status,
+        iv = iv,
+        encryptionVersion = encryptionVersion,
+        idempotencyKey = idempotencyKey,
+        conversationId = conversationId,
+        serverMessageId = serverMessageId,
+        signatureValid = true,
+        personaId = personaId
+    )
 
     suspend fun sendMessage(
         chatId: Int,
@@ -352,26 +385,24 @@ class MessageRepository(
             } catch (peerKeyEx: PeerKeyUnavailableException) {
                 // Requirement 6: Durable Outbox entry with status WAITING_FOR_PEER_KEY
                 // Plaintext is kept local in SQLCipher vault; no encryption or sending occurs until peer key is verified
-                val message = MessageEntity(
+                val message = buildOutgoingMessage(
                     accountId = currentUserId,
                     chatId = chatId,
-                    sender = if (isMe) currentUserId else sender,
-                    text = text,
-                    time = timeStr,
-                    timestamp = System.currentTimeMillis(),
+                    sender = sender,
                     isMe = isMe,
+                    text = text,
+                    timeStr = timeStr,
                     isAttachment = isAttachment,
                     type = type,
                     audioUrl = audioUrl,
                     duration = duration,
+                    idempotencyKey = idempotencyKey,
+                    conversationId = conversationId,
+                    personaId = resolvedPersona,
                     status = "waiting_key",
                     iv = "",
                     encryptionVersion = 2,
-                    idempotencyKey = idempotencyKey,
-                    conversationId = conversationId,
-                    serverMessageId = idempotencyKey,
-                    signatureValid = true,
-                    personaId = resolvedPersona
+                    serverMessageId = idempotencyKey
                 )
                 val messageId: Long
                 val outboxRowId: Long
@@ -427,24 +458,14 @@ class MessageRepository(
                                     timeStr = timeStr,
                                     personaId = resolvedPersona
                                 )
-                                when (sentRes) {
-                                    is RemoteMessageSendResult.Success -> {
-                                        chatDao.updateMessageServerInfoByIdempotencyKey(
-                                            idempotencyKey = idempotencyKey,
-                                            serverId = sentRes.serverMessageId,
-                                            sequence = sentRes.sequence,
-                                            status = "sent",
-                                            accountId = currentUserId
-                                        )
-                                        chatDao.deleteOutboxByIdempotencyKey(idempotencyKey, currentUserId)
-                                        updateMessageStatus(messageId.toInt(), "sent", currentUserId)
-                                    }
-                                    is RemoteMessageSendResult.Failure -> {
-                                        val newStat = if (sentRes.isRetryable) "pending" else "failed"
-                                        chatDao.updateOutboxAttempt(outboxRowId, newStat, System.currentTimeMillis(), sentRes.errorMessage, currentUserId)
-                                        updateMessageStatus(messageId.toInt(), if (sentRes.isRetryable) "pending" else "error", currentUserId)
-                                    }
-                                }
+                                applySendResult(
+                                    sentRes,
+                                    idempotencyKey,
+                                    messageId.toInt(),
+                                    currentUserId,
+                                    outboxRowId,
+                                    outboxFailureStatus = "failed"
+                                )
                             }
                         } catch (resEx: Exception) {
                             Timber.d("Peer key deferred resolution: ${resEx.message}")
@@ -464,28 +485,26 @@ class MessageRepository(
                 else -> "sending"
             }
 
-            val message = MessageEntity(
+            val message = buildOutgoingMessage(
                 accountId = currentUserId,
                 chatId = chatId,
-                sender = if (isMe) currentUserId else sender,
-                text = text,
-                time = timeStr,
-                timestamp = System.currentTimeMillis(),
+                sender = sender,
                 isMe = isMe,
+                text = text,
+                timeStr = timeStr,
                 isAttachment = isAttachment,
                 type = type,
                 audioUrl = audioUrl,
                 duration = duration,
+                idempotencyKey = idempotencyKey,
+                conversationId = conversationId,
+                personaId = resolvedPersona,
                 status = initialStatus,
                 iv = encryptedPayload.iv,
                 encryptionVersion = 3,
-                idempotencyKey = idempotencyKey,
-                conversationId = conversationId,
                 // Server message id stays blank until the server confirms; callers fall
                 // back to idempotencyKey where a client key is acceptable.
-                serverMessageId = "",
-                signatureValid = true,
-                personaId = resolvedPersona
+                serverMessageId = ""
             )
             val messageId: Long
             val outboxRowId: Long
@@ -535,24 +554,13 @@ class MessageRepository(
                                 timeStr = timeStr,
                                 personaId = resolvedPersona
                             )
-                            when (sendResult) {
-                                is RemoteMessageSendResult.Success -> {
-                                    chatDao.updateMessageServerInfoByIdempotencyKey(
-                                        idempotencyKey = idempotencyKey,
-                                        serverId = sendResult.serverMessageId,
-                                        sequence = sendResult.sequence,
-                                        status = "sent",
-                                        accountId = currentUserId
-                                    )
-                                    chatDao.deleteOutboxByIdempotencyKey(idempotencyKey, currentUserId)
-                                    updateMessageStatus(messageId.toInt(), "sent", currentUserId)
-                                }
-                                is RemoteMessageSendResult.Failure -> {
-                                    val nextStatus = if (sendResult.isRetryable) "pending" else "error"
-                                    chatDao.updateOutboxAttempt(outboxRowId, nextStatus, System.currentTimeMillis(), sendResult.errorMessage, currentUserId)
-                                    updateMessageStatus(messageId.toInt(), nextStatus, currentUserId)
-                                }
-                            }
+                            applySendResult(
+                                sendResult,
+                                idempotencyKey,
+                                messageId.toInt(),
+                                currentUserId,
+                                outboxRowId
+                            )
                         } catch (netEx: Exception) {
                             Timber.e(netEx, "Supabase message send network failure, will retry via outbox")
                             chatDao.updateOutboxAttempt(outboxRowId, "pending", System.currentTimeMillis(), netEx.message ?: "Network error", currentUserId)
@@ -604,21 +612,51 @@ class MessageRepository(
                 type = existingOutbox.type,
                 timeStr = existingOutbox.timeStr
             )
-            when (sendRes) {
-                is RemoteMessageSendResult.Success -> {
-                    chatDao.updateMessageServerInfoByIdempotencyKey(
-                        idempotencyKey = existingOutbox.idempotencyKey,
-                        serverId = sendRes.serverMessageId,
-                        sequence = sendRes.sequence,
-                        status = "sent",
-                        accountId = currentUserId
+            applySendResult(sendRes, existingOutbox.idempotencyKey, msgId, currentUserId)
+        }
+    }
+
+    /**
+     * Shared send-result bookkeeping for the durable outbox: on success the outbox
+     * row is deleted and the message is marked "sent"; on failure the outbox row
+     * records the attempt and the message moves to "pending"/"error" depending on
+     * retryability. [outboxFailureStatus] differs per call site ("failed" for the
+     * waiting-key resolution path, "error" for the generic outbox) and is preserved
+     * as-is. Call sites without a durable outbox row (retryMessage) pass
+     * [outboxRowId] < 0: nothing is written to the outbox and the message always
+     * lands on "error" since there is no retry vehicle behind it.
+     */
+    private suspend fun applySendResult(
+        result: RemoteMessageSendResult,
+        idempotencyKey: String,
+        messageId: Int,
+        accountId: String,
+        outboxRowId: Long = -1L,
+        outboxFailureStatus: String = "error"
+    ) {
+        when (result) {
+            is RemoteMessageSendResult.Success -> {
+                chatDao.updateMessageServerInfoByIdempotencyKey(
+                    idempotencyKey = idempotencyKey,
+                    serverId = result.serverMessageId,
+                    sequence = result.sequence,
+                    status = "sent",
+                    accountId = accountId
+                )
+                chatDao.deleteOutboxByIdempotencyKey(idempotencyKey, accountId)
+                updateMessageStatus(messageId, "sent", accountId)
+            }
+            is RemoteMessageSendResult.Failure -> {
+                if (outboxRowId >= 0) {
+                    chatDao.updateOutboxAttempt(
+                        outboxRowId,
+                        if (result.isRetryable) "pending" else outboxFailureStatus,
+                        System.currentTimeMillis(),
+                        result.errorMessage,
+                        accountId
                     )
-                    chatDao.deleteOutboxByIdempotencyKey(existingOutbox.idempotencyKey, currentUserId)
-                    updateMessageStatus(msgId, "sent", currentUserId)
                 }
-                is RemoteMessageSendResult.Failure -> {
-                    updateMessageStatus(msgId, "error", currentUserId)
-                }
+                updateMessageStatus(messageId, if (result.isRetryable && outboxRowId >= 0) "pending" else "error", accountId)
             }
         }
     }
@@ -665,15 +703,15 @@ class MessageRepository(
                 put("p_encryption_version", 3)
             }
 
-            val rpcReq = Request.Builder()
-                .url("$baseUrl/rest/v1/rpc/send_message_idempotent")
-                .header("apikey", anonKey)
-                .header("Authorization", "Bearer $accessToken")
-                .header("Content-Type", "application/json")
-                .post(payload.toString().toRequestBody(JSON_MEDIA))
-                .build()
+            val rpcReq = SupabaseHttp.jsonRequest(
+                "$baseUrl/rest/v1/rpc/send_message_idempotent",
+                accessToken,
+                anonKey,
+                "POST",
+                payload.toString()
+            ).build()
 
-            var rpcResp = httpClient.newCall(rpcReq).execute()
+            var rpcResp = SupabaseHttp.client.newCall(rpcReq).execute()
             var isSuccess = rpcResp.isSuccessful
             val initialCode = rpcResp.code
             var respBody = rpcResp.body?.string().orEmpty()
@@ -691,7 +729,7 @@ class MessageRepository(
                             val retryReq = rpcReq.newBuilder()
                                 .header("Authorization", "Bearer $newAccess")
                                 .build()
-                            val retryResp = httpClient.newCall(retryReq).execute()
+                            val retryResp = SupabaseHttp.client.newCall(retryReq).execute()
                             isSuccess = retryResp.isSuccessful
                             respBody = retryResp.body?.string().orEmpty()
                             retryResp.close()

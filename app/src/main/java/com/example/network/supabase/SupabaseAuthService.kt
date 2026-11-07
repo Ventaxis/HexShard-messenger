@@ -5,18 +5,16 @@ import com.example.crypto.E2ECryptoManager
 import com.example.data.AccountType
 import com.example.data.SecurePrefsManager
 import com.example.data.database.AppDatabase
+import com.example.network.SupabaseHttp
 import com.example.util.VirtualNumberGenerator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import timber.log.Timber
 import java.util.Base64
-import java.util.concurrent.TimeUnit
 import com.example.ui.LocalizationManager
 import com.example.ui.AppLanguage
 import com.example.ui.EnglishStrings
@@ -55,16 +53,6 @@ sealed class DeleteAccountResult {
 }
 
 object SupabaseAuthService {
-
-    private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
-
-    private val httpClient: OkHttpClient by lazy {
-        OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .writeTimeout(20, TimeUnit.SECONDS)
-            .build()
-    }
 
     fun validateUsername(username: String): String? {
         val clean = username.trim().removePrefix("@")
@@ -181,16 +169,17 @@ object SupabaseAuthService {
             })
         }
 
-        val request = Request.Builder()
-            .url("$baseUrl/auth/v1/signup")
-            .header("apikey", anonKey)
-            .header("Content-Type", "application/json")
-            .post(signupPayload.toString().toRequestBody(JSON_MEDIA))
-            .build()
+        val request = SupabaseHttp.jsonRequest(
+            "$baseUrl/auth/v1/signup",
+            null,
+            anonKey,
+            "POST",
+            signupPayload.toString()
+        ).build()
 
         try {
             Timber.i("Supabase signUp attempt for @$cleanUsername ($normalized@hexshard.app)")
-            val response = httpClient.newCall(request).execute()
+            val response = SupabaseHttp.client.newCall(request).execute()
             val respBody = response.body?.string() ?: ""
 
             if (!response.isSuccessful) {
@@ -269,8 +258,6 @@ object SupabaseAuthService {
                 Base64.getEncoder().encodeToString(E2ECryptoManager.getMySigningPublicKey(accountId).encoded)
             } catch (_: Exception) { "" }
 
-            val authHeader = "Bearer $accessToken"
-
             // 1. Create public profile row in profiles table
             try {
                 val profilePayload = JSONObject().apply {
@@ -280,14 +267,11 @@ object SupabaseAuthService {
                     put("normalized_username", normalized)
                     put("public_key", identityPubKey)
                 }
-                var profReq = Request.Builder()
-                    .url("$baseUrl/rest/v1/profiles")
-                    .header("apikey", anonKey)
-                    .header("Authorization", authHeader)
+                var profReq = SupabaseHttp.request("$baseUrl/rest/v1/profiles", accessToken, anonKey)
                     .header("Prefer", "resolution=merge-duplicates")
-                    .post(profilePayload.toString().toRequestBody(JSON_MEDIA))
+                    .post(profilePayload.toString().toRequestBody(SupabaseHttp.JSON_MEDIA))
                     .build()
-                var profResp = httpClient.newCall(profReq).execute()
+                var profResp = SupabaseHttp.client.newCall(profReq).execute()
                 var pBody = profResp.body?.string() ?: ""
                 var retryP = 0
                 while (!profResp.isSuccessful && retryP < 3) {
@@ -300,14 +284,11 @@ object SupabaseAuthService {
                     } else {
                         break
                     }
-                    profReq = Request.Builder()
-                        .url("$baseUrl/rest/v1/profiles")
-                        .header("apikey", anonKey)
-                        .header("Authorization", authHeader)
+                    profReq = SupabaseHttp.request("$baseUrl/rest/v1/profiles", accessToken, anonKey)
                         .header("Prefer", "resolution=merge-duplicates")
-                        .post(profilePayload.toString().toRequestBody(JSON_MEDIA))
+                        .post(profilePayload.toString().toRequestBody(SupabaseHttp.JSON_MEDIA))
                         .build()
-                    profResp = httpClient.newCall(profReq).execute()
+                    profResp = SupabaseHttp.client.newCall(profReq).execute()
                     pBody = profResp.body?.string() ?: ""
                 }
                 if (!profResp.isSuccessful) {
@@ -330,14 +311,11 @@ object SupabaseAuthService {
                     put("device_name", "Android Device")
                     put("last_seen_at", java.time.Instant.now().toString())
                 }
-                val devReq = Request.Builder()
-                    .url("$baseUrl/rest/v1/devices")
-                    .header("apikey", anonKey)
-                    .header("Authorization", authHeader)
+                val devReq = SupabaseHttp.request("$baseUrl/rest/v1/devices", accessToken, anonKey)
                     .header("Prefer", "resolution=merge-duplicates")
-                    .post(devPayload.toString().toRequestBody(JSON_MEDIA))
+                    .post(devPayload.toString().toRequestBody(SupabaseHttp.JSON_MEDIA))
                     .build()
-                val devResp = httpClient.newCall(devReq).execute()
+                val devResp = SupabaseHttp.client.newCall(devReq).execute()
                 if (!devResp.isSuccessful) {
                     Timber.w("Device registration returned HTTP ${devResp.code}")
                 }
@@ -390,16 +368,17 @@ object SupabaseAuthService {
             put("password", password)
         }
 
-        val request = Request.Builder()
-            .url("$baseUrl/auth/v1/token?grant_type=password")
-            .header("apikey", anonKey)
-            .header("Content-Type", "application/json")
-            .post(loginPayload.toString().toRequestBody(JSON_MEDIA))
-            .build()
+        val request = SupabaseHttp.jsonRequest(
+            "$baseUrl/auth/v1/token?grant_type=password",
+            null,
+            anonKey,
+            "POST",
+            loginPayload.toString()
+        ).build()
 
         try {
             Timber.i("Supabase signIn attempt for @$cleanUsername ($normalized@hexshard.app)")
-            val response = httpClient.newCall(request).execute()
+            val response = SupabaseHttp.client.newCall(request).execute()
             val respBody = response.body?.string() ?: ""
 
             if (!response.isSuccessful) {
@@ -500,13 +479,10 @@ object SupabaseAuthService {
             }
 
             try {
-                val tgReq = Request.Builder()
-                    .url("$baseUrl/rest/v1/telegram_links?account_id=eq.$accountId&select=verified&limit=1")
-                    .header("apikey", anonKey)
-                    .header("Authorization", "Bearer $accessToken")
+                val tgReq = SupabaseHttp.request("$baseUrl/rest/v1/telegram_links?account_id=eq.$accountId&select=verified&limit=1", accessToken, anonKey)
                     .get()
                     .build()
-                val tgResp = httpClient.newCall(tgReq).execute()
+                val tgResp = SupabaseHttp.client.newCall(tgReq).execute()
                 val tgBody = tgResp.body?.string() ?: ""
                 if (tgResp.isSuccessful && tgBody.isNotEmpty()) {
                     val arr = JSONArray(tgBody)
@@ -543,14 +519,11 @@ object SupabaseAuthService {
                     put("device_name", "Android Device")
                     put("last_seen_at", java.time.Instant.now().toString())
                 }
-                val devReq = Request.Builder()
-                    .url("$baseUrl/rest/v1/devices")
-                    .header("apikey", anonKey)
-                    .header("Authorization", "Bearer $accessToken")
+                val devReq = SupabaseHttp.request("$baseUrl/rest/v1/devices", accessToken, anonKey)
                     .header("Prefer", "resolution=merge-duplicates")
-                    .post(devPayload.toString().toRequestBody(JSON_MEDIA))
+                    .post(devPayload.toString().toRequestBody(SupabaseHttp.JSON_MEDIA))
                     .build()
-                httpClient.newCall(devReq).execute().close()
+                SupabaseHttp.client.newCall(devReq).execute().close()
             } catch (e: Exception) {
                 Timber.d("Device key update deferred: ${e.message}")
             }
@@ -591,7 +564,7 @@ object SupabaseAuthService {
      * Server deletion calls Supabase Edge Function / RPC to delete user from auth.users and all tables.
      * Client deletion cleans Room database, hardware Keystore keys, and EncryptedSharedPreferences.
      */
-    suspend fun deleteAccount(context: Context, client: OkHttpClient = httpClient): DeleteAccountResult = withContext(Dispatchers.IO) {
+    suspend fun deleteAccount(context: Context, client: OkHttpClient = SupabaseHttp.client): DeleteAccountResult = withContext(Dispatchers.IO) {
         val accountId = SecurePrefsManager.getUserId(context)
         val accessToken = SecurePrefsManager.getSupabaseAccessToken(context)
         val baseUrl = SupabaseConfig.getBaseUrl()
@@ -609,13 +582,13 @@ object SupabaseAuthService {
                     put("user_id", accountId)
                     put("account_id", accountId)
                 }
-                val deleteReq = Request.Builder()
-                    .url("$baseUrl/functions/v1/delete-account")
-                    .header("apikey", anonKey)
-                    .header("Authorization", "Bearer $accessToken")
-                    .header("Content-Type", "application/json")
-                    .post(edgePayload.toString().toRequestBody(JSON_MEDIA))
-                    .build()
+                val deleteReq = SupabaseHttp.jsonRequest(
+                    "$baseUrl/functions/v1/delete-account",
+                    accessToken,
+                    anonKey,
+                    "POST",
+                    edgePayload.toString()
+                ).build()
                 val resp = client.newCall(deleteReq).execute()
                 val edgeBody = resp.body?.string() ?: ""
                 if (resp.isSuccessful) {
@@ -637,13 +610,13 @@ object SupabaseAuthService {
                 )
                 for (payload in rpcPayloads) {
                     try {
-                        val rpcReq = Request.Builder()
-                            .url("$baseUrl/rest/v1/rpc/delete_user_account")
-                            .header("apikey", anonKey)
-                            .header("Authorization", "Bearer $accessToken")
-                            .header("Content-Type", "application/json")
-                            .post(payload.toString().toRequestBody(JSON_MEDIA))
-                            .build()
+                        val rpcReq = SupabaseHttp.jsonRequest(
+                            "$baseUrl/rest/v1/rpc/delete_user_account",
+                            accessToken,
+                            anonKey,
+                            "POST",
+                            payload.toString()
+                        ).build()
                         val rpcResp = client.newCall(rpcReq).execute()
                         val rpcBody = rpcResp.body?.string() ?: ""
                         if (rpcResp.isSuccessful) {
@@ -667,18 +640,12 @@ object SupabaseAuthService {
                 }
 
                 try {
-                    val delDev = Request.Builder()
-                        .url("$baseUrl/rest/v1/devices?account_id=eq.$accountId")
-                        .header("apikey", anonKey)
-                        .header("Authorization", "Bearer $accessToken")
+                    val delDev = SupabaseHttp.request("$baseUrl/rest/v1/devices?account_id=eq.$accountId", accessToken, anonKey)
                         .delete()
                         .build()
                     client.newCall(delDev).execute().close()
 
-                    val delProf = Request.Builder()
-                        .url("$baseUrl/rest/v1/profiles?id=eq.$accountId")
-                        .header("apikey", anonKey)
-                        .header("Authorization", "Bearer $accessToken")
+                    val delProf = SupabaseHttp.request("$baseUrl/rest/v1/profiles?id=eq.$accountId", accessToken, anonKey)
                         .delete()
                         .build()
                     client.newCall(delProf).execute().close()

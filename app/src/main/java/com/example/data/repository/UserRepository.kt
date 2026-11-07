@@ -4,12 +4,11 @@ import android.content.Context
 import com.example.crypto.E2ECryptoManager
 import com.example.data.PeerKeyTrustStore
 import com.example.data.SecurePrefsManager
+import com.example.network.SupabaseHttp
 import com.example.network.supabase.SupabaseConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
@@ -65,13 +64,13 @@ class UserRepository(
                 put("p_account_id", accountId)
                 if (!deviceId.isNullOrBlank()) put("p_device_id", deviceId)
             }
-            val req = Request.Builder()
-                .url("$baseUrl/rest/v1/rpc/get_active_device_keys")
-                .header("apikey", anonKey)
-                .header("Authorization", "Bearer $token")
-                .header("Content-Type", "application/json")
-                .post(payload.toString().toRequestBody(JSON_MEDIA))
-                .build()
+            val req = SupabaseHttp.jsonRequest(
+                "$baseUrl/rest/v1/rpc/get_active_device_keys",
+                token,
+                anonKey,
+                "POST",
+                payload.toString()
+            ).build()
             val resp = httpClient.newCall(req).execute()
             val body = resp.body?.string() ?: ""
             resp.close()
@@ -161,13 +160,14 @@ class UserRepository(
         signingKeyCache.clear()
     }
 
+    // Snappier timeouts than SupabaseHttp.client on purpose: only small key/profile
+    // lookups flow through here, never large transfers.
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(12, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .build()
     }
-    private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
 
     companion object {
         private const val KEY_CACHE_TTL_MS = 24 * 60 * 60 * 1000L // 24 hours
@@ -206,13 +206,9 @@ class UserRepository(
             }
 
             val token = context?.let { SecurePrefsManager.getSupabaseAccessToken(it) }?.takeIf { it.isNotBlank() }
-            val reqBuilder = Request.Builder()
-                .url(url)
-                .header("apikey", anonKey)
-            if (token != null) {
-                reqBuilder.header("Authorization", "Bearer $token")
-            }
-            val req = reqBuilder.get().build()
+            val req = SupabaseHttp.request(url, token, anonKey)
+                .get()
+                .build()
 
             val resp = httpClient.newCall(req).execute()
             val body = resp.body?.string() ?: ""
@@ -256,13 +252,10 @@ class UserRepository(
 
         try {
             val url = "$baseUrl/rest/v1/profiles?or=(username.ilike.*$encoded*,display_name.ilike.*$encoded*)&select=id,username,display_name,avatar_path&limit=15"
-            val reqBuilder = Request.Builder()
-                .url(url)
-                .header("apikey", anonKey)
-            if (token != null) {
-                reqBuilder.header("Authorization", "Bearer $token")
-            }
-            val resp = httpClient.newCall(reqBuilder.get().build()).execute()
+            val req = SupabaseHttp.request(url, token, anonKey)
+                .get()
+                .build()
+            val resp = httpClient.newCall(req).execute()
             val body = resp.body?.string() ?: ""
             if (resp.isSuccessful && body.isNotEmpty()) {
                 val arr = JSONArray(body)
@@ -292,8 +285,7 @@ class UserRepository(
         if (digitsOnly.length >= 4) {
             try {
                 val hexUrl = "$baseUrl/rest/v1/hex_numbers?number=ilike.*${encodeFilterValue(digitsOnly)}*&select=number,account_id&limit=10"
-                val hexReq = Request.Builder().url(hexUrl).header("apikey", anonKey)
-                if (token != null) hexReq.header("Authorization", "Bearer $token")
+                val hexReq = SupabaseHttp.request(hexUrl, token, anonKey)
                 val hResp = httpClient.newCall(hexReq.get().build()).execute()
                 val hBody = hResp.body?.string() ?: ""
                 hResp.close()
@@ -305,8 +297,7 @@ class UserRepository(
                         val num = hObj.optString("number", "")
                         if (accId.isNotBlank() && accId != currentUid && results.none { it.userId == accId }) {
                             val pUrl = "$baseUrl/rest/v1/profiles?id=eq.$accId&select=id,username,display_name,avatar_path&limit=1"
-                            val pReq = Request.Builder().url(pUrl).header("apikey", anonKey)
-                            if (token != null) pReq.header("Authorization", "Bearer $token")
+                            val pReq = SupabaseHttp.request(pUrl, token, anonKey)
                             val pResp = try { httpClient.newCall(pReq.get().build()).execute() } catch (_: Exception) { null }
                             val pBody = pResp?.body?.string() ?: ""
                             pResp?.close()
@@ -356,13 +347,10 @@ class UserRepository(
             } else {
                 "$baseUrl/rest/v1/profiles?username=ilike.$encoded&select=*&limit=1"
             }
-            val reqBuilder = Request.Builder()
-                .url(url)
-                .header("apikey", anonKey)
-            if (token != null) {
-                reqBuilder.header("Authorization", "Bearer $token")
-            }
-            val resp = httpClient.newCall(reqBuilder.get().build()).execute()
+            val req = SupabaseHttp.request(url, token, anonKey)
+                .get()
+                .build()
+            val resp = httpClient.newCall(req).execute()
             val body = resp.body?.string() ?: ""
             resp.close()
 
@@ -386,8 +374,7 @@ class UserRepository(
                     var vNum = ""
                     try {
                         val hexUrl = "$baseUrl/rest/v1/hex_numbers?account_id=eq.$uid&select=number&limit=1"
-                        val hexReq = Request.Builder().url(hexUrl).header("apikey", anonKey)
-                        if (token != null) hexReq.header("Authorization", "Bearer $token")
+                        val hexReq = SupabaseHttp.request(hexUrl, token, anonKey)
                         val hResp = httpClient.newCall(hexReq.get().build()).execute()
                         val hBody = hResp.body?.string() ?: ""
                         hResp.close()
@@ -459,13 +446,9 @@ class UserRepository(
 
             // 2. Legacy Fallback: Query profiles table
             val profUrl = "$baseUrl/rest/v1/profiles?id=eq.$cleanId&select=public_key"
-            val profReqBuilder = Request.Builder()
-                .url(profUrl)
-                .header("apikey", anonKey)
-            if (token.isNotBlank()) {
-                profReqBuilder.header("Authorization", "Bearer $token")
-            }
-            val profReq = profReqBuilder.get().build()
+            val profReq = SupabaseHttp.request(profUrl, token.takeIf { it.isNotBlank() }, anonKey)
+                .get()
+                .build()
 
             val profResp = httpClient.newCall(profReq).execute()
             val profBody = profResp.body?.string() ?: ""
@@ -543,13 +526,9 @@ class UserRepository(
 
             // 3. Fallback to profiles table for legacy single-device signing key
             val profUrl = "$baseUrl/rest/v1/profiles?id=eq.$cleanId&select=signing_key"
-            val profReqBuilder = Request.Builder()
-                .url(profUrl)
-                .header("apikey", anonKey)
-            if (token.isNotBlank()) {
-                profReqBuilder.header("Authorization", "Bearer $token")
-            }
-            val profReq = profReqBuilder.get().build()
+            val profReq = SupabaseHttp.request(profUrl, token.takeIf { it.isNotBlank() }, anonKey)
+                .get()
+                .build()
 
             val profResp = httpClient.newCall(profReq).execute()
             val profBody = profResp.body?.string() ?: ""
@@ -611,13 +590,9 @@ class UserRepository(
             val profileBody = JSONObject().apply {
                 put("public_key", pubBase64)
                 put("signing_key", signBase64)
-            }.toString().toRequestBody(JSON_MEDIA)
+            }.toString().toRequestBody(SupabaseHttp.JSON_MEDIA)
 
-            val profileReq = Request.Builder()
-                .url("$baseUrl/rest/v1/profiles?id=eq.$userId")
-                .header("apikey", anonKey)
-                .header("Authorization", "Bearer $token")
-                .header("Content-Type", "application/json")
+            val profileReq = SupabaseHttp.request("$baseUrl/rest/v1/profiles?id=eq.$userId", token, anonKey)
                 .patch(profileBody)
                 .build()
 
@@ -638,13 +613,9 @@ class UserRepository(
                 put("platform", "android")
                 put("device_name", "Android Device")
                 put("last_seen_at", java.time.Instant.now().toString())
-            }.toString().toRequestBody(JSON_MEDIA)
+            }.toString().toRequestBody(SupabaseHttp.JSON_MEDIA)
 
-            val deviceReq = Request.Builder()
-                .url("$baseUrl/rest/v1/devices")
-                .header("apikey", anonKey)
-                .header("Authorization", "Bearer $token")
-                .header("Content-Type", "application/json")
+            val deviceReq = SupabaseHttp.request("$baseUrl/rest/v1/devices", token, anonKey)
                 .header("Prefer", "resolution=merge-duplicates")
                 .post(deviceBody)
                 .build()
@@ -691,14 +662,7 @@ class UserRepository(
         for (body in payloads) {
             try {
                 val rpcUrl = "$baseUrl/rest/v1/rpc/resolve_profile_by_share_id"
-                val reqBuilder = Request.Builder()
-                    .url(rpcUrl)
-                    .header("apikey", anonKey)
-                    .header("Content-Type", "application/json")
-                if (token != null) {
-                    reqBuilder.header("Authorization", "Bearer $token")
-                }
-                val req = reqBuilder.post(body.toString().toRequestBody(JSON_MEDIA)).build()
+                val req = SupabaseHttp.jsonRequest(rpcUrl, token, anonKey, "POST", body.toString()).build()
 
                 val resp = httpClient.newCall(req).execute()
                 val respBody = resp.body?.string() ?: ""
@@ -735,13 +699,7 @@ class UserRepository(
             for (payload in payloadVariants) {
                 try {
                     val rpcUrl = "$baseUrl/rest/v1/rpc/create_profile_share_token"
-                    val req = Request.Builder()
-                        .url(rpcUrl)
-                        .header("apikey", anonKey)
-                        .header("Authorization", "Bearer $token")
-                        .header("Content-Type", "application/json")
-                        .post(payload.toString().toRequestBody(JSON_MEDIA))
-                        .build()
+                    val req = SupabaseHttp.jsonRequest(rpcUrl, token, anonKey, "POST", payload.toString()).build()
 
                     val resp = httpClient.newCall(req).execute()
                     val respBody = resp.body?.string()?.trim() ?: ""
@@ -799,13 +757,7 @@ class UserRepository(
         for (body in payloadVariants) {
             try {
                 val rpcUrl = "$baseUrl/rest/v1/rpc/resolve_profile_share_token"
-                val req = Request.Builder()
-                    .url(rpcUrl)
-                    .header("apikey", anonKey)
-                    .header("Authorization", "Bearer $authToken")
-                    .header("Content-Type", "application/json")
-                    .post(body.toString().toRequestBody(JSON_MEDIA))
-                    .build()
+                val req = SupabaseHttp.jsonRequest(rpcUrl, authToken, anonKey, "POST", body.toString()).build()
 
                 val resp = httpClient.newCall(req).execute()
                 val respBody = resp.body?.string() ?: ""
@@ -867,18 +819,14 @@ class UserRepository(
 
         if (anonKey.isNotBlank() && !token.isNullOrBlank()) {
             val payloads = listOf(
-                JSONObject().toString().toRequestBody(JSON_MEDIA),
-                JSONObject().apply { put("p_user_id", currentUserId) }.toString().toRequestBody(JSON_MEDIA)
+                JSONObject().toString().toRequestBody(SupabaseHttp.JSON_MEDIA),
+                JSONObject().apply { put("p_user_id", currentUserId) }.toString().toRequestBody(SupabaseHttp.JSON_MEDIA)
             )
 
             for (body in payloads) {
                 try {
                     val rpcUrl = "$baseUrl/rest/v1/rpc/revoke_profile_share_tokens"
-                    val req = Request.Builder()
-                        .url(rpcUrl)
-                        .header("apikey", anonKey)
-                        .header("Authorization", "Bearer $token")
-                        .header("Content-Type", "application/json")
+                    val req = SupabaseHttp.request(rpcUrl, token, anonKey)
                         .post(body)
                         .build()
 
