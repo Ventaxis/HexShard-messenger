@@ -87,6 +87,11 @@ class DeleteAccountVaultPreservationTest {
 
     @Test
     fun `deletion without an authenticated account fails closed with Error`() = runBlocking {
+        // Explicitly blank the vault: SecurePrefsManager caches its prefs in a static, which
+        // persists across Robolectric tests of the same class — never rely on "fresh" state.
+        SecurePrefsManager.saveProfile(context, userId = "", username = "", phone = "")
+        SecurePrefsManager.clearTokensOnly(context)
+
         val result = SupabaseAuthService.deleteAccount(context, fakeClient(200))
 
         assertTrue("Expected DeleteAccountResult.Error, got $result", result is DeleteAccountResult.Error)
