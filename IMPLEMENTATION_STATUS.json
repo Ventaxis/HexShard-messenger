@@ -1,7 +1,7 @@
 {
   "project": "HexShard Messenger",
-  "version": "9",
-  "date": "2026-10-19",
+  "version": "10",
+  "date": "2026-11-07",
   "tasks": [
     {
       "id": "K01",
@@ -30,8 +30,8 @@
         "app/src/main/java/com/example/ui/AppNavigator.kt",
         "supabase/functions/delete-account/index.ts"
       ],
-      "tests": "Robolectric unit test for deleteAccount failure handling and vault preservation; gradle :app:testDebugUnitTest",
-      "result": "Server-side account deletion with typed verification, fail-closed handling, and account-scoped local data wipe without destroying shared prefs",
+      "tests": "DeleteAccountVaultPreservationTest (Robolectric, interceptor-faked server): failure preserves vault, confirmed deletion returns typed Success, unauthenticated deletion fails closed; gradle :app:testDebugUnitTest",
+      "result": "Server-side account deletion with typed DeleteAccountResult propagated from service through repository to ViewModel, fail-closed handling, and account-scoped local data wipe without destroying shared prefs",
       "limitation": "Multi-user hardware keystore separation constrained by single Android Keystore"
     },
     {
@@ -59,7 +59,7 @@
         "supabase/functions/telegram-recovery/index.ts"
       ],
       "tests": "Validation of mandatory webhook secret, non-reset of attempts on repeated /start, idempotent verify",
-      "result": "Closed security holes in webhook and verify functions: constant-time secret token validation fails closed; attempts counter preserved across repeated /start commands; atomic row-locked verify_telegram_challenge_atomic and single-use recovery challenges",
+      "result": "Closed security holes in webhook and verify functions: secret token validation compares SHA-256 digests in constant time (no length leak) and fails closed; attempts counter preserved across repeated /start commands; atomic row-locked verify_telegram_challenge_atomic and single-use recovery challenges",
       "limitation": "Live Telegram Bot API delivery depends on configured TELEGRAM_BOT_TOKEN secret"
     },
     {
@@ -73,7 +73,7 @@
         "app/src/main/java/com/example/data/repository/SyncManager.kt"
       ],
       "tests": "Session token refresh propagation to Realtime; unit tests passing",
-      "result": "Centralized token refresh mutex and state machine; updateAccessToken sends access_token event over active WebSocket or transparently reconnects; SyncManager propagates session changes seamlessly",
+      "result": "Centralized token refresh mutex and state machine; updateAccessToken sends access_token event over active WebSocket, transparently reconnects, or queues the token during transitional states and flushes it after channel join (no silent drops); SyncManager propagates session changes seamlessly",
       "limitation": ""
     },
     {
@@ -87,7 +87,7 @@
         "app/src/test/java/com/example/SyncCursorTest.kt"
       ],
       "tests": "Catch-up pagination and ACK persistence; gradle :app:testDebugUnitTest; SyncCursorTest",
-      "result": "Paginated global sequence catch-up with per-page cursor checkpointing, bounded loop protection, and durable outbox deduplication",
+      "result": "Paginated global sequence catch-up with per-page cursor checkpointing, bounded loop protection on both the global stream and the per-conversation catch-up (100-page cap plus a full-page cursor-stall guard against malformed sequence rows), and durable outbox deduplication",
       "limitation": ""
     },
     {
@@ -113,8 +113,8 @@
         "app/src/main/java/com/example/data/database/ChatRepository.kt",
         "app/src/main/java/com/example/ui/ChatViewModel.kt"
       ],
-      "tests": "MIME separation from MessageType, cache isolation",
-      "result": "Strict allowed MIME validation, streaming AES-GCM cipher pipeline to prevent OOM, uploader_id and owner_id alignment, and account-scoped cache clearing on account deletion",
+      "tests": "MIME separation from MessageType, cache isolation; AttachmentMimeTypeTest verifies exact type/subtype matching, parameter stripping and look-alike rejection",
+      "result": "Exact type/subtype MIME validation (parameters stripped, prefix look-alikes rejected), streaming AES-GCM cipher pipeline to prevent OOM, uploader_id and owner_id alignment, and account-scoped cache clearing on account deletion",
       "limitation": ""
     },
     {
@@ -155,7 +155,7 @@
         "app/src/test/java/com/example/AiPipelineTest.kt"
       ],
       "tests": "AI conversation isolation and prompt outbox deduplication; AiPipelineTest",
-      "result": "Strict persona validation (VENTAXIS, HEXAGON), system prompts, conversation type isolation, and resilient quota error localization",
+      "result": "Strict persona validation: unknown or missing persona_id is rejected with HTTP 400 UNKNOWN_PERSONA (no silent fallback to hexagon), system prompts, conversation type isolation, and resilient quota error localization",
       "limitation": ""
     },
     {

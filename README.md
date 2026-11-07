@@ -3,7 +3,7 @@
 > A modern, privacy-first messenger built for speed, security, and simplicity.
 
 ![Platform](https://img.shields.io/badge/Platform-Android-brightgreen)
-![Language](https://img.shields.io/badge/Kotlin-100%25-blue)
+![Language](https://img.shields.io/badge/Kotlin%20%2B%20TypeScript-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 ---
