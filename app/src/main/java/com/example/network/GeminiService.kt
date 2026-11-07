@@ -29,7 +29,7 @@ sealed class AiResult {
     object ModelUnavailable : AiResult()
     object ConfigurationError : AiResult()
     data class RateLimited(val retryAfterSeconds: Long = 2) : AiResult()
-    object InvalidRequest : AiResult()
+    data class InvalidRequest(val detail: String? = null) : AiResult()
     object NetworkError : AiResult()
     data class UpstreamError(val code: String, val message: String) : AiResult()
     data class Error(val code: String, val message: String) : AiResult()
@@ -44,8 +44,9 @@ class GeminiService @Inject constructor(
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(12, TimeUnit.SECONDS)
-            .readTimeout(25, TimeUnit.SECONDS)
-            .writeTimeout(15, TimeUnit.SECONDS)
+            // Server worst case: web search (6s) + a multi-model fallback chain (3 x 20s)
+            .readTimeout(90, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
     }
@@ -55,7 +56,9 @@ class GeminiService @Inject constructor(
 
     companion object {
         private const val MAX_PROMPT_LENGTH = 4000
-        private const val MIN_INTERVAL_MS = 400L
+        // Server-side cooldown is 1200 ms — the client interval must exceed it, or quick
+        // sends are guaranteed to bounce off the server limiter.
+        private const val MIN_INTERVAL_MS = 1300L
 
         const val VENTAXIS_SYSTEM_PROMPT = """You are Ventaxis AI, the advanced analytical AI persona built directly into HexShard Messenger.
 
@@ -98,7 +101,7 @@ Behavior:
     ): AiResult = withContext(Dispatchers.IO) {
         val sanitizedPrompt = prompt.trim().take(MAX_PROMPT_LENGTH)
         if (sanitizedPrompt.isBlank() && (imageBytes == null || imageBytes.isEmpty())) {
-            return@withContext AiResult.InvalidRequest
+            return@withContext AiResult.InvalidRequest(detail = "Prompt is empty")
         }
         val effectivePrompt = if (sanitizedPrompt.isNotBlank()) sanitizedPrompt else "Пожалуйста, посмотри и проанализируй эту фотографию. Расскажи подробно, что на ней изображено."
 
@@ -209,7 +212,7 @@ Behavior:
                     errorCode == "AI_MODEL_UNAVAILABLE" -> AiResult.ModelUnavailable
                     errorCode == "AI_UNAVAILABLE" || code == 503 -> AiResult.DeploymentUnavailable
                     errorCode == "AI_CONFIG_ERROR" -> AiResult.ConfigurationError
-                    code == 400 || errorCode == "AI_INVALID_REQUEST" || errorCode == "UNKNOWN_PERSONA" -> AiResult.InvalidRequest
+                    code == 400 || errorCode == "AI_INVALID_REQUEST" || errorCode == "UNKNOWN_PERSONA" -> AiResult.InvalidRequest(detail = errorMsg.takeIf { it != "AI error ($code)" })
                     code == 502 || errorCode == "AI_UPSTREAM_ERROR" -> AiResult.UpstreamError(errorCode, errorMsg)
                     else -> AiResult.Error(errorCode, errorMsg)
                 }

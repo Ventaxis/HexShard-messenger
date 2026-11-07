@@ -24,7 +24,7 @@ sealed class AiUiError {
     object DeploymentUnavailable : AiUiError()
     object ModelUnavailable : AiUiError()
     object ConfigurationError : AiUiError()
-    object InvalidRequest : AiUiError()
+    data class InvalidRequest(val detail: String? = null) : AiUiError()
     object NetworkError : AiUiError()
     data class UpstreamError(val message: String) : AiUiError()
     data class Custom(val message: String) : AiUiError()
@@ -37,7 +37,7 @@ sealed class AiUiError {
             is DeploymentUnavailable -> strings.aiDeploymentUnavailable
             is ModelUnavailable -> strings.aiModelUnavailable
             is ConfigurationError -> strings.aiConfigurationError
-            is InvalidRequest -> strings.aiInvalidRequest
+            is InvalidRequest -> detail?.takeIf { it.isNotBlank() }?.let { "${strings.aiInvalidRequest} ($it)" } ?: strings.aiInvalidRequest
             is NetworkError -> strings.aiNetworkError
             is UpstreamError -> message.ifBlank { strings.aiUnavailable }
             is Custom -> message
@@ -327,13 +327,18 @@ class ChatViewModel @Inject constructor(
                 val isAiChat = chat.isAiAssistant
 
                 val imageBytes = if (isAiChat && type == "image") {
-                    try {
-                        context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                    } catch (_: Exception) { null }
+                    compressImageForAi(context, uri)
                 } else null
-                val mimeType = if (isAiChat && type == "image") {
-                    context.contentResolver.getType(uri) ?: "image/jpeg"
-                } else null
+                val mimeType = if (isAiChat && imageBytes != null) "image/jpeg" else null
+                if (isAiChat && type == "image" && imageBytes == null) {
+                    _aiErrorState.value = AiUiError.Custom(
+                        if (LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN)
+                            "Не удалось обработать изображение для AI."
+                        else "Failed to process the image for AI."
+                    )
+                    _isSending.value = false
+                    return@launch
+                }
 
                 val audioUrl = repository.uploadMediaMessage(context, uri, cid, type, idempotencyKey, chat.recipientId.ifEmpty { chat.name })
                 if (audioUrl == null) {
@@ -743,8 +748,9 @@ class ChatViewModel @Inject constructor(
                     Pair(if (msg.isMe) "user" else "model", msg.text)
                 }
 
-                // Guard with a 15s timeout for multimodal or cloud response
-                val result = kotlinx.coroutines.withTimeoutOrNull(15000L) {
+                // Guard with a generous timeout: the server may run web search (6s) plus
+                // a multi-model fallback chain (up to ~66s worst case)
+                val result = kotlinx.coroutines.withTimeoutOrNull(90000L) {
                     geminiService.requestAssistant(
                         prompt = userMsg,
                         imageBytes = imageBytes,
@@ -771,7 +777,7 @@ class ChatViewModel @Inject constructor(
                             isAttachment = false,
                             timeStr = replyTime,
                             status = "delivered",
-                            recipientId = "ai_hexagon",
+                            recipientId = "ai_$activePersonaId",
                             idempotencyKey = replyKey,
                             personaId = activePersonaId
                         )
@@ -808,7 +814,7 @@ class ChatViewModel @Inject constructor(
                         _aiErrorState.value = AiUiError.FunctionNotFound
                     }
                     is AiResult.InvalidRequest -> {
-                        _aiErrorState.value = AiUiError.InvalidRequest
+                        _aiErrorState.value = AiUiError.InvalidRequest(result.detail)
                     }
                     is AiResult.NetworkError -> {
                         _aiErrorState.value = AiUiError.NetworkError
@@ -1023,6 +1029,45 @@ class ChatViewModel @Inject constructor(
 
     fun dismissPendingProfileConfirmation() {
         _pendingProfileConfirmation.value = null
+    }
+
+    /**
+     * Decodes, downscales (max 1280 px) and JPEG-re-encodes an image for the AI vision
+     * request. Uncapped camera photos (4-11 MB base64) were rejected by the functions
+     * gateway before the edge function ever ran — the user saw a generic "Invalid AI
+     * request". Re-encoding also normalizes HEIC (default camera format) to JPEG.
+     * Returns null when the image cannot be decoded at all.
+     */
+    private fun compressImageForAi(context: android.content.Context, uri: android.net.Uri): ByteArray? {
+        return try {
+            val source = android.graphics.BitmapFactory.decodeStream(context.contentResolver.openInputStream(uri))
+                ?: return null
+            val maxDim = 1280
+            val scale = minOf(1f, maxDim.toFloat() / maxOf(source.width, source.height))
+            val bitmap = if (scale < 1f) {
+                android.graphics.Bitmap.createScaledBitmap(
+                    source,
+                    (source.width * scale).toInt().coerceAtLeast(1),
+                    (source.height * scale).toInt().coerceAtLeast(1),
+                    true
+                )
+            } else {
+                source
+            }
+            var quality = 85
+            var bytes: ByteArray
+            do {
+                val out = java.io.ByteArrayOutputStream()
+                bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, out)
+                bytes = out.toByteArray()
+                quality -= 15
+            } while (bytes.size > 900_000 && quality > 30)
+            if (bitmap !== source) bitmap.recycle()
+            bytes
+        } catch (e: Exception) {
+            timber.log.Timber.w(e, "compressImageForAi failed")
+            null
+        }
     }
 
     private fun resolvePersonaId(msg: MessageEntity): String {
