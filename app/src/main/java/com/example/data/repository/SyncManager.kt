@@ -53,6 +53,10 @@ class SyncManager(
     }
     private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
 
+    // Server-derived ids are interpolated into PostgREST filter URLs; anything outside
+    // this shape must never reach the query string (filter-injection guard).
+    private val SAFE_ID_REGEX = Regex("^[A-Za-z0-9_-]{1,128}$")
+
     private var realtimeManager: com.example.network.supabase.SupabaseRealtimeManager? = null
     private val realtimeQueue = kotlinx.coroutines.channels.Channel<JSONObject>(kotlinx.coroutines.channels.Channel.UNLIMITED)
 
@@ -202,6 +206,10 @@ class SyncManager(
                 else conversationRepository.computeConversationId(currentUserId, chat.recipientId)
             }
             if (convId.isBlank()) continue
+            if (!SAFE_ID_REGEX.matches(convId)) {
+                Timber.w("Skipping chat with non-conforming conversationId")
+                continue
+            }
 
             var maxSeq = chatDao.getMaxSequenceForConversation(convId, currentUserId) ?: 0L
 
@@ -594,6 +602,10 @@ class SyncManager(
         anonKey: String,
         token: String
     ) = withContext(Dispatchers.IO) {
+        if (!SAFE_ID_REGEX.matches(docId)) {
+            Timber.w("Skipping delivery receipt for non-conforming message id")
+            return@withContext
+        }
         try {
             val body = JSONObject().apply {
                 put("status", "delivered")
