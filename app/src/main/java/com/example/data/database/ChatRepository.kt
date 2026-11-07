@@ -290,11 +290,11 @@ open class ChatRepository(
         refreshAccount()
     }
 
-    suspend fun deleteAccount(context: Context): Boolean {
+    suspend fun deleteAccount(context: Context): com.example.network.supabase.DeleteAccountResult {
         stopRealtimeSync()
         val currentAccount = getCurrentUserId()
         val result = com.example.network.supabase.SupabaseAuthService.deleteAccount(context)
-        if (result) {
+        if (result is com.example.network.supabase.DeleteAccountResult.Success) {
             userRepository.clearCache()
             if (currentAccount.isNotBlank()) {
                 E2ECryptoManager.deleteKeys(currentAccount)
@@ -305,10 +305,10 @@ open class ChatRepository(
                 com.example.data.repository.AttachmentRepository.clearCacheForAccount(context, currentAccount)
             }
             refreshAccount()
-        } else {
-            Timber.w("Server account deletion failed; preserving local encryption keys and messages.")
-            startRealtimeSync()
+            return result
         }
+        Timber.w("Server account deletion failed; preserving local encryption keys and messages.")
+        startRealtimeSync()
         return result
     }
 }

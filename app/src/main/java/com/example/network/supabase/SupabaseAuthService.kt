@@ -49,6 +49,11 @@ sealed class SignInResult {
     data class Error(val message: String) : SignInResult()
 }
 
+sealed class DeleteAccountResult {
+    data class Success(val accountId: String) : DeleteAccountResult()
+    data class Error(val message: String) : DeleteAccountResult()
+}
+
 object SupabaseAuthService {
 
     private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
@@ -586,11 +591,15 @@ object SupabaseAuthService {
      * Server deletion calls Supabase Edge Function / RPC to delete user from auth.users and all tables.
      * Client deletion cleans Room database, hardware Keystore keys, and EncryptedSharedPreferences.
      */
-    suspend fun deleteAccount(context: Context): Boolean = withContext(Dispatchers.IO) {
+    suspend fun deleteAccount(context: Context, client: OkHttpClient = httpClient): DeleteAccountResult = withContext(Dispatchers.IO) {
         val accountId = SecurePrefsManager.getUserId(context)
         val accessToken = SecurePrefsManager.getSupabaseAccessToken(context)
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(context)
+
+        if (accountId.isBlank()) {
+            return@withContext DeleteAccountResult.Error("No authenticated account to delete")
+        }
 
         var serverDeleted = false
         if (accountId.isNotBlank() && accessToken.isNotBlank() && anonKey.isNotBlank()) {
@@ -607,7 +616,7 @@ object SupabaseAuthService {
                     .header("Content-Type", "application/json")
                     .post(edgePayload.toString().toRequestBody(JSON_MEDIA))
                     .build()
-                val resp = httpClient.newCall(deleteReq).execute()
+                val resp = client.newCall(deleteReq).execute()
                 val edgeBody = resp.body?.string() ?: ""
                 if (resp.isSuccessful) {
                     serverDeleted = true
@@ -635,7 +644,7 @@ object SupabaseAuthService {
                             .header("Content-Type", "application/json")
                             .post(payload.toString().toRequestBody(JSON_MEDIA))
                             .build()
-                        val rpcResp = httpClient.newCall(rpcReq).execute()
+                        val rpcResp = client.newCall(rpcReq).execute()
                         val rpcBody = rpcResp.body?.string() ?: ""
                         if (rpcResp.isSuccessful) {
                             serverDeleted = true
@@ -664,7 +673,7 @@ object SupabaseAuthService {
                         .header("Authorization", "Bearer $accessToken")
                         .delete()
                         .build()
-                    httpClient.newCall(delDev).execute().close()
+                    client.newCall(delDev).execute().close()
 
                     val delProf = Request.Builder()
                         .url("$baseUrl/rest/v1/profiles?id=eq.$accountId")
@@ -672,16 +681,16 @@ object SupabaseAuthService {
                         .header("Authorization", "Bearer $accessToken")
                         .delete()
                         .build()
-                    httpClient.newCall(delProf).execute().close()
+                    client.newCall(delProf).execute().close()
                 } catch (e: Exception) {
                     Timber.w(e, "Direct RLS cleanup during account deletion exception")
                 }
             }
         }
 
-        if (!serverDeleted && accountId.isNotBlank()) {
+        if (!serverDeleted) {
             Timber.e("Server account deletion failed. Failing closed to preserve local state and allow retry.")
-            return@withContext false
+            return@withContext DeleteAccountResult.Error("Server account deletion failed; local state preserved for retry.")
         }
 
         // 4. Wipe local Room encrypted database specifically for the target account
@@ -706,6 +715,6 @@ object SupabaseAuthService {
         // 6. Clear active session state
         SessionManager.clearSession(context)
 
-        true
+        DeleteAccountResult.Success(accountId)
     }
 }

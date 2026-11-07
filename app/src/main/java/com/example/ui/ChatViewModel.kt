@@ -593,15 +593,17 @@ class ChatViewModel @Inject constructor(
         onError: ((String) -> Unit)? = null
     ) {
         viewModelScope.launch {
-            val success = repository.deleteAccount(context)
-            if (success) {
-                _selectedChatId.value = null
-                onAccountChanged()
-                onSuccess()
-            } else {
-                val isRussian = com.example.ui.LocalizationManager.currentLanguage.value == com.example.ui.AppLanguage.RUSSIAN
-                val errorMsg = if (isRussian) "Не удалось удалить аккаунт на сервере. Попробуйте еще раз." else "Failed to delete account on server. Please try again."
-                onError?.invoke(errorMsg)
+            when (val result = repository.deleteAccount(context)) {
+                is com.example.network.supabase.DeleteAccountResult.Success -> {
+                    _selectedChatId.value = null
+                    onAccountChanged()
+                    onSuccess()
+                }
+                is com.example.network.supabase.DeleteAccountResult.Error -> {
+                    val isRussian = com.example.ui.LocalizationManager.currentLanguage.value == com.example.ui.AppLanguage.RUSSIAN
+                    val errorMsg = if (isRussian) "Не удалось удалить аккаунт на сервере. Попробуйте еще раз." else "Failed to delete account on server. Please try again."
+                    onError?.invoke(errorMsg)
+                }
             }
         }
     }
