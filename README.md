@@ -1,5 +1,7 @@
 # HexShard Messenger
 
+> **HexShard. Мессенджер, который не знает о тебе ничего.**
+>
 > A modern, privacy-first messenger built for speed, security, and simplicity.
 
 ![Platform](https://img.shields.io/badge/Platform-Android-brightgreen)
