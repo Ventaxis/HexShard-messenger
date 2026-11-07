@@ -156,3 +156,99 @@ Deno.test("no verified telegram link yields 404, not an account leak", async () 
     restoreFetch();
   }
 });
+
+// --- Recovery-ticket flow (S-7): separate from linking challenges ---
+
+Deno.test("valid recovery ticket is consumed via CAS and returns the linked account", async () => {
+  installFetchStub({});
+  try {
+    // Point the stub at the ticket table instead of the challenge table.
+    globalThis.fetch = ((input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const method = (init?.method ?? "GET").toUpperCase();
+      const json = (obj: unknown, status = 200) =>
+        Promise.resolve(new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } }));
+      if (url.includes("/rest/v1/account_recovery_tickets")) {
+        if (method === "GET") {
+          return json({
+            ticket_id: "a".repeat(48),
+            account_id: "acc-ticket-1",
+            telegram_user_id: 987654321,
+            ticket_hash: "x".repeat(64),
+            is_used: false,
+            expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString()
+          });
+        }
+        if (method === "PATCH") {
+          patchCalls.push({ url, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+          return json([{ ticket_id: "a".repeat(48) }]);
+        }
+      }
+      return json({ message: "stub" }, 500);
+    }) as typeof fetch;
+    try {
+      const req = new Request("https://project.functions.supabase.co/telegram-recovery", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ticket_id: "a".repeat(48) })
+      });
+      const res = await handler(req);
+      assertEquals(res.status, 200);
+      const json = await res.json();
+      assertEquals(json.verified, true);
+      assertEquals(json.account_id, "acc-ticket-1");
+      assertEquals(patchCalls.length, 1);
+      assertEquals(patchCalls[0].url.includes("is_used=eq.false"), true, "ticket consumption must be conditional");
+      assertEquals(patchCalls[0].body.is_used, true);
+    } finally {
+      restoreFetch();
+    }
+  } finally {
+    restoreFetch();
+  }
+});
+
+Deno.test("used recovery ticket is rejected", async () => {
+  const json = (obj: unknown, status = 200) =>
+    Promise.resolve(new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } }));
+  globalThis.fetch = ((input: string | URL | Request) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes("/rest/v1/account_recovery_tickets")) {
+      return json({
+        ticket_id: "b".repeat(48), account_id: "acc-1", is_used: true,
+        expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString()
+      });
+    }
+    return json({ message: "stub" }, 500);
+  }) as typeof fetch;
+  try {
+    const res = await handler(new Request("https://x/telegram-recovery", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticket_id: "b".repeat(48) })
+    }));
+    assertEquals(res.status, 400);
+  } finally {
+    restoreFetch();
+  }
+});
+
+Deno.test("unknown recovery ticket yields 404 without leaking accounts", async () => {
+  const json = (obj: unknown, status = 200) =>
+    Promise.resolve(new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } }));
+  globalThis.fetch = ((input: string | URL | Request) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes("/rest/v1/account_recovery_tickets")) return json(null);
+    return json({ message: "stub" }, 500);
+  }) as typeof fetch;
+  try {
+    const res = await handler(new Request("https://x/telegram-recovery", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticket_id: "c".repeat(48) })
+    }));
+    assertEquals(res.status, 404);
+    const json2 = await res.json();
+    assertEquals(json2.account_id, undefined);
+  } finally {
+    restoreFetch();
+  }
+});

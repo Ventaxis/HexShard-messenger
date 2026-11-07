@@ -153,3 +153,99 @@ Deno.test("challenge minting via /start <account uuid> is rate-limited per teleg
     clearSecretEnv();
   }
 });
+
+Deno.test("/recover mints a one-time ticket bound to the verified telegram link", async () => {
+  clearSecretEnv();
+  Deno.env.set("TELEGRAM_WEBHOOK_SECRET", WEBHOOK_SECRET);
+  Deno.env.set("TELEGRAM_BOT_TOKEN", "stub-bot-token");
+  try {
+    const CHAT_ID = 987654321;
+    const inserts: Record<string, unknown>[] = [];
+    const invalidations = 0;
+    const telegramTexts: string[] = [];
+    const originalFetch = globalThis.fetch;
+    const json = (obj: unknown, status = 200) =>
+      new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+
+    globalThis.fetch = ((input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url.includes("api.telegram.org") && url.includes("sendMessage")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { text?: string };
+        telegramTexts.push(body.text ?? "");
+        return Promise.resolve(json({ ok: true }));
+      }
+      if (url.includes("/rest/v1/telegram_processed_updates")) return Promise.resolve(json({}, 201));
+      if (url.includes("/rest/v1/telegram_links")) return Promise.resolve(json({ account_id: "acc-recover-me", verified: true }));
+      if (url.includes("/rest/v1/account_recovery_tickets")) {
+        if (method === "POST") {
+          const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+          inserts.push(body);
+          return Promise.resolve(json(body, 201));
+        }
+        if (method === "PATCH") return Promise.resolve(new Response(null, { status: 204 }));
+        return Promise.resolve(json([]));
+      }
+      return Promise.resolve(json({ message: "stub" }, 500));
+    }) as typeof fetch;
+
+    try {
+      const update = {
+        update_id: 5000,
+        message: { message_id: 5000, chat: { id: CHAT_ID, type: "private" }, from: { id: CHAT_ID }, text: "/recover" }
+      };
+      const res = await handler(postWithToken(WEBHOOK_SECRET, update));
+      assertEquals(res.status, 200);
+      assertEquals(inserts.length, 1, "exactly one ticket minted");
+      const ticket = inserts[0] as { account_id?: string; telegram_user_id?: number; ticket_hash?: string; ticket_id?: string };
+      assertEquals(ticket.account_id, "acc-recover-me", "ticket must be bound to the verified linked account");
+      assertEquals(ticket.telegram_user_id, CHAT_ID);
+      assertEquals(typeof ticket.ticket_hash, "string");
+      assertEquals((ticket.ticket_hash as string).length, 64, "ticket must be stored hashed (SHA-256)");
+      assertEquals((ticket.ticket_id as string).length >= 48, true, "ticket id must be a long random bearer secret");
+      assertEquals(telegramTexts.some((t) => t.includes(ticket.ticket_id as string)), true, "bot sends the ticket to its owner");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  } finally {
+    clearSecretEnv();
+  }
+});
+
+Deno.test("/recover without a verified link explains and mints nothing", async () => {
+  clearSecretEnv();
+  Deno.env.set("TELEGRAM_WEBHOOK_SECRET", WEBHOOK_SECRET);
+  Deno.env.set("TELEGRAM_BOT_TOKEN", "stub-bot-token");
+  try {
+    const CHAT_ID = 111000111;
+    const telegramTexts: string[] = [];
+    const originalFetch = globalThis.fetch;
+    const json = (obj: unknown, status = 200) =>
+      new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+    globalThis.fetch = ((input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url.includes("api.telegram.org") && url.includes("sendMessage")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { text?: string };
+        telegramTexts.push(body.text ?? "");
+        return Promise.resolve(json({ ok: true }));
+      }
+      if (url.includes("/rest/v1/telegram_processed_updates")) return Promise.resolve(json({}, 201));
+      if (url.includes("/rest/v1/telegram_links")) return Promise.resolve(json(null));
+      return Promise.resolve(json({ message: "stub" }, 500));
+    }) as typeof fetch;
+    try {
+      const update = {
+        update_id: 5001,
+        message: { message_id: 5001, chat: { id: CHAT_ID, type: "private" }, from: { id: CHAT_ID }, text: "/recover" }
+      };
+      const res = await handler(postWithToken(WEBHOOK_SECRET, update));
+      assertEquals(res.status, 200);
+      assertEquals(telegramTexts.some((t) => t.includes("привязан") || t.includes("No verified")), true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  } finally {
+    clearSecretEnv();
+  }
+});

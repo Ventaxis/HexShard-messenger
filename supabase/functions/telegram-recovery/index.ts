@@ -27,8 +27,62 @@ export async function handler(req: Request): Promise<Response> {
       );
     }
 
+    const ticketId = payload?.ticket_id?.trim();
     const challengeId = payload?.challenge_id?.trim();
     const code = payload?.code?.toString().trim();
+
+    const supabase = getServiceClient();
+
+    if (ticketId) {
+      // S-7: recovery-ticket flow — consumes a one-time bearer ticket minted by the bot's
+      // /recover command. Linking challenges (telegram_challenges) are never touched by
+      // this path, so recovery can no longer burn a pending linking challenge.
+      if (!/^[a-f0-9]{24,64}$/i.test(ticketId)) {
+        return new Response(
+          JSON.stringify({ error: "Invalid recovery ticket format" }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      const { data: ticket, error: ticketErr } = await supabase
+        .from("account_recovery_tickets")
+        .select("*")
+        .eq("ticket_id", ticketId)
+        .maybeSingle();
+      if (ticketErr || !ticket) {
+        return new Response(
+          JSON.stringify({ error: "Recovery ticket not found" }),
+          { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      if (ticket.is_used) {
+        return new Response(
+          JSON.stringify({ error: "This recovery ticket has already been used." }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      if (new Date(ticket.expires_at) < new Date()) {
+        return new Response(
+          JSON.stringify({ error: "This recovery ticket has expired." }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      const { data: usedRows, error: usedErr } = await supabase
+        .from("account_recovery_tickets")
+        .update({ is_used: true })
+        .eq("ticket_id", ticketId)
+        .eq("is_used", false)
+        .select("ticket_id");
+      if (usedErr || !usedRows || usedRows.length === 0) {
+        return new Response(
+          JSON.stringify({ error: "This recovery ticket has already been used." }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      return new Response(
+        JSON.stringify({ verified: true, account_id: ticket.account_id, method: "recovery_ticket" }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     // STRICT: Never allow recovery by arbitrary telegram_user_id. A valid challenge and 6-digit verification code are mandatory.
     if (!challengeId || !code || !/^\d{6}$/.test(code)) {
@@ -37,8 +91,6 @@ export async function handler(req: Request): Promise<Response> {
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
-
-    const supabase = getServiceClient();
 
     // Query challenge
     const { data: challenge, error } = await supabase

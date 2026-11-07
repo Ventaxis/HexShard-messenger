@@ -150,6 +150,73 @@ export async function handler(req: Request): Promise<Response> {
     }
   };
 
+  // Account recovery (S-7): a user who still has a verified Telegram link but lost app
+  // access requests a one-time recovery ticket from the bot. The ticket is a 24-byte
+  // bearer secret stored only as SHA-256, bound to the linked account, and consumed by
+  // telegram-recovery — this flow never touches linking challenges (telegram_challenges).
+  if (rawText === "/recover" || rawText.startsWith("/recover ")) {
+    const { data: recoveryLink } = await supabase
+      .from("telegram_links")
+      .select("account_id")
+      .eq("telegram_user_id", telegramUserId)
+      .eq("verified", true)
+      .maybeSingle();
+
+    if (!recoveryLink) {
+      await sendTgMessage(
+        "⚠️ <b>К этому Telegram не привязан подтверждённый аккаунт HexShard.</b>\n\n<i>No verified HexShard account is linked to this Telegram identity.</i>"
+      );
+      return new Response("OK", { status: 200 });
+    }
+
+    // Durable mint rate limit: max 3 recovery tickets per 5 minutes per Telegram identity.
+    const recoveryWindowStart = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    const { count: recoveryMinted } = await supabase
+      .from("account_recovery_tickets")
+      .select("*", { count: "exact", head: true })
+      .eq("telegram_user_id", telegramUserId)
+      .gt("created_at", recoveryWindowStart);
+    if ((recoveryMinted ?? 0) >= 3) {
+      await sendTgMessage(
+        "⏳ <b>Слишком много запросов восстановления.</b> Пожалуйста, подождите несколько минут.\n\n<i>Too many recovery requests. Please wait a few minutes.</i>"
+      );
+      return new Response("OK", { status: 200 });
+    }
+
+    // Invalidate prior unused tickets, then mint a fresh single-use one.
+    await supabase
+      .from("account_recovery_tickets")
+      .update({ is_used: true })
+      .eq("telegram_user_id", telegramUserId)
+      .eq("is_used", false);
+
+    const ticketBytes = new Uint8Array(24);
+    crypto.getRandomValues(ticketBytes);
+    const ticketId = Array.from(ticketBytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+    const ticketHash = await sha256Hex(ticketId);
+    const ticketExpires = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    const { error: ticketErr } = await supabase.from("account_recovery_tickets").insert({
+      ticket_id: ticketId,
+      account_id: recoveryLink.account_id,
+      telegram_user_id: telegramUserId,
+      ticket_hash: ticketHash,
+      is_used: false,
+      expires_at: ticketExpires,
+    });
+    if (ticketErr) {
+      console.error("Failed to mint recovery ticket:", ticketErr);
+      await sendTgMessage("❌ <b>Не удалось создать тикет восстановления.</b> Попробуйте позже.");
+      return new Response("OK", { status: 200 });
+    }
+    await sendTgMessage(
+      "🔑 <b>Тикет восстановления аккаунта HexShard</b>\n\n" +
+      `Код: <code>${ticketId}</code>\n` +
+      "Действителен 10 минут и одноразовый. Введите его в HexShard на экране входа.\n" +
+      "<i>Никому не передавайте этот код — он даёт доступ к вашему аккаунту.</i>"
+    );
+    return new Response("OK", { status: 200 });
+  }
+
   // 4. Extract token / challenge ID
   let tokenParam = "";
   if (rawText.startsWith("/start")) {
