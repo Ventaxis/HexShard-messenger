@@ -56,6 +56,15 @@ const dailyQuotaMap = new Map<string, { date: string; count: number }>();
 
 const TAVILY_API_KEY = Deno.env.get("TAVILY_API_KEY") ?? "";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+const SUPABASE_REGION = Deno.env.get("SUPABASE_REGION") ?? "unknown";
+
+/** Uniform error shape with a diagnostic meta block (region, limits, attempted model). */
+function errJson(status: number, code: string, message: string, extraMeta: Record<string, unknown> = {}): Response {
+  return new Response(
+    JSON.stringify({ error: message, code, message, meta: { region: SUPABASE_REGION, ...extraMeta } }),
+    { status, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+  );
+}
 
 const VENTAXIS_SYSTEM_PROMPT = `You are Ventaxis AI, the advanced analytical AI persona built directly inside HexShard Messenger.
 
@@ -208,23 +217,13 @@ export async function handler(req: Request): Promise<Response> {
     // Read the key per request: secrets rotate without an isolate restart.
     const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY") ?? "";
     if (!GROQ_API_KEY) {
-      return new Response(
-        JSON.stringify({ error: "AI service configuration is missing on the server", code: "AI_UNAVAILABLE", message: "AI service configuration is missing on the server." }),
-        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return errJson(503, "AI_UNAVAILABLE", "AI service configuration is missing on the server.");
     }
 
     if (!GROQ_API_KEY.startsWith("gsk_")) {
       // Groq API keys always start with "gsk_". Anything else in the secret is a
       // misconfigured value — say so loudly instead of leaking an opaque upstream 403.
-      return new Response(
-        JSON.stringify({
-          error: "GROQ_API_KEY is malformed: Groq keys start with 'gsk_'. Update the GROQ_API_KEY secret with a key from console.groq.com/apikeys",
-          code: "AI_CONFIG_ERROR",
-          message: "AI service configuration is invalid on the server (GROQ_API_KEY malformed)."
-        }),
-        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return errJson(503, "AI_CONFIG_ERROR", "GROQ_API_KEY is malformed: Groq keys start with 'gsk_'. Update the GROQ_API_KEY secret with a key from console.groq.com/apikeys");
     }
 
     // Rate limiting (cooldown)
@@ -233,10 +232,7 @@ export async function handler(req: Request): Promise<Response> {
     const memoryDiff = now - lastMemoryReq;
     if (memoryDiff < REQUEST_COOLDOWN_MS) {
       const retryAfterSec = Math.ceil((REQUEST_COOLDOWN_MS - memoryDiff) / 1000);
-      return new Response(
-        JSON.stringify({ error: "Rate limit exceeded", code: "AI_RATE_LIMITED", message: "Rate limit exceeded. Please wait a moment before sending another message.", retry_after_seconds: retryAfterSec }),
-        { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return errJson(429, "AI_RATE_LIMITED", "Rate limit exceeded. Please wait a moment before sending another message.", { cooldown_seconds: retryAfterSec });
     }
     memoryRateLimit.set(user.id, now);
 
@@ -276,6 +272,13 @@ export async function handler(req: Request): Promise<Response> {
       await serviceClient.from("rate_limits").upsert({ user_id: user.id, last_request_at: new Date().toISOString() });
     } catch (_dbError) { /* memory limiter already guarded */ }
 
+    // Body size guard: multi-MB payloads (oversized base64 images) must fail with a
+    // clear, diagnosable code instead of an opaque gateway rejection.
+    const contentLength = Number(req.headers.get("content-length") ?? 0);
+    if (contentLength > 6_000_000) {
+      return errJson(413, "AI_PAYLOAD_TOO_LARGE", "Request payload too large. Crop or compress the image and try again.", { content_length: contentLength });
+    }
+
     // Payload
     let payload: any;
     try {
@@ -288,18 +291,17 @@ export async function handler(req: Request): Promise<Response> {
     }
 
     const rawPersona = payload?.persona_id ? String(payload.persona_id).toLowerCase().trim() : "";
-    if (rawPersona !== "ventaxis" && rawPersona !== "hexagon") {
-      // Strict persona validation: unknown or missing personas are rejected, not guessed.
-      return new Response(
-        JSON.stringify({
-          error: "Unknown persona_id; expected 'ventaxis' or 'hexagon'",
-          code: "UNKNOWN_PERSONA",
-          message: "Unknown persona_id; expected 'ventaxis' or 'hexagon'"
-        }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+    let canonicalPersona: "ventaxis" | "hexagon";
+    if (!rawPersona) {
+      // Pre-persona-routing clients omit persona_id entirely: fall back to the
+      // documented default persona instead of breaking old builds.
+      canonicalPersona = "hexagon";
+    } else if (rawPersona !== "ventaxis" && rawPersona !== "hexagon") {
+      // Strict persona validation: garbage personas are rejected, not guessed.
+      return errJson(400, "UNKNOWN_PERSONA", "Unknown persona_id; expected 'ventaxis' or 'hexagon'");
+    } else {
+      canonicalPersona = rawPersona;
     }
-    const canonicalPersona: "ventaxis" | "hexagon" = rawPersona;
     const systemPrompt = canonicalPersona === "ventaxis" ? VENTAXIS_SYSTEM_PROMPT : HEXAGON_SYSTEM_PROMPT;
 
     let rawMessages: any[] = Array.isArray(payload?.messages)
@@ -354,8 +356,10 @@ export async function handler(req: Request): Promise<Response> {
     let reply: string | null = null;
     let usedModel = "";
     let lastUpstreamStatus = 0;
+    const attemptedModels: string[] = [];
     for (const spec of chain) {
       try {
+        attemptedModels.push(spec.model);
         const reqBody: any = {
           model: spec.model,
           messages: groqMessages,
@@ -365,9 +369,6 @@ export async function handler(req: Request): Promise<Response> {
           stop: null,
         };
         if (spec.reasoning_effort) reqBody.reasoning_effort = spec.reasoning_effort;
-        if (hasImage && spec.model.startsWith("meta-llama/")) {
-          reqBody.messages = groqMessages;
-        }
         const res = await fetch(GROQ_URL, {
           method: "POST",
           headers: {
@@ -393,15 +394,56 @@ export async function handler(req: Request): Promise<Response> {
       }
     }
 
+    if (!reply && hasImage) {
+      // Vision models unavailable/failed: the promised graceful degradation — retry the
+      // primary TEXT model with image parts stripped, so the user still gets an answer
+      // to the text part instead of a hard 502.
+      const textOnly = groqMessages.map((m: any) =>
+        Array.isArray(m.content)
+          ? { ...m, content: m.content.filter((p: any) => p.type !== "image_url") }
+          : m
+      );
+      const spec = MODEL_CHAINS[canonicalPersona][0];
+      attemptedModels.push(spec.model + " (text-only retry)");
+      try {
+        const reqBody: any = {
+          model: spec.model,
+          messages: textOnly,
+          max_completion_tokens: spec.max_completion_tokens,
+          temperature: spec.temperature,
+          top_p: spec.top_p,
+          stop: null,
+        };
+        if (spec.reasoning_effort) reqBody.reasoning_effort = spec.reasoning_effort;
+        const res = await fetch(GROQ_URL, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${GROQ_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(reqBody),
+          signal: AbortSignal.timeout(20000),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const candidate = data?.choices?.[0]?.message?.content;
+          if (candidate && typeof candidate === "string" && candidate.trim().length > 0) {
+            reply = candidate.trim() + visionFallbackNotice;
+            usedModel = `${spec.model} (text-only fallback)`;
+          }
+        } else {
+          lastUpstreamStatus = res.status;
+        }
+      } catch (_e) { /* fall through to the error response */ }
+    }
+
     if (!reply) {
       const code = lastUpstreamStatus === 429 ? "AI_RATE_LIMITED" : "AI_UPSTREAM_ERROR";
-      return new Response(
-        JSON.stringify({
-          error: `Upstream model error (${lastUpstreamStatus})`,
-          code: code,
-          message: `Upstream model error (${lastUpstreamStatus}) for persona ${canonicalPersona}`,
-        }),
-        { status: lastUpstreamStatus === 429 ? 429 : 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      return errJson(
+        lastUpstreamStatus === 429 ? 429 : 502,
+        code,
+        `Upstream model error (${lastUpstreamStatus}) for persona ${canonicalPersona}`,
+        { model_attempted: attemptedModels.join(", "), upstream_status: lastUpstreamStatus }
       );
     }
 

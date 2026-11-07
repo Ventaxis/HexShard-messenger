@@ -94,19 +94,6 @@ Deno.test("unknown persona_id is rejected with UNKNOWN_PERSONA and never reaches
   }
 });
 
-Deno.test("missing persona_id is rejected (no silent fallback)", async () => {
-  installFetchStub();
-  try {
-    const res = await handler(aiRequest(undefined, "tok-missing-persona"));
-    assertEquals(res.status, 400);
-    const json = await res.json();
-    assertEquals(json.code, "UNKNOWN_PERSONA");
-    assertEquals(groqCalls.length, 0);
-  } finally {
-    restoreFetch();
-  }
-});
-
 Deno.test("valid ventaxis persona returns the Groq reply with the persona echoed", async () => {
   installFetchStub({ groqBody: { choices: [{ message: { content: "Привет, я Вентаксис!" } }], model: "openai/gpt-oss-120b" } });
   try {
@@ -185,6 +172,92 @@ Deno.test("malformed Groq key (missing gsk_ prefix) is rejected with a loud conf
     assertEquals(groqCalls.length, 0, "no Groq call is made with a malformed key");
   } finally {
     if (realKey !== undefined) Deno.env.set("GROQ_API_KEY", realKey);
+    restoreFetch();
+  }
+});
+
+Deno.test("missing persona_id falls back to the documented default (hexagon) for old clients", async () => {
+  installFetchStub({ groqBody: { choices: [{ message: { content: "Ответ по умолчанию" } }], model: "qwen/qwen3.8-27b" } });
+  try {
+    const req = new Request("https://project.functions.supabase.co/gemini-assistant", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer tok-no-persona" },
+      body: JSON.stringify({ messages: [{ role: "user", text: "hi" }] })
+    });
+    const res = await handler(req);
+    assertEquals(res.status, 200);
+    const json = await res.json();
+    assertEquals(json.persona_id, "hexagon");
+    assertEquals(groqCalls.length, 1);
+  } finally {
+    restoreFetch();
+  }
+});
+
+Deno.test("vision failure falls back to text-only answer instead of 502", async () => {
+  // First Groq call (vision chain, image attached) fails with upstream 400;
+  // the text-only retry (image stripped) must succeed and return the reply.
+  let groqAttempt = 0;
+  installFetchStub();
+  try {
+    globalThis.fetch = ((input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes("api.tavily.com")) {
+        return Promise.resolve(new Response(JSON.stringify({ results: [] }), { status: 200 }));
+      }
+      if (url.includes("api.groq.com")) {
+        groqAttempt++;
+        groqCalls.push(url);
+        try {
+          groqBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        } catch (_e) { groqBodies.push({}); }
+        if (groqAttempt === 1) {
+          return Promise.resolve(new Response(JSON.stringify({ error: { message: "model does not support images" } }), { status: 400 }));
+        }
+        return Promise.resolve(new Response(JSON.stringify({ choices: [{ message: { content: "Это квадрат." } }], model: "qwen" }), { status: 200 }));
+      }
+      if (url.includes("/auth/v1/user")) {
+        return Promise.resolve(new Response(JSON.stringify({ id: "user-tok-vision", aud: "authenticated" }), { status: 200 }));
+      }
+      return Promise.resolve(new Response("stub", { status: 500 }));
+    }) as typeof fetch;
+    try {
+      const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+      const res = await handler(new Request("https://project.functions.supabase.co/gemini-assistant", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer tok-vision" },
+        body: JSON.stringify({ persona_id: "hexagon", messages: [{ role: "user", text: "что на картинке", image: PNG, mime_type: "image/png" }] })
+      }));
+      assertEquals(res.status, 200, "text-only fallback must rescue the image path");
+      const json = await res.json();
+      assertEquals(json.reply, "Это квадрат.");
+      assertEquals(groqAttempt, 2, "vision attempt + text-only retry");
+      // The retry must NOT contain the image payload
+      const retryMessages = JSON.stringify(groqBodies[1].messages);
+      assertEquals(retryMessages.includes("image_url"), false, "retry must be text-only");
+    } finally {
+      restoreFetch();
+    }
+  } finally {
+    restoreFetch();
+  }
+});
+
+Deno.test("error responses carry meta (region, model_attempted) for diagnostics", async () => {
+  installFetchStub();
+  try {
+    const req = new Request("https://project.functions.supabase.co/gemini-assistant", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer tok-meta" },
+      body: JSON.stringify({ persona_id: "hexgarbage", messages: [{ role: "user", text: "hi" }] })
+    });
+    const res = await handler(req);
+    assertEquals(res.status, 400);
+    const json = await res.json();
+    assertEquals(json.code, "UNKNOWN_PERSONA");
+    assertEquals(json.meta !== undefined, true, "diagnostic meta block is required");
+    assertEquals(typeof json.meta.region, "string");
+  } finally {
     restoreFetch();
   }
 });
