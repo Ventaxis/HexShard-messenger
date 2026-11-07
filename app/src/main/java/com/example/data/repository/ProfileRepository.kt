@@ -573,28 +573,14 @@ class ProfileRepository(private val context: Context?) {
                 uploadResponse.close()
                 finalAvatarUri = "$baseUrl/storage/v1/object/public/avatars/$objectPath"
             } else {
+                // FIX (avatars masquerade): storage failures were silently converted to a
+                // base64 data-URI avatar and reported as "Avatar updated" while the bucket
+                // stayed empty. Surface the real error and abort — the caller already
+                // renders a failure toast for null.
                 val errBody = uploadResponse.body?.string() ?: ""
                 uploadResponse.close()
-                Timber.w("Storage avatars bucket returned code ${uploadResponse.code} ($errBody). Falling back to database data URI storage.")
-                
-                // Compress image to clean, compact JPEG data URI
-                val compressedBytes = try {
-                    val bitmap = android.graphics.BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
-                    if (bitmap != null) {
-                        val maxDim = 320
-                        val scale = (maxDim.toFloat() / maxOf(bitmap.width, bitmap.height)).coerceAtMost(1f)
-                        val scaledBitmap = if (scale < 1f) {
-                            android.graphics.Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).toInt(), (bitmap.height * scale).toInt(), true)
-                        } else bitmap
-                        val bos = java.io.ByteArrayOutputStream()
-                        scaledBitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, bos)
-                        bos.toByteArray()
-                    } else imageBytes
-                } catch (_: Exception) {
-                    imageBytes
-                }
-                val b64 = android.util.Base64.encodeToString(compressedBytes, android.util.Base64.NO_WRAP)
-                finalAvatarUri = "data:image/jpeg;base64,$b64"
+                Timber.w("Storage avatars bucket returned HTTP ${uploadResponse.code}: $errBody")
+                return null
             }
 
             val publicUrl = finalAvatarUri ?: "$baseUrl/storage/v1/object/public/avatars/$objectPath"

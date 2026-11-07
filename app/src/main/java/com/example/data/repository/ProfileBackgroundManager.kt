@@ -43,7 +43,10 @@ enum class ValidationErrorReason {
 
 object ProfileBackgroundManager {
 
-    const val MAX_FILE_SIZE_BYTES: Long = 2097152L // Strictly 2 MiB (2 * 1024 * 1024 bytes)
+    // PRE-compression gate: camera sources reach 2-8 MiB, and validation ran BEFORE
+    // the downscale pipeline — big sources died here and never got compressed. The
+    // FINAL bytes are still checked against the 512 KiB storage limit after encoding.
+    const val MAX_FILE_SIZE_BYTES: Long = 20971520L // 20 MiB source cap
     const val BUCKET_NAME: String = "profile-backgrounds"
 
     private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
@@ -68,7 +71,7 @@ object ProfileBackgroundManager {
         if (size > MAX_FILE_SIZE_BYTES) {
             return BackgroundValidationResult.Error(
                 ValidationErrorReason.FILE_TOO_LARGE,
-                "File size ($size bytes) exceeds 2 MiB limit ($MAX_FILE_SIZE_BYTES bytes)"
+                "File size ($size bytes) exceeds the 20 MiB source limit ($MAX_FILE_SIZE_BYTES bytes)"
             )
         }
 
