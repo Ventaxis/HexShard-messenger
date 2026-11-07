@@ -6,6 +6,7 @@ import { assertEquals } from "https://deno.land/std@0.168.0/testing/asserts.ts";
 
 Deno.env.set("HEXSHARD_SKIP_SERVE", "1");
 Deno.env.set("GROQ_API_KEY", "test-groq-key");
+Deno.env.set("TAVILY_API_KEY", "stub-tavily-key");
 Deno.env.set("SUPABASE_URL", "https://stub.supabase.co");
 Deno.env.set("SUPABASE_ANON_KEY", "stub-anon-key");
 Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "stub-service-key");
@@ -13,14 +14,29 @@ Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "stub-service-key");
 const { handler } = await import("../gemini-assistant/index.ts");
 
 const groqCalls: string[] = [];
+const groqBodies: Record<string, unknown>[] = [];
 const originalFetch = globalThis.fetch;
 
 function installFetchStub(opts: { groqBody?: unknown; groqStatus?: number } = {}) {
   groqCalls.length = 0;
+  groqBodies.length = 0;
   const stub = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes("api.tavily.com")) {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ results: [{ title: "Quantum computer", content: "QC uses qubits", url: "https://example.com/qc" }] }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+      );
+    }
     if (url.includes("api.groq.com")) {
       groqCalls.push(url);
+      try {
+        groqBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      } catch (_e) {
+        groqBodies.push({});
+      }
       const body = JSON.stringify(
         opts.groqBody ?? { choices: [{ message: { content: "Привет!" } }], model: "stub-model" }
       );
@@ -118,6 +134,35 @@ Deno.test("requests without a Bearer token are rejected as unauthorized", async 
     const json = await res.json();
     assertEquals(json.code, "AI_UNAUTHORIZED");
     assertEquals(groqCalls.length, 0);
+  } finally {
+    restoreFetch();
+  }
+});
+
+Deno.test("web search context is delivered as delimited untrusted user message, never a system role", async () => {
+  installFetchStub({ groqBody: { choices: [{ message: { content: "Ответ с вебом!" } }], model: "stub-model" } });
+  try {
+    const req = new Request("https://project.functions.supabase.co/gemini-assistant", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer tok-web" },
+      body: JSON.stringify({
+        persona_id: "hexagon",
+        messages: [{ role: "user", text: "Что такое квантовый компьютер?" }]
+      })
+    });
+    const res = await handler(req);
+    assertEquals(res.status, 200);
+    assertEquals(groqCalls.length, 1, "Tavily search and Groq call both happen");
+
+    const messages = groqBodies[0].messages as { role: string; content: unknown }[];
+    assertEquals(
+      messages.filter((m) => m.role === "system").length, 1,
+      "exactly one system message (the persona prompt) is allowed"
+    );
+    const webMsg = messages.find((m) => m.role === "user" && JSON.stringify(m.content).includes("<web_context>"));
+    assertEquals(webMsg !== undefined, true, "web context must be a user message wrapped in <web_context> delimiters");
+    assertEquals(JSON.stringify(webMsg?.content).includes("untrusted external data"), true,
+      "the untrusted-data warning must travel with the web context");
   } finally {
     restoreFetch();
   }
