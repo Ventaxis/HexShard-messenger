@@ -11,7 +11,7 @@ async function sha256Hex(text: string): Promise<string> {
     .join("");
 }
 
-serve(async (req: Request) => {
+export async function handler(req: Request): Promise<Response> {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
@@ -85,16 +85,48 @@ serve(async (req: Request) => {
     // Verify code hash
     const inputHash = await sha256Hex(code);
     if (inputHash !== challenge.code_hash) {
-      const nextAttempts = challenge.attempts + 1;
-      await supabase
-        .from("telegram_challenges")
-        .update({ attempts: nextAttempts })
-        .eq("challenge_id", challengeId);
+      // Atomic CAS bump: increments only while the stored attempts still equals the value we
+      // read AND stays below max_attempts. A parallel guess re-reads and retries, so the cap
+      // can never be raced past (closes the TOCTOU of the old read-then-write).
+      let currentAttempts = challenge.attempts as number;
+      const maxAttempts = challenge.max_attempts as number;
+      let bumped = false;
+      for (let round = 0; round < 5 && currentAttempts < maxAttempts; round++) {
+        const { data: bumpedRows, error: bumpErr } = await supabase
+          .from("telegram_challenges")
+          .update({ attempts: currentAttempts + 1 })
+          .eq("challenge_id", challengeId)
+          .eq("attempts", currentAttempts)
+          .eq("is_used", false)
+          .lt("attempts", maxAttempts)
+          .select("attempts");
+        if (bumpErr) break;
+        if (bumpedRows && bumpedRows.length > 0) {
+          currentAttempts = bumpedRows[0].attempts as number;
+          bumped = true;
+          break;
+        }
+        // Lost the CAS race — re-read the current counter and retry.
+        const { data: fresh } = await supabase
+          .from("telegram_challenges")
+          .select("attempts")
+          .eq("challenge_id", challengeId)
+          .maybeSingle();
+        if (!fresh) break;
+        currentAttempts = fresh.attempts as number;
+      }
+
+      if (!bumped) {
+        return new Response(
+          JSON.stringify({ error: "Maximum verification attempts exceeded for this challenge." }),
+          { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
 
       return new Response(
         JSON.stringify({
           error: "Invalid verification code",
-          attempts_remaining: Math.max(0, challenge.max_attempts - nextAttempts),
+          attempts_remaining: Math.max(0, maxAttempts - currentAttempts),
         }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
@@ -145,4 +177,9 @@ serve(async (req: Request) => {
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
-});
+}
+
+// Do not bind a port when imported for unit tests; the handler is called directly there.
+if (Deno.env.get("HEXSHARD_SKIP_SERVE") !== "1") {
+  serve(handler);
+}
