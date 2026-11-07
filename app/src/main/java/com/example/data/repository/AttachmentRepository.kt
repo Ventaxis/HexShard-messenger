@@ -53,8 +53,10 @@ class AttachmentRepository(
         )
 
         fun isMimeTypeAllowed(mimeType: String): Boolean {
-            val clean = mimeType.trim().lowercase()
-            return ALLOWED_MIME_TYPES.any { clean.startsWith(it) }
+            // Exact type/subtype match; parameters (e.g. "; charset=utf-8") are stripped.
+            // Prefix matching previously accepted hostile look-alikes like "image/png-evil".
+            val clean = mimeType.trim().lowercase().substringBefore(';').trim()
+            return clean in ALLOWED_MIME_TYPES
         }
 
         fun clearCacheForAccount(context: Context, accountId: String) {
