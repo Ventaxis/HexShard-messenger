@@ -665,7 +665,8 @@ fun SidebarPanel(
                             isDark = isDark,
                             onClick = { onChatSelected(chat.id) },
                             onPin = { onTogglePin(chat.id) },
-                            onDelete = { onDeleteChat(chat.id) }
+                            onDelete = { onDeleteChat(chat.id) },
+                            onDeleteConversation = onDeleteConversation
                         )
                     }
                 }
@@ -733,7 +734,8 @@ fun SidebarPanel(
                             isDark = isDark,
                             onClick = { onChatSelected(chat.id) },
                             onPin = { onTogglePin(chat.id) },
-                            onDelete = { onDeleteChat(chat.id) }
+                            onDelete = { onDeleteChat(chat.id) },
+                            onDeleteConversation = onDeleteConversation
                         )
                     }
                 }
@@ -761,7 +763,8 @@ fun ChatListItem(
     isDark: Boolean,
     onClick: () -> Unit,
     onPin: () -> Unit,
-    onDelete: () -> Unit = {}
+    onDelete: () -> Unit = {},
+    onDeleteConversation: (Int, String) -> Unit = { _, _ -> }
 ) {
     val strings = LocalStrings.current
     var expanded by remember { mutableStateOf(false) }

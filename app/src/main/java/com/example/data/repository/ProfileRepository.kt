@@ -580,7 +580,7 @@ class ProfileRepository(private val context: Context?) {
                 val errBody = uploadResponse.body?.string() ?: ""
                 uploadResponse.close()
                 Timber.w("Storage avatars bucket returned HTTP ${uploadResponse.code}: $errBody")
-                return null
+                return@withContext null
             }
 
             val publicUrl = finalAvatarUri ?: "$baseUrl/storage/v1/object/public/avatars/$objectPath"

@@ -10,7 +10,9 @@ import com.example.data.repository.CryptoRepository
 import com.example.data.repository.MessageRepository
 import com.example.data.repository.SyncManager
 import com.example.data.repository.UserRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.withContext
 import timber.log.Timber
 import java.io.File
 import java.security.PublicKey
