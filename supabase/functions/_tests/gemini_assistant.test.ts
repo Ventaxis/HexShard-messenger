@@ -211,7 +211,9 @@ Deno.test("vision failure falls back to text-only answer instead of 502", async 
         try {
           groqBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
         } catch (_e) { groqBodies.push({}); }
-        if (groqAttempt === 1) {
+        // All three vision-chain models fail (e.g. deprecated upstream); only the
+        // text-only retry (attempt 4) succeeds.
+        if (groqAttempt <= 3) {
           return Promise.resolve(new Response(JSON.stringify({ error: { message: "model does not support images" } }), { status: 400 }));
         }
         return Promise.resolve(new Response(JSON.stringify({ choices: [{ message: { content: "Это квадрат." } }], model: "qwen" }), { status: 200 }));
@@ -230,11 +232,20 @@ Deno.test("vision failure falls back to text-only answer instead of 502", async 
       }));
       assertEquals(res.status, 200, "text-only fallback must rescue the image path");
       const json = await res.json();
-      assertEquals(json.reply, "Это квадрат.");
-      assertEquals(groqAttempt, 2, "vision attempt + text-only retry");
-      // The retry must NOT contain the image payload
-      const retryMessages = JSON.stringify(groqBodies[1].messages);
-      assertEquals(retryMessages.includes("image_url"), false, "retry must be text-only");
+      assertEquals(json.reply.includes("Это квадрат."), true);
+      // The user must be told the image could not be analyzed
+      assertEquals(json.reply.includes("temporarily unavailable"), true, "fallback notice is required");
+      assertEquals(groqAttempt >= 2, true, "vision attempt + text-only retry");
+      // Somewhere in the chain there must be a text-only retry: no image payload,
+      // and content flattened to plain strings (text-only Groq models reject
+      // part-array content)
+      const retryBody = groqBodies.find((b) => !JSON.stringify(b).includes("image_url"));
+      assertEquals(retryBody !== undefined, true, "a text-only retry must happen");
+      assertEquals(
+        ((retryBody as Record<string, unknown>).messages as { content: unknown }[]).every((m) => typeof m.content === "string"),
+        true,
+        "retry content must be flattened to strings"
+      );
     } finally {
       restoreFetch();
     }

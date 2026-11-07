@@ -179,14 +179,16 @@ function toGroqMessages(systemPrompt: string, contents: any[], webContext: strin
     if (c.role === "user" && Array.isArray(c.parts)) {
       const text = c.parts.filter((p: any) => p.text).map((p: any) => p.text).join("\n");
       const imagePart = c.parts.find((p: any) => p.image_url);
-      if (imagePart) {
-        out.push({
-          role: "user",
-          content: [
-            { type: "text", text: text || "Опиши, что на изображении." },
-            imagePart.image_url,
-          ],
-        });
+    if (imagePart) {
+      out.push({
+        role: "user",
+        content: [
+          { type: "text", text: text || "Опиши, что на изображении." },
+          // OpenAI-compatible vision part: the type wrapper is REQUIRED — a bare
+          // {url} part made Groq reject every vision request with a 400.
+          { type: "image_url", image_url: imagePart.image_url },
+        ],
+      });
       } else {
         out.push({ role: "user", content: text });
       }
@@ -396,13 +398,17 @@ export async function handler(req: Request): Promise<Response> {
 
     if (!reply && hasImage) {
       // Vision models unavailable/failed: the promised graceful degradation — retry the
-      // primary TEXT model with image parts stripped, so the user still gets an answer
-      // to the text part instead of a hard 502.
-      const textOnly = groqMessages.map((m: any) =>
-        Array.isArray(m.content)
-          ? { ...m, content: m.content.filter((p: any) => p.type !== "image_url") }
-          : m
-      );
+      // primary TEXT model with image parts stripped. Content arrays must be flattened
+      // back to plain strings: text-only Groq models reject part-array content.
+      const textOnly = groqMessages.map((m: any) => {
+        if (!Array.isArray(m.content)) return m;
+        const text = m.content
+          .filter((p: any) => p.type !== "image_url")
+          .map((p: any) => p.text ?? "")
+          .join("\n")
+          .trim();
+        return { ...m, content: text || "Describe the image." };
+      });
       const spec = MODEL_CHAINS[canonicalPersona][0];
       attemptedModels.push(spec.model + " (text-only retry)");
       try {
