@@ -4,6 +4,9 @@
 import { assertEquals } from "https://deno.land/std@0.168.0/testing/asserts.ts";
 
 Deno.env.set("HEXSHARD_SKIP_SERVE", "1");
+Deno.env.set("SUPABASE_URL", "https://stub.supabase.co");
+Deno.env.set("SUPABASE_ANON_KEY", "stub-anon-key");
+Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "stub-service-key");
 
 const { handler } = await import("../telegram-webhook/index.ts");
 
@@ -72,6 +75,80 @@ Deno.test("correct secret passes authentication and reaches the bot-token branch
     assertEquals(res.status, 500);
     const json = await res.json();
     assertEquals(json.error, "TELEGRAM_BOT_TOKEN not configured");
+  } finally {
+    clearSecretEnv();
+  }
+});
+
+Deno.test("challenge minting via /start <account uuid> is rate-limited per telegram chat", async () => {
+  clearSecretEnv();
+  Deno.env.set("TELEGRAM_WEBHOOK_SECRET", WEBHOOK_SECRET);
+  Deno.env.set("TELEGRAM_BOT_TOKEN", "stub-bot-token");
+  try {
+    const CHAT_ID = 987001;
+    const inserts: string[] = [];
+    const telegramTexts: string[] = [];
+    const originalFetch = globalThis.fetch;
+
+    const json = (obj: unknown, status = 200) =>
+      new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+
+    // Dynamic supabase stub: route by table, remember mint inserts.
+    globalThis.fetch = ((input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.includes("api.telegram.org") && url.includes("sendMessage")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { text?: string };
+        telegramTexts.push(body.text ?? "");
+        return Promise.resolve(json({ ok: true }));
+      }
+      if (url.includes("/rest/v1/telegram_processed_updates")) return Promise.resolve(json({}, 201));
+      if (url.includes("/rest/v1/telegram_challenges")) {
+        if (method === "POST") {
+          const body = JSON.parse(String(init?.body ?? "{}")) as { account_id?: string };
+          inserts.push(body.account_id ?? "?");
+          return Promise.resolve(json(body, 201));
+        }
+        if (method === "PATCH") return Promise.resolve(new Response(null, { status: 204 }));
+        // GET lookups (by challenge_id / by account): nothing pending, force the mint path.
+        return Promise.resolve(json(null));
+      }
+      if (url.includes("/rest/v1/profiles")) {
+        // Any UUID in /start resolves to a profile — the abuse the rate limit must contain.
+        const id = decodeURIComponent(url.split("id=eq.")[1] ?? "");
+        return Promise.resolve(json({ id }));
+      }
+      return Promise.resolve(json({ message: "stub" }, 500));
+    }) as typeof fetch;
+
+    try {
+      // Three distinct accounts mint fine...
+      for (let i = 0; i < 3; i++) {
+        const uuid = `11111111-2222-3333-4444-${(555555555555 + i).toString().padStart(12, "0")}`;
+        const update = {
+          update_id: 1000 + i,
+          message: { message_id: 1000 + i, chat: { id: CHAT_ID, type: "private" }, from: { id: CHAT_ID }, text: `/start ${uuid}` }
+        };
+        const res = await handler(postWithToken(WEBHOOK_SECRET, update));
+        assertEquals(res.status, 200);
+      }
+      assertEquals(inserts.length, 3, "each distinct account mints one challenge");
+
+      // ...the fourth within the window is refused without touching the database.
+      const fourthUuid = "11111111-2222-3333-4444-555555555599";
+      const update = {
+        update_id: 1003,
+        message: { message_id: 1003, chat: { id: CHAT_ID, type: "private" }, from: { id: CHAT_ID }, text: `/start ${fourthUuid}` }
+      };
+      const res = await handler(postWithToken(WEBHOOK_SECRET, update));
+      assertEquals(res.status, 200);
+      assertEquals(inserts.length, 3, "rate-limited mint must not insert a challenge");
+      assertEquals(telegramTexts.some((t) => t.includes("Подождите") || t.includes("⏳")), true,
+        "the bot must tell the user to wait instead of minting");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   } finally {
     clearSecretEnv();
   }

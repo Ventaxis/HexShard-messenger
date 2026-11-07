@@ -21,6 +21,12 @@ async function sha256Hex(text: string): Promise<string> {
     .join("");
 }
 
+// Challenge minting rate limit per Telegram chat: /start <account uuid> mints a challenge
+// for any existing profile, so without a cap one chat could spam rows for every known UUID.
+const CHALLENGE_MINT_WINDOW_MS = 5 * 60 * 1000;
+const CHALLENGE_MINT_LIMIT = 3;
+const challengeMintTimes = new Map<string, number[]>();
+
 export async function handler(req: Request): Promise<Response> {
   // Allow GET for webhook health checks
   if (req.method === "GET") {
@@ -207,6 +213,18 @@ export async function handler(req: Request): Promise<Response> {
         .maybeSingle();
 
       if (profile) {
+        const nowMs = Date.now();
+        const stamps = (challengeMintTimes.get(String(telegramUserId)) ?? [])
+          .filter((t) => nowMs - t < CHALLENGE_MINT_WINDOW_MS);
+        if (stamps.length >= CHALLENGE_MINT_LIMIT) {
+          await sendTgMessage(
+            "⏳ <b>Слишком много запросов кода.</b>\n\nПожалуйста, подождите несколько минут перед повторной попыткой.\n\n<i>Too many code requests. Please wait a few minutes and try again.</i>"
+          );
+          return new Response("OK", { status: 200 });
+        }
+        stamps.push(nowMs);
+        challengeMintTimes.set(String(telegramUserId), stamps);
+
         const randomBytes = new Uint8Array(24);
         crypto.getRandomValues(randomBytes);
         const dynamicChallengeId = Array.from(randomBytes).map((b) => b.toString(16).padStart(2, "0")).join("");
