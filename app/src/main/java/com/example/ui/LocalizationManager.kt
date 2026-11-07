@@ -1,6 +1,7 @@
 package com.example.ui
 
 import android.content.Context
+import android.telephony.TelephonyManager
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.staticCompositionLocalOf
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -72,6 +73,7 @@ data class AppStrings(
     val selectLanguage: String,
     val english: String,
     val russian: String,
+    val systemDefault: String,
     val storageData: String,
     val support: String,
     val helpCenter: String,
@@ -304,6 +306,7 @@ val EnglishStrings = AppStrings(
     selectLanguage = "Select Language",
     english = "English",
     russian = "Russian",
+    systemDefault = "System default",
     storageData = "Data & Storage",
     support = "Support",
     helpCenter = "Help Center / FAQ",
@@ -535,6 +538,7 @@ val RussianStrings = AppStrings(
     selectLanguage = "Выберите язык",
     english = "English",
     russian = "Русский",
+    systemDefault = "Как в системе",
     storageData = "Данные и память",
     support = "Поддержка",
     helpCenter = "Помощь / FAQ",
@@ -719,28 +723,64 @@ val LocalAppLanguage = compositionLocalOf { AppLanguage.ENGLISH }
 object LocalizationManager {
     private const val PREFS_NAME = "hexshard_profile"
     private const val KEY_LANGUAGE = "app_language"
+    private const val VALUE_SYSTEM = "system"
 
     private val _currentLanguage = MutableStateFlow(AppLanguage.ENGLISH)
     val currentLanguage: StateFlow<AppLanguage> = _currentLanguage.asStateFlow()
 
+    @Volatile
+    private var systemSelected = false
+    val isSystemSelected: Boolean get() = systemSelected
+
     fun init(context: Context) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val savedLang = prefs.getString(KEY_LANGUAGE, null)
-        val lang = if (savedLang != null) {
+        systemSelected = savedLang == null || savedLang == VALUE_SYSTEM
+        val lang = if (savedLang != null && savedLang != VALUE_SYSTEM) {
             AppLanguage.fromCode(savedLang)
         } else {
-            val deviceLang = Locale.getDefault().language
-            if (deviceLang.startsWith("ru", ignoreCase = true)) AppLanguage.RUSSIAN else AppLanguage.ENGLISH
+            detectByRegion(context)
         }
         _currentLanguage.value = lang
         applyLocaleToConfiguration(context, lang)
     }
 
+    /**
+     * Region-first detection: SIM/network country wins ("RU" -> Russian, any other
+     * country -> English), falling back to the device locale language when telephony
+     * has no country info (tablets, emulators).
+     */
+    fun detectByRegion(context: Context): AppLanguage {
+        val tm = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+        val simCountry = tm?.simCountryIso?.takeIf { it.isNotBlank() }
+        val networkCountry = tm?.networkCountryIso?.takeIf { it.isNotBlank() }
+        val locale = Locale.getDefault()
+        val country = (networkCountry ?: simCountry ?: locale.country.takeIf { it.isNotBlank() })
+            ?.uppercase(Locale.ROOT)
+        return when {
+            country == "RU" -> AppLanguage.RUSSIAN
+            country != null -> AppLanguage.ENGLISH
+            locale.language.startsWith("ru", ignoreCase = true) -> AppLanguage.RUSSIAN
+            else -> AppLanguage.ENGLISH
+        }
+    }
+
     fun setLanguage(context: Context, language: AppLanguage) {
+        systemSelected = false
         _currentLanguage.value = language
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putString(KEY_LANGUAGE, language.code).apply()
         applyLocaleToConfiguration(context, language)
+    }
+
+    /** Clears the explicit pick and re-detects the language from region/locale. */
+    fun setSystemLanguage(context: Context) {
+        systemSelected = true
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putString(KEY_LANGUAGE, VALUE_SYSTEM).apply()
+        val lang = detectByRegion(context)
+        _currentLanguage.value = lang
+        applyLocaleToConfiguration(context, lang)
     }
 
     fun getStrings(language: AppLanguage): AppStrings {

@@ -801,6 +801,27 @@ fun SettingsScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable {
+                                LocalizationManager.setSystemLanguage(context)
+                                showLanguage = false
+                            }
+                            .padding(vertical = 12.dp, horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = LocalizationManager.isSystemSelected,
+                            onClick = {
+                                LocalizationManager.setSystemLanguage(context)
+                                showLanguage = false
+                            }
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(strings.systemDefault, fontSize = 16.sp, fontWeight = if (LocalizationManager.isSystemSelected) FontWeight.Bold else FontWeight.Normal)
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
                                 LocalizationManager.setLanguage(context, AppLanguage.ENGLISH)
                                 showLanguage = false
                             }
@@ -808,14 +829,14 @@ fun SettingsScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         RadioButton(
-                            selected = currentLang == AppLanguage.ENGLISH,
+                            selected = !LocalizationManager.isSystemSelected && currentLang == AppLanguage.ENGLISH,
                             onClick = {
                                 LocalizationManager.setLanguage(context, AppLanguage.ENGLISH)
                                 showLanguage = false
                             }
                         )
                         Spacer(modifier = Modifier.width(12.dp))
-                        Text(strings.english, fontSize = 16.sp, fontWeight = if (currentLang == AppLanguage.ENGLISH) FontWeight.Bold else FontWeight.Normal)
+                        Text(strings.english, fontSize = 16.sp, fontWeight = if (!LocalizationManager.isSystemSelected && currentLang == AppLanguage.ENGLISH) FontWeight.Bold else FontWeight.Normal)
                     }
 
                     Row(
@@ -829,14 +850,14 @@ fun SettingsScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         RadioButton(
-                            selected = currentLang == AppLanguage.RUSSIAN,
+                            selected = !LocalizationManager.isSystemSelected && currentLang == AppLanguage.RUSSIAN,
                             onClick = {
                                 LocalizationManager.setLanguage(context, AppLanguage.RUSSIAN)
                                 showLanguage = false
                             }
                         )
                         Spacer(modifier = Modifier.width(12.dp))
-                        Text(strings.russian, fontSize = 16.sp, fontWeight = if (currentLang == AppLanguage.RUSSIAN) FontWeight.Bold else FontWeight.Normal)
+                        Text(strings.russian, fontSize = 16.sp, fontWeight = if (!LocalizationManager.isSystemSelected && currentLang == AppLanguage.RUSSIAN) FontWeight.Bold else FontWeight.Normal)
                     }
                 }
             },
