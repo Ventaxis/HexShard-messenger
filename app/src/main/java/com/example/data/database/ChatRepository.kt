@@ -311,4 +311,85 @@ open class ChatRepository(
         startRealtimeSync()
         return result
     }
+
+    /**
+     * Server-authorized conversation deletion helpers (v1.7.0). Each calls its
+     * SECURITY DEFINER RPC (membership-checked server-side) and mirrors the result
+     * locally. Markers let the sync catch-up skip everything up to the deletion point.
+     */
+    private suspend fun callConversationRpc(rpc: String, conversationId: String, token: String, baseUrl: String, anonKey: String): Long? =
+        withContext(Dispatchers.IO) {
+            try {
+                val req = com.example.network.SupabaseHttp.jsonRequest(
+                    "$baseUrl/rest/v1/rpc/$rpc", token, anonKey, "POST",
+                    org.json.JSONObject().put("p_conversation_id", conversationId).toString()
+                ).build()
+                val resp = com.example.network.SupabaseHttp.client.newCall(req).execute()
+                val body = resp.body?.string().orEmpty()
+                val ok = resp.isSuccessful
+                resp.close()
+                if (!ok) {
+                    Timber.w("Conversation RPC $rpc failed: $body")
+                    return@withContext null
+                }
+                org.json.JSONObject(body).optLong("$rpc", body.toLongOrNull() ?: 0L)
+            } catch (e: Exception) {
+                Timber.w(e, "Conversation RPC $rpc exception")
+                null
+            }
+        }
+
+    suspend fun deleteConversationForMe(chat: ChatEntity, context: Context): Boolean =
+        withContext(Dispatchers.IO) {
+            val accountId = getCurrentUserId()
+            val token = com.example.data.SecurePrefsManager.getSupabaseAccessToken(context)
+            val baseUrl = com.example.network.supabase.SupabaseConfig.getBaseUrl()
+            val anonKey = com.example.network.supabase.SupabaseConfig.getAnonKey(context)
+            val marker = callConversationRpc(
+                "delete_conversation_for_me", chat.conversationId.ifBlank { "self_$accountId" },
+                token, baseUrl, anonKey
+            ) ?: return@withContext false
+            if (accountId.isNotBlank()) {
+                com.example.data.SecurePrefsManager.setConversationDeleteMarker(context, accountId, chat.conversationId, marker)
+                chatDao.deleteMessagesByChat(chat.id, accountId)
+                chatDao.deleteChatById(chat.id, accountId)
+            }
+            refreshAccount()
+            true
+        }
+
+    suspend fun deleteConversationForBoth(chat: ChatEntity, context: Context): Boolean =
+        withContext(Dispatchers.IO) {
+            val accountId = getCurrentUserId()
+            val token = com.example.data.SecurePrefsManager.getSupabaseAccessToken(context)
+            val baseUrl = com.example.network.supabase.SupabaseConfig.getBaseUrl()
+            val anonKey = com.example.network.supabase.SupabaseConfig.getAnonKey(context)
+            callConversationRpc(
+                "delete_conversation_for_both", chat.conversationId.ifBlank { chat.recipientId },
+                token, baseUrl, anonKey
+            ) ?: return@withContext false
+            if (accountId.isNotBlank()) {
+                chatDao.deleteMessagesByChat(chat.id, accountId)
+                chatDao.deleteChatById(chat.id, accountId)
+            }
+            refreshAccount()
+            true
+        }
+
+    suspend fun clearConversationMessages(chat: ChatEntity, context: Context): Boolean =
+        withContext(Dispatchers.IO) {
+            val accountId = getCurrentUserId()
+            val token = com.example.data.SecurePrefsManager.getSupabaseAccessToken(context)
+            val baseUrl = com.example.network.supabase.SupabaseConfig.getBaseUrl()
+            val anonKey = com.example.network.supabase.SupabaseConfig.getAnonKey(context)
+            val marker = callConversationRpc(
+                "clear_conversation_messages", chat.conversationId.ifBlank { chat.recipientId },
+                token, baseUrl, anonKey
+            ) ?: return@withContext false
+            if (accountId.isNotBlank()) {
+                com.example.data.SecurePrefsManager.setConversationDeleteMarker(context, accountId, chat.conversationId, marker)
+                chatDao.deleteMessagesByChat(chat.id, accountId)
+            }
+            true
+        }
 }

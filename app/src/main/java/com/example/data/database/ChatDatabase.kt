@@ -205,6 +205,9 @@ interface ChatDao {
     @Query("DELETE FROM chats WHERE id = :id AND accountId = :accountId")
     suspend fun deleteChatById(id: Int, accountId: String)
 
+    @Query("DELETE FROM messages WHERE chatId = :chatId AND accountId = :accountId")
+    suspend fun deleteMessagesByChat(chatId: Int, accountId: String)
+
     @Query("UPDATE messages SET chatId = :targetChatId WHERE chatId = :sourceChatId AND accountId = :accountId")
     suspend fun reassignMessagesChatId(sourceChatId: Int, targetChatId: Int, accountId: String)
 

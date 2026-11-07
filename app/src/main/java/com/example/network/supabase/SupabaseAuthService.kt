@@ -54,6 +54,18 @@ sealed class DeleteAccountResult {
 
 object SupabaseAuthService {
 
+    /**
+     * UX mirror of the server-side reserved_usernames registry (the server remains the
+     * only authority — this list merely gives an instant hint at sign-up time).
+     */
+    private val RESERVED_USERNAMES = setOf(
+        "ventaxis", "ventaxisai", "ventaxis_ai", "hexagon", "hexagonai", "hexagon_ai",
+        "hexshard", "hexshardai", "hexshard_ai", "ventaxiscorp", "ventaxis_corp",
+        "support", "help", "security", "admin", "administrator", "moderator",
+        "root", "system", "official", "staff", "team", "corp",
+        "ai", "ai_assistant", "bot", "noreply", "admin_hexshard"
+    )
+
     fun validateUsername(username: String): String? {
         val clean = username.trim().removePrefix("@")
         if (clean.length < 3 || clean.length > 32) {
@@ -61,6 +73,9 @@ object SupabaseAuthService {
         }
         if (!clean.matches(Regex("^[a-zA-Z0-9_]+$"))) {
             return "Username can only contain Latin letters, numbers, and underscores"
+        }
+        if (clean.lowercase() in RESERVED_USERNAMES) {
+            return "This username is reserved by the operator"
         }
         return null
     }
@@ -293,6 +308,21 @@ object SupabaseAuthService {
                 }
                 if (!profResp.isSuccessful) {
                     Timber.w("Profile initial sync returned HTTP ${profResp.code} - $pBody")
+                    // A failed profile insert previously vanished silently: the auth user
+                    // existed but had no profile (and reserved-username rejections died
+                    // here). Surface it to the caller instead.
+                    val reserved = pBody.contains("reserved", ignoreCase = true) ||
+                            pBody.contains("username", ignoreCase = true) ||
+                            pBody.contains("23505")
+                    profResp.close()
+                    return@withContext if (reserved) {
+                        SignUpResult.Error(
+                            "Username is already taken or reserved by the operator. Please choose another.",
+                            isUsernameTaken = true
+                        )
+                    } else {
+                        SignUpResult.Error("Account created, but profile initialization failed (HTTP ${profResp.code}). Please try signing in.")
+                    }
                 }
                 profResp.close()
             } catch (e: Exception) {

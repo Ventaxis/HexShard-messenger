@@ -187,7 +187,8 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
                         onToggleTheme = { viewModel.toggleTheme() },
                         onNavigateToSettings = onNavigateToSettings,
                         onTogglePin = { viewModel.toggleChatPin(it) },
-                        onDeleteChat = { viewModel.deleteChat(it) }
+                        onDeleteChat = { viewModel.deleteChat(it) },
+                        onDeleteConversation = { id, mode -> viewModel.deleteConversation(id, mode, context) }
                     )
                     
                     Box(
@@ -272,7 +273,8 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
                             onToggleTheme = { viewModel.toggleTheme() },
                             onNavigateToSettings = onNavigateToSettings,
                             onTogglePin = { viewModel.toggleChatPin(it) },
-                            onDeleteChat = { viewModel.deleteChat(it) }
+                            onDeleteChat = { viewModel.deleteChat(it) },
+                        onDeleteConversation = { id, mode -> viewModel.deleteConversation(id, mode, context) }
                         )
                     } else {
                         val activeChat = chats.find { it.id == currentId }
@@ -366,7 +368,8 @@ fun SidebarPanel(
     onToggleTheme: () -> Unit,
     onNavigateToSettings: () -> Unit = {},
     onTogglePin: (Int) -> Unit = {},
-    onDeleteChat: (Int) -> Unit = {}
+    onDeleteChat: (Int) -> Unit = {},
+    onDeleteConversation: (Int, String) -> Unit = {_, _ ->}
 ) {
     val bg = if (isDark) DarkBg else LightBg
     val border = if (isDark) DarkBorder else LightBorder
@@ -920,12 +923,45 @@ fun ChatListItem(
             )
             if (!isSelfChat && !isAiChat) {
                 DropdownMenuItem(
+                    text = { Text(strings.deleteForMe, color = Color.Red) },
+                    onClick = {
+                        expanded = false
+                        onDeleteConversation(chat.id, "me")
+                    },
+                    leadingIcon = { Icon(Icons.Default.Delete, null, tint = Color.Red) }
+                )
+                DropdownMenuItem(
+                    text = { Text(strings.deleteForBoth, color = Color.Red) },
+                    onClick = {
+                        expanded = false
+                        onDeleteConversation(chat.id, "both")
+                    },
+                    leadingIcon = { Icon(Icons.Default.DeleteForever, null, tint = Color.Red) }
+                )
+                DropdownMenuItem(
+                    text = { Text(strings.clearMessages, color = Color.Red) },
+                    onClick = {
+                        expanded = false
+                        onDeleteConversation(chat.id, "clear")
+                    },
+                    leadingIcon = { Icon(Icons.Default.CleaningServices, null, tint = Color.Red) }
+                )
+            } else {
+                DropdownMenuItem(
                     text = { Text(strings.deleteChat, color = Color.Red) },
                     onClick = {
                         expanded = false
                         onDelete()
                     },
                     leadingIcon = { Icon(Icons.Default.Delete, null, tint = Color.Red) }
+                )
+                DropdownMenuItem(
+                    text = { Text(strings.clearMessages, color = Color.Red) },
+                    onClick = {
+                        expanded = false
+                        onDeleteConversation(chat.id, "clear")
+                    },
+                    leadingIcon = { Icon(Icons.Default.CleaningServices, null, tint = Color.Red) }
                 )
             }
         }

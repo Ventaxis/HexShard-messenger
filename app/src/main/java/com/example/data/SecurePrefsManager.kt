@@ -492,6 +492,36 @@ object SecurePrefsManager {
         getPrefs(context).edit().putLong("sync_cursor_${cleanAcc}_${cleanConv}", cursor).apply()
     }
 
+    /** Per-account "deleted for me up to sequence" markers used by the sync catch-up. */
+    fun setConversationDeleteMarker(context: Context, accountId: String, conversationId: String, maxSequence: Long) {
+        val cleanAcc = accountId.trim()
+        val cleanConv = conversationId.trim()
+        if (cleanAcc.isBlank() || cleanConv.isBlank()) return
+        val key = "conv_del_${cleanAcc}_${cleanConv}"
+        val prefs = getPrefs(context)
+        val prev = prefs.getLong(key, 0L)
+        if (maxSequence > prev) {
+            prefs.edit().putLong(key, maxSequence).apply()
+        }
+    }
+
+    fun getConversationDeleteMarker(context: Context, accountId: String, conversationId: String): Long {
+        val cleanAcc = accountId.trim()
+        val cleanConv = conversationId.trim()
+        if (cleanAcc.isBlank() || cleanConv.isBlank()) return 0L
+        return getPrefs(context).getLong("conv_del_${cleanAcc}_${cleanConv}", 0L)
+    }
+
+    fun getAllConversationDeleteMarkers(context: Context, accountId: String): Map<String, Long> {
+        val cleanAcc = accountId.trim()
+        if (cleanAcc.isBlank()) return emptyMap()
+        val prefix = "conv_del_${cleanAcc}_"
+        val prefs = getPrefs(context)
+        return prefs.all.filterKeys { it.startsWith(prefix) }
+            .mapKeys { it.key.removePrefix(prefix) }
+            .filterValues { it is Long } as Map<String, Long>
+    }
+
     fun isLegacyReconciliationDone(context: Context, accountId: String): Boolean {
         val cleanId = accountId.trim()
         if (cleanId.isBlank()) return true

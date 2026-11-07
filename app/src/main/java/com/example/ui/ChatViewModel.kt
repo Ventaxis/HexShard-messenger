@@ -273,6 +273,31 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    /** v1.7.0 deletion modes. Errors land in _aiErrorState's sibling — a generic UI toast flow. */
+    fun deleteConversation(chatId: Int, mode: String, context: android.content.Context) {
+        viewModelScope.launch {
+            val chat = repository.getChatById(chatId) ?: return@launch
+            val ok = when (mode) {
+                "me" -> repository.deleteConversationForMe(chat, context)
+                "both" -> repository.deleteConversationForBoth(chat, context)
+                "clear" -> repository.clearConversationMessages(chat, context)
+                else -> false
+            }
+            if (!ok) {
+                _aiErrorState.value = AiUiError.Custom(
+                    if (LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN)
+                        "Не удалось выполнить удаление на сервере. Проверь соединение."
+                    else "Server deletion failed. Check your connection."
+                )
+                return@launch
+            }
+            if (_selectedChatId.value == chatId) {
+                _selectedChatId.value = null
+            }
+            repository.refreshAccount()
+        }
+    }
+
     suspend fun downloadVoiceMessage(url: String, idempotencyKey: String = ""): ByteArray? {
         val cid = _selectedChatId.value ?: return null
         val chat = repository.getChatById(cid) ?: return null
