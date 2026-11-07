@@ -28,6 +28,14 @@ jobs:
       - name: Accept SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
+      - name: Set up Deno (edge function tests)
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Run edge function tests
+        run: deno test -A supabase/functions/_tests/
+
       # BuildConfig reads SUPABASE_URL / SUPABASE_ANON_KEY from .env (secrets plugin).
       # The app has a baked-in default publishable key, so a missing secret is fine;
       # set SUPABASE_ANON_KEY in repo secrets to override it.

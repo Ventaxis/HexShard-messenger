@@ -189,7 +189,7 @@ function toGroqMessages(systemPrompt: string, contents: any[], webContext: strin
   return out;
 }
 
-serve(async (req: Request) => {
+export async function handler(req: Request): Promise<Response> {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
@@ -398,4 +398,9 @@ serve(async (req: Request) => {
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
-});
+}
+
+// Do not bind a port when imported for unit tests; the handler is called directly there.
+if (Deno.env.get("HEXSHARD_SKIP_SERVE") !== "1") {
+  serve(handler);
+}

@@ -21,7 +21,7 @@ async function sha256Hex(text: string): Promise<string> {
     .join("");
 }
 
-serve(async (req: Request) => {
+export async function handler(req: Request): Promise<Response> {
   // Allow GET for webhook health checks
   if (req.method === "GET") {
     return new Response(
@@ -309,4 +309,9 @@ serve(async (req: Request) => {
   );
 
   return new Response("OK", { status: 200 });
-});
+}
+
+// Do not bind a port when imported for unit tests; the handler is called directly there.
+if (Deno.env.get("HEXSHARD_SKIP_SERVE") !== "1") {
+  serve(handler);
+}
