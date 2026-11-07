@@ -5,7 +5,7 @@
 import { assertEquals } from "https://deno.land/std@0.168.0/testing/asserts.ts";
 
 Deno.env.set("HEXSHARD_SKIP_SERVE", "1");
-Deno.env.set("GROQ_API_KEY", "test-groq-key");
+Deno.env.set("GROQ_API_KEY", "gsk_test_key_for_unit_tests");
 Deno.env.set("TAVILY_API_KEY", "stub-tavily-key");
 Deno.env.set("SUPABASE_URL", "https://stub.supabase.co");
 Deno.env.set("SUPABASE_ANON_KEY", "stub-anon-key");
@@ -164,6 +164,27 @@ Deno.test("web search context is delivered as delimited untrusted user message, 
     assertEquals(JSON.stringify(webMsg?.content).includes("untrusted external data"), true,
       "the untrusted-data warning must travel with the web context");
   } finally {
+    restoreFetch();
+  }
+});
+
+Deno.test("malformed Groq key (missing gsk_ prefix) is rejected with a loud config error", async () => {
+  installFetchStub();
+  const realKey = Deno.env.get("GROQ_API_KEY");
+  Deno.env.set("GROQ_API_KEY", "4d925f3a00b47dd64fef"); // 64-hex style misconfiguration
+  try {
+    const res = await handler(new Request("https://project.functions.supabase.co/gemini-assistant", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer tok-bad-key" },
+      body: JSON.stringify({ persona_id: "hexagon", messages: [{ role: "user", text: "hi" }] })
+    }));
+    assertEquals(res.status, 503);
+    const json = await res.json();
+    assertEquals(json.code, "AI_CONFIG_ERROR");
+    assertEquals(json.error.includes("gsk_"), true, "the error must name the gsk_ format requirement");
+    assertEquals(groqCalls.length, 0, "no Groq call is made with a malformed key");
+  } finally {
+    if (realKey !== undefined) Deno.env.set("GROQ_API_KEY", realKey);
     restoreFetch();
   }
 });

@@ -54,7 +54,6 @@ export const MAX_DAILY_REQUESTS_PER_USER = 500;
 const memoryRateLimit = new Map<string, number>();
 const dailyQuotaMap = new Map<string, { date: string; count: number }>();
 
-const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY") ?? "";
 const TAVILY_API_KEY = Deno.env.get("TAVILY_API_KEY") ?? "";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
@@ -206,9 +205,24 @@ export async function handler(req: Request): Promise<Response> {
       );
     }
 
+    // Read the key per request: secrets rotate without an isolate restart.
+    const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY") ?? "";
     if (!GROQ_API_KEY) {
       return new Response(
         JSON.stringify({ error: "AI service configuration is missing on the server", code: "AI_UNAVAILABLE", message: "AI service configuration is missing on the server." }),
+        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    if (!GROQ_API_KEY.startsWith("gsk_")) {
+      // Groq API keys always start with "gsk_". Anything else in the secret is a
+      // misconfigured value — say so loudly instead of leaking an opaque upstream 403.
+      return new Response(
+        JSON.stringify({
+          error: "GROQ_API_KEY is malformed: Groq keys start with 'gsk_'. Update the GROQ_API_KEY secret with a key from console.groq.com/apikeys",
+          code: "AI_CONFIG_ERROR",
+          message: "AI service configuration is invalid on the server (GROQ_API_KEY malformed)."
+        }),
         { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
