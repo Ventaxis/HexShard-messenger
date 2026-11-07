@@ -365,7 +365,11 @@ class ChatViewModel @Inject constructor(
                     return@launch
                 }
 
-                val audioUrl = repository.uploadMediaMessage(context, uri, cid, type, idempotencyKey, chat.recipientId.ifEmpty { chat.name })
+                // FIX (photos never uploaded): the upload's MIME gate requires a full type
+                // like image/jpeg — the bare "image"/"video" flag was rejected silently.
+                val mediaMime = context.contentResolver.getType(uri)
+                    ?: if (type == "image") "image/jpeg" else "video/mp4"
+                val audioUrl = repository.uploadMediaMessage(context, uri, cid, mediaMime, idempotencyKey, chat.recipientId.ifEmpty { chat.name })
                 if (audioUrl == null) {
                     _isSending.value = false
                     return@launch

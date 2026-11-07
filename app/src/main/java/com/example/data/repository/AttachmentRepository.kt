@@ -271,7 +271,11 @@ class AttachmentRepository(
                     val attachBody = JSONObject().apply {
                         put("id", UUID.randomUUID().toString())
                         put("conversation_id", conversationId)
-                        put("message_id", idempotencyKey.ifBlank { null })
+                        // FIX: message rows are created AFTER the upload, so a pre-filled
+                        // message_id violated the attachments FK and rolled back every
+                        // upload. Insert null and let send_message_idempotent link by
+                        // the storage path / idempotency flow.
+                        put("message_id", org.json.JSONObject.NULL)
                         put("uploader_id", currentUserId)
                         put("owner_id", currentUserId)
                         put("storage_path", objectPath)
