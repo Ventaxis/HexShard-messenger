@@ -205,7 +205,12 @@ class SyncManager(
 
             var maxSeq = chatDao.getMaxSequenceForConversation(convId, currentUserId) ?: 0L
 
-            while (true) {
+            // Page cap mirrors the global-stream loop below: a malformed full page (missing/zero
+            // sequence values) would otherwise repeat the same URL forever and hang the sync pass.
+            var convPageCount = 0
+            while (convPageCount < 100) {
+                convPageCount++
+                val pageStartSeq = maxSeq
                 val url = "$baseUrl/rest/v1/messages?conversation_id=eq.$convId&sequence=gt.$maxSeq&order=sequence.asc&limit=50"
                 val req = Request.Builder()
                     .url(url)
@@ -234,6 +239,13 @@ class SyncManager(
 
                 if (highestInBatch > maxSeq) {
                     maxSeq = highestInBatch
+                }
+
+                // Full page that did not advance the cursor: the same URL would be fetched
+                // again and again. Stop instead of spinning on malformed server rows.
+                if (arr.length() == 50 && maxSeq == pageStartSeq) {
+                    Timber.w("Per-conversation catch-up stalled for $convId (full page, cursor not advancing); stopping")
+                    break
                 }
 
                 if (arr.length() < 50) break
