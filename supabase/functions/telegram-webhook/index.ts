@@ -39,7 +39,10 @@ serve(async (req: Request) => {
   const receivedSecret = req.headers.get("x-telegram-bot-api-secret-token")?.trim();
 
   if (expectedSecret) {
-    if (!receivedSecret || !constantTimeEqual(receivedSecret, expectedSecret)) {
+    // Compare SHA-256 digests so the comparison leaks no length information about the secret.
+    const receivedDigest = await sha256Hex(receivedSecret || "");
+    const expectedDigest = await sha256Hex(expectedSecret);
+    if (!constantTimeEqual(receivedDigest, expectedDigest)) {
       console.warn("Unauthorized webhook request: missing or mismatched X-Telegram-Bot-Api-Secret-Token");
       return new Response("Unauthorized", { status: 401 });
     }

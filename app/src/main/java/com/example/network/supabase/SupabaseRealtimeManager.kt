@@ -45,6 +45,9 @@ class SupabaseRealtimeManager(
     private var isManualDisconnect = false
     private var activeJoinRef: String? = null
     private var reconnectAttempts = 0
+    // Token update received while not CONNECTED (e.g. CONNECTING/JOINING); flushed after join.
+    @Volatile
+    private var pendingAccessToken: String? = null
 
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -228,6 +231,11 @@ class SupabaseRealtimeManager(
                         if (status == "ok") {
                             Timber.i("Realtime channel successfully joined! Transitioning to CONNECTED")
                             setState(RealtimeConnectionState.CONNECTED)
+                            pendingAccessToken?.let { queued ->
+                                pendingAccessToken = null
+                                Timber.i("Flushing queued access token update after channel join")
+                                updateAccessToken(queued)
+                            }
                             onChannelJoined()
                         } else if (status == "error") {
                             Timber.w("Realtime channel join rejected: ${payload?.opt("response")}")
@@ -301,10 +309,17 @@ class SupabaseRealtimeManager(
                 Timber.i("Sent updated access token to Realtime channel (ref=$ref)")
             } catch (e: Exception) {
                 Timber.w(e, "Failed to send access_token to Realtime, reconnecting")
+                pendingAccessToken = newAccessToken
                 connect()
             }
         } else if (_connectionState.value == RealtimeConnectionState.FAILED || _connectionState.value == RealtimeConnectionState.DISCONNECTED) {
+            pendingAccessToken = newAccessToken
             connect()
+        } else {
+            // Transitional states (CONNECTING/JOINING/RECONNECTING): the token must not be
+            // silently dropped — queue it and flush once the channel is joined.
+            Timber.i("Realtime in ${_connectionState.value}; queuing access token update for post-join flush")
+            pendingAccessToken = newAccessToken
         }
     }
 

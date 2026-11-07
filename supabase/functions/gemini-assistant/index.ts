@@ -271,13 +271,18 @@ serve(async (req: Request) => {
     }
 
     const rawPersona = payload?.persona_id ? String(payload.persona_id).toLowerCase().trim() : "";
-    let canonicalPersona: "ventaxis" | "hexagon";
-    if (rawPersona === "ventaxis") {
-      canonicalPersona = "ventaxis";
-    } else {
-      // Tolerant fallback: unknown/missing personas resolve to hexagon
-      canonicalPersona = "hexagon";
+    if (rawPersona !== "ventaxis" && rawPersona !== "hexagon") {
+      // Strict persona validation: unknown or missing personas are rejected, not guessed.
+      return new Response(
+        JSON.stringify({
+          error: "Unknown persona_id; expected 'ventaxis' or 'hexagon'",
+          code: "UNKNOWN_PERSONA",
+          message: "Unknown persona_id; expected 'ventaxis' or 'hexagon'"
+        }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
+    const canonicalPersona: "ventaxis" | "hexagon" = rawPersona;
     const systemPrompt = canonicalPersona === "ventaxis" ? VENTAXIS_SYSTEM_PROMPT : HEXAGON_SYSTEM_PROMPT;
 
     let rawMessages: any[] = Array.isArray(payload?.messages)
