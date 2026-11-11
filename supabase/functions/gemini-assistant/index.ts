@@ -382,6 +382,8 @@ export async function handler(req: Request): Promise<Response> {
         });
         if (!res.ok) {
           lastUpstreamStatus = res.status;
+          const upstreamBody = await res.text();
+          console.error(`[AI upstream] ${spec.model} HTTP ${res.status}: ${upstreamBody.slice(0, 500)}`);
           continue; // try next model in chain
         }
         const data = await res.json();
@@ -439,6 +441,8 @@ export async function handler(req: Request): Promise<Response> {
           }
         } else {
           lastUpstreamStatus = res.status;
+          const upstreamBody = await res.text();
+          console.error(`[AI upstream] ${spec.model} text-only HTTP ${res.status}: ${upstreamBody.slice(0, 500)}`);
         }
       } catch (_e) { /* fall through to the error response */ }
     }

@@ -92,7 +92,7 @@ class ProfileRepository(private val context: Context?) {
                             val p = obj.optString("avatar_path", "")
                             if (p.startsWith("http")) p else "$baseUrl/storage/v1/object/public/avatars/$p"
                         }
-                        else -> SecurePrefsManager.getAvatarUri(ctx, userId) ?: ""
+                        else -> ""
                     }
                     val serverHex = if (obj.has("hex_number")) obj.optString("hex_number", "") else SecurePrefsManager.getPrivateVirtualNumber(ctx, userId)
                     val serverBgPath = if (obj.has("profile_background_path")) {
@@ -123,14 +123,13 @@ class ProfileRepository(private val context: Context?) {
                     if (obj.has("bio")) {
                         SecurePrefsManager.setBio(ctx, serverBio, userId)
                     }
-                    if (obj.has("date_of_birth") && !obj.isNull("date_of_birth")) {
-                        val dobStr = obj.optString("date_of_birth", "")
-                        if (dobStr.isNotBlank()) {
-                            SecurePrefsManager.setDateOfBirth(ctx, dobStr, userId)
-                        }
+                    if (obj.has("date_of_birth")) {
+                        SecurePrefsManager.setDateOfBirth(ctx, serverDob, userId)
                     }
                     if (serverAvatar.isNotBlank()) {
                         SecurePrefsManager.setAvatarUri(ctx, serverAvatar, userId)
+                    } else if (obj.has("avatar_url") || obj.has("avatar_path")) {
+                        SecurePrefsManager.setAvatarUri(ctx, null, userId)
                     }
                     if (obj.has("profile_background_path")) {
                         SecurePrefsManager.setProfileBackground(ctx, userId, serverBgPath, serverBgType)
@@ -541,9 +540,12 @@ class ProfileRepository(private val context: Context?) {
                     val bos = java.io.ByteArrayOutputStream()
                     scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, bos)
                     bos.toByteArray()
-                } else imageBytes
+                } else {
+                    Timber.w("Selected avatar cannot be decoded as an Android bitmap")
+                    return@withContext null
+                }
             } catch (_: Exception) {
-                imageBytes
+                return@withContext null
             }
             if (compressed.size < imageBytes.size) {
                 Timber.i("Avatar compressed for upload: ${imageBytes.size} -> ${compressed.size} bytes")
@@ -625,6 +627,8 @@ class ProfileRepository(private val context: Context?) {
             patchResp.close()
 
             if (!patchSuccess || patchBody == "[]") {
+                // A successful PATCH must contain this user's returned row, not only HTTP 200.
+                patchSuccess = false
                 // If PATCH returned empty or failed, attempt UPSERT of avatar_path
                 val upsertPayload = JSONObject().apply {
                     put("id", userId)
@@ -647,7 +651,12 @@ class ProfileRepository(private val context: Context?) {
                 upsertResp?.close()
             }
 
-            // Both storage/metadata and profiles DB updates committed
+            if (!patchSuccess) {
+                Timber.w("Avatar uploaded, but its path was not saved to profiles")
+                return@withContext null
+            }
+
+            // Storage and profile metadata now agree; cache only a verified server write.
             SecurePrefsManager.setAvatarUri(ctx, publicUrl, userId)
             return@withContext publicUrl
         } catch (e: Exception) {

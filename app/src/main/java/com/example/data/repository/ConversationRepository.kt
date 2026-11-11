@@ -928,8 +928,13 @@ class ConversationRepository(
             resp.close()
 
             if (isSuccess && body.isNotBlank()) {
-                val clean = body.trim().removeSurrounding("\"")
-                clean.ifBlank { null }
+                val id = try {
+                    val json = JSONObject(body)
+                    json.optString("id", json.optString("conversation_id", ""))
+                } catch (_: Exception) {
+                    body.trim().removeSurrounding("\"")
+                }
+                id.ifBlank { null }
             } else {
                 null
             }

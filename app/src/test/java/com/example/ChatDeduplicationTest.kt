@@ -48,6 +48,7 @@ class FakeChatDao : ChatDao {
     override suspend fun getMessageById(id: Int, accountId: String): MessageEntity? = null
     override suspend fun editMessage(id: Int, text: String, timestamp: Long, accountId: String) {}
     override suspend fun deleteMessage(id: Int, accountId: String) {}
+    override suspend fun deleteMessagesByChat(chatId: Int, accountId: String) {}
     override suspend fun getMessageByIdempotencyKey(key: String, accountId: String): MessageEntity? = null
     override suspend fun getMessageByServerId(serverId: String, accountId: String): MessageEntity? = null
     override suspend fun deleteMessageByServerId(serverId: String, accountId: String) {}
