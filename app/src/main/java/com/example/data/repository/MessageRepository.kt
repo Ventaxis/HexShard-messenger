@@ -753,7 +753,7 @@ class MessageRepository(
                 if (it.has("sequence")) it.optLong("sequence", -1L)
                 else it.optLong("server_sequence", -1L)
             } ?: -1L
-            if (serverId.isBlank() || sequence < 0L) {
+            if (json == null || serverId.isBlank() || sequence < 0L) {
                 Timber.e("send_message_idempotent returned an unconfirmed result: $respBody")
                 return@withContext RemoteMessageSendResult.Failure(
                     "INVALID_SERVER_RESPONSE",
