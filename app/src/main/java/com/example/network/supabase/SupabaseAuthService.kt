@@ -281,6 +281,7 @@ object SupabaseAuthService {
                     put("display_name", cleanUsername)
                     put("normalized_username", normalized)
                     put("public_key", identityPubKey)
+                    put("signing_key", signingPubKey)
                 }
                 var profReq = SupabaseHttp.request("$baseUrl/rest/v1/profiles", accessToken, anonKey)
                     .header("Prefer", "resolution=merge-duplicates")
