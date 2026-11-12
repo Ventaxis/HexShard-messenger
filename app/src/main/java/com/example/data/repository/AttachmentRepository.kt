@@ -48,6 +48,7 @@ class AttachmentRepository(
     companion object {
         private val ALLOWED_MIME_TYPES = setOf(
             "image/jpeg", "image/png", "image/webp", "image/gif",
+            "image/heic", "image/heif",
             "audio/mp4", "audio/m4a", "audio/ogg", "audio/mpeg", "audio/aac", "audio/wav",
             "video/mp4", "video/webm",
             "application/pdf", "text/plain", "application/octet-stream"
@@ -228,6 +229,10 @@ class AttachmentRepository(
             cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(fileKey, "AES"), GCMParameterSpec(128, iv))
 
             source()?.use { input ->
+                if (input == null) {
+                    Timber.w("$logLabel upload aborted: selected file could not be opened")
+                    return null
+                }
                 FileOutputStream(tempEncryptedFile).use { fileOut ->
                     // Write IV first
                     fileOut.write(iv)
@@ -261,10 +266,10 @@ class AttachmentRepository(
                 .build()
 
             val resp = httpClient.newCall(req).execute()
-            // Close eagerly: the body is never read, and unclosed responses leak pool connections
-            val uploadOk = resp.isSuccessful
+            val uploadCode = resp.code
+            val uploadBody = resp.body?.string().orEmpty()
             resp.close()
-            if (uploadOk) {
+            if (resp.isSuccessful) {
                 // Register attachment metadata in attachments table
                 var metaSuccess = false
                 try {
@@ -290,7 +295,11 @@ class AttachmentRepository(
                         .build()
 
                     val attachResp = httpClient.newCall(attachReq).execute()
+                    val metaBody = attachResp.body?.string().orEmpty()
                     metaSuccess = attachResp.isSuccessful
+                    if (!metaSuccess) {
+                        Timber.w("$logLabel metadata failed: HTTP ${attachResp.code}: $metaBody")
+                    }
                     attachResp.close()
                 } catch (metaEx: Exception) {
                     Timber.w(metaEx, "Failed to register $logLabel metadata")
@@ -311,7 +320,7 @@ class AttachmentRepository(
 
                 objectPath
             } else {
-                Timber.w("Supabase $logLabel upload failed: HTTP ${resp.code}")
+                Timber.w("Supabase $logLabel upload failed: HTTP $uploadCode: $uploadBody")
                 null
             }
         } catch (e: Exception) {

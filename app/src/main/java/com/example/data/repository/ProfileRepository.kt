@@ -38,6 +38,19 @@ class ProfileRepository(private val context: Context?) {
 
     companion object {
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
+
+        internal fun responseArrayOrThrow(responseBody: String, responseCode: Int): JSONArray {
+            if (responseCode !in 200..299) {
+                val message = try {
+                    val error = JSONObject(responseBody)
+                    error.optString("message", error.optString("error", "HTTP $responseCode"))
+                } catch (_: Exception) {
+                    responseBody.takeIf { it.isNotBlank() }?.take(150) ?: "HTTP $responseCode"
+                }
+                throw IllegalStateException(message)
+            }
+            return JSONArray(responseBody.ifBlank { "[]" })
+        }
     }
 
     /**
@@ -334,17 +347,23 @@ class ProfileRepository(private val context: Context?) {
             }
 
             if (!response.isSuccessful) {
-                val errorMessage = try {
-                    val j = JSONObject(responseBody)
-                    j.optString("message", j.optString("error", "HTTP $responseCode"))
-                } catch (_: Exception) {
-                    "HTTP $responseCode: ${responseBody.take(150)}"
-                }
                 Timber.e("Failed to sync profile: HTTP $responseCode - $responseBody")
+                return@withContext try {
+                    responseArrayOrThrow(responseBody, responseCode)
+                    Result.failure<UserProfileData>(IllegalStateException("Failed to update profile (HTTP $responseCode)"))
+                } catch (e: Exception) {
+                    Result.failure<UserProfileData>(e)
+                } finally {
+                    response.close()
+                }
             }
 
-            // Successfully received response with representation
-            val array = JSONArray(responseBody)
+            // A failed request can contain an object/string error, never a representation array.
+            val array = try {
+                responseArrayOrThrow(responseBody, responseCode)
+            } finally {
+                response.close()
+            }
             var updatedObj: JSONObject? = if (array.length() > 0) array.getJSONObject(0) else null
 
             var serverWriteSucceeded = response.isSuccessful
@@ -352,8 +371,17 @@ class ProfileRepository(private val context: Context?) {
                 // If PATCH returned empty array, no row exists for this userId yet; perform UPSERT
                 var upsertPayload = JSONObject(currentPayload.toString()).apply {
                     put("id", userId)
-                    if (!has("username")) put("username", username?.trim()?.removePrefix("@") ?: SecurePrefsManager.getUsername(ctx))
+                    val resolvedUsername = username?.trim()?.removePrefix("@")
+                        ?.ifBlank { null } ?: SecurePrefsManager.getUsername(ctx)
+                    put("username", resolvedUsername)
+                    put("normalized_username", resolvedUsername.lowercase(java.util.Locale.ROOT))
                     if (!has("display_name")) put("display_name", displayName?.trim() ?: SecurePrefsManager.getDisplayName(ctx, userId))
+                    put("public_key", java.util.Base64.getEncoder().encodeToString(
+                        com.example.crypto.E2ECryptoManager.getMyPublicKey(userId).encoded
+                    ))
+                    put("signing_key", java.util.Base64.getEncoder().encodeToString(
+                        com.example.crypto.E2ECryptoManager.getMySigningPublicKey(userId).encoded
+                    ))
                 }
                 var upsertReq = Request.Builder()
                     .url("$baseUrl/rest/v1/profiles")
@@ -629,12 +657,20 @@ class ProfileRepository(private val context: Context?) {
             if (!patchSuccess || patchBody == "[]") {
                 // A successful PATCH must contain this user's returned row, not only HTTP 200.
                 patchSuccess = false
-                // If PATCH returned empty or failed, attempt UPSERT of avatar_path
+                val resolvedUsername = SecurePrefsManager.getUsername(ctx)
+                // The upsert must satisfy the same NOT NULL profile constraints as registration.
                 val upsertPayload = JSONObject().apply {
                     put("id", userId)
-                    put("username", SecurePrefsManager.getUsername(ctx))
+                    put("username", resolvedUsername)
+                    put("normalized_username", resolvedUsername.lowercase(java.util.Locale.ROOT))
                     put("display_name", SecurePrefsManager.getDisplayName(ctx, userId))
                     put("avatar_path", pathVal)
+                    put("public_key", java.util.Base64.getEncoder().encodeToString(
+                        com.example.crypto.E2ECryptoManager.getMyPublicKey(userId).encoded
+                    ))
+                    put("signing_key", java.util.Base64.getEncoder().encodeToString(
+                        com.example.crypto.E2ECryptoManager.getMySigningPublicKey(userId).encoded
+                    ))
                 }
                 val upsertReq = Request.Builder()
                     .url("$baseUrl/rest/v1/profiles")

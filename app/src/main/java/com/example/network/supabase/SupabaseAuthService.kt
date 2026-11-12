@@ -528,7 +528,7 @@ object SupabaseAuthService {
             try {
                 E2ECryptoManager.generateKeyPairIfNeeded(accountId)
             } catch (e: Exception) {
-                Timber.w(e, "Keystore key generation deferred: ${e.message}")
+                Timber.w(e, "Keystore key generation deferred in signIn: ${e.message}")
             }
             val identityPubKey = try {
                 Base64.getEncoder().encodeToString(E2ECryptoManager.getMyPublicKey(accountId).encoded)
@@ -536,6 +536,23 @@ object SupabaseAuthService {
             val signingPubKey = try {
                 Base64.getEncoder().encodeToString(E2ECryptoManager.getMySigningPublicKey(accountId).encoded)
             } catch (_: Exception) { "" }
+
+            // Legacy profiles may predate key synchronization. Restore both required public
+            // keys from this device's Keystore; private keys never leave the device.
+            if (identityPubKey.isNotBlank() && signingPubKey.isNotBlank()) {
+                try {
+                    val profileKeys = JSONObject().apply {
+                        put("public_key", identityPubKey)
+                        put("signing_key", signingPubKey)
+                    }.toString().toRequestBody(SupabaseHttp.JSON_MEDIA)
+                    SupabaseHttp.request("$baseUrl/rest/v1/profiles?id=eq.$accountId", accessToken, anonKey)
+                        .patch(profileKeys).build().let {
+                            SupabaseHttp.client.newCall(it).execute().close()
+                        }
+                } catch (e: Exception) {
+                    Timber.w(e, "Profile public-key repair deferred")
+                }
+            }
 
             // Sync device public keys to Supabase devices table
             try {

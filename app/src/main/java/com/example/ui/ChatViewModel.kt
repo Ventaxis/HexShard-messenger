@@ -371,6 +371,11 @@ class ChatViewModel @Inject constructor(
                     ?: if (type == "image") "image/jpeg" else "video/mp4"
                 val audioUrl = repository.uploadMediaMessage(context, uri, cid, mediaMime, idempotencyKey, chat.recipientId.ifEmpty { chat.name })
                 if (audioUrl == null) {
+                    _aiErrorState.value = AiUiError.Custom(
+                        if (LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN)
+                            "Не удалось отправить файл. Проверьте подключение и попробуйте ещё раз."
+                        else "Could not send the attachment. Check your connection and try again."
+                    )
                     _isSending.value = false
                     return@launch
                 }

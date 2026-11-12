@@ -182,7 +182,8 @@ open class ChatRepository(
         idempotencyKey: String,
         recipientId: String
     ): String? {
-        val conversationId = computeConversationId(getCurrentUserId(), recipientId)
+        val conversationId = getChatById(chatId)?.conversationId?.takeIf { it.isNotBlank() }
+            ?: computeConversationId(getCurrentUserId(), recipientId)
         return attachmentRepository.uploadAttachment(
             inputUri = uri,
             conversationId = conversationId,
@@ -202,7 +203,8 @@ open class ChatRepository(
         idempotencyKey: String,
         recipientId: String
     ): String? {
-        val conversationId = computeConversationId(getCurrentUserId(), recipientId)
+        val conversationId = getChatById(chatId)?.conversationId?.takeIf { it.isNotBlank() }
+            ?: computeConversationId(getCurrentUserId(), recipientId)
         return attachmentRepository.uploadAttachmentData(data, conversationId, type, idempotencyKey, recipientId)
     }
 

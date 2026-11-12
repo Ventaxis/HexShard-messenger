@@ -16,6 +16,8 @@ class AttachmentMimeTypeTest {
         assertTrue(AttachmentRepository.isMimeTypeAllowed("image/png"))
         assertTrue(AttachmentRepository.isMimeTypeAllowed("image/jpeg"))
         assertTrue(AttachmentRepository.isMimeTypeAllowed("application/pdf"))
+        assertTrue(AttachmentRepository.isMimeTypeAllowed("image/heic"))
+        assertTrue(AttachmentRepository.isMimeTypeAllowed("image/heif"))
         assertTrue(AttachmentRepository.isMimeTypeAllowed("video/mp4"))
         assertTrue(AttachmentRepository.isMimeTypeAllowed("text/plain"))
     }

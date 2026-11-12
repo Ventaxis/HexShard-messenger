@@ -353,7 +353,10 @@ class MessageRepository(
             val currentUserId = getCurrentAccountId()
             val isSelfChat = isSelfConversation(recipientId = recipientId, id = chatId)
             val isAiChat = isAiConversation(recipientId = recipientId, conversationId = personaId)
-            val conversationId = conversationRepository.computeConversationId(currentUserId, recipientId)
+            val conversationId = conversationRepository.getChatById(chatId, currentUserId)
+                ?.conversationId
+                ?.takeIf { it.isNotBlank() }
+                ?: conversationRepository.computeConversationId(currentUserId, recipientId)
 
             val resolvedPersona = when {
                 personaId != null -> com.example.data.AiPersona.fromIdOrNull(personaId)?.id
@@ -744,18 +747,27 @@ class MessageRepository(
                 return@withContext RemoteMessageSendResult.Failure("HTTP_$initialCode", respBody.ifBlank { "HTTP $initialCode" }, isRetryable)
             }
 
-            if (respBody.isNotBlank()) {
-                val json = try { JSONObject(respBody) } catch (_: Exception) { null }
-                if (json != null) {
-                    val sId = json.optString("id", idempotencyKey)
-                    val sSeq = json.optLong("sequence", json.optLong("server_sequence", 0L))
-                    val sStat = json.optString("status", "sent")
-                    val isDup = json.optBoolean("is_duplicate", false)
-                    return@withContext RemoteMessageSendResult.Success(sId, sSeq, sStat, isDup)
-                }
+            val json = try { JSONObject(respBody) } catch (_: Exception) { null }
+            val serverId = json?.optString("id", "")?.trim().orEmpty()
+            val sequence = json?.let {
+                if (it.has("sequence")) it.optLong("sequence", -1L)
+                else it.optLong("server_sequence", -1L)
+            } ?: -1L
+            if (serverId.isBlank() || sequence < 0L) {
+                Timber.e("send_message_idempotent returned an unconfirmed result: $respBody")
+                return@withContext RemoteMessageSendResult.Failure(
+                    "INVALID_SERVER_RESPONSE",
+                    "Server did not confirm the message ID and sequence",
+                    isRetryable = true
+                )
             }
 
-            RemoteMessageSendResult.Success(idempotencyKey, 0L, "sent")
+            RemoteMessageSendResult.Success(
+                serverId,
+                sequence,
+                json.optString("status", "sent"),
+                json.optBoolean("is_duplicate", false)
+            )
         } catch (e: Exception) {
             Timber.e(e, "send_message_idempotent RPC network failure")
             RemoteMessageSendResult.Failure("NETWORK_ERROR", e.message ?: "Network error", isRetryable = true)
