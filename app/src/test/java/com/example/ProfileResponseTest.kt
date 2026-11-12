@@ -2,11 +2,14 @@ package com.example
 
 import com.example.data.repository.ProfileRepository
 import org.json.JSONArray
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 
+@RunWith(RobolectricTestRunner::class)
 class ProfileResponseTest {
     @Test
     fun `http error object is reported instead of parsed as array`() {
