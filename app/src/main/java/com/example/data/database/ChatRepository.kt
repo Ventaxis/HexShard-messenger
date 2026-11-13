@@ -354,7 +354,10 @@ open class ChatRepository(
                 token, baseUrl, anonKey
             ) ?: return@withContext false
             if (accountId.isNotBlank()) {
-                com.example.data.SecurePrefsManager.setConversationDeleteMarker(context, accountId, chat.conversationId, marker)
+                val conversationId = chat.conversationId.ifBlank {
+                    if (chat.isAiAssistant) "ai_$accountId" else "self_$accountId"
+                }
+                com.example.data.SecurePrefsManager.setConversationDeleteMarker(context, accountId, conversationId, marker)
                 chatDao.deleteMessagesByChat(chat.id, accountId)
                 chatDao.deleteChatById(chat.id, accountId)
             }

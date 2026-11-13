@@ -498,11 +498,15 @@ object SecurePrefsManager {
         val cleanConv = conversationId.trim()
         if (cleanAcc.isBlank() || cleanConv.isBlank()) return
         val key = "conv_del_${cleanAcc}_${cleanConv}"
-        val prefs = getPrefs(context)
-        val prev = prefs.getLong(key, 0L)
-        if (maxSequence > prev) {
-            prefs.edit().putLong(key, maxSequence).apply()
-        }
+        val previous = getPrefs(context).getLong(key, 0L)
+        getPrefs(context).edit().putLong(key, maxOf(previous, maxSequence)).apply()
+    }
+
+    fun isConversationDeleted(context: Context, accountId: String, conversationId: String): Boolean {
+        val cleanAcc = accountId.trim()
+        val cleanConv = conversationId.trim()
+        return cleanAcc.isNotBlank() && cleanConv.isNotBlank() &&
+            getPrefs(context).contains("conv_del_${cleanAcc}_${cleanConv}")
     }
 
     fun getConversationDeleteMarker(context: Context, accountId: String, conversationId: String): Long {

@@ -251,7 +251,7 @@ class UserRepository(
         val results = mutableListOf<UserSearchResult>()
 
         try {
-            val url = "$baseUrl/rest/v1/profiles?or=(username.ilike.*$encoded*,display_name.ilike.*$encoded*)&select=id,username,display_name,avatar_path&limit=15"
+            val url = "$baseUrl/rest/v1/profiles?or=(username.ilike.*$encoded*,normalized_username.ilike.*$encoded*,display_name.ilike.*$encoded*)&select=id,username,display_name,avatar_path&limit=15"
             val req = SupabaseHttp.request(url, token, anonKey)
                 .get()
                 .build()
@@ -281,10 +281,13 @@ class UserRepository(
         }
 
         // Also search by +999 virtual number if input contains digits
-        val digitsOnly = clean.filter { it.isDigit() }
+        val digitsOnly = clean.filter { it.isDigit() }.let {
+            if (it.length == 11 && it.startsWith("999")) it.substring(3) else it
+        }
         if (digitsOnly.length >= 4) {
             try {
-                val hexUrl = "$baseUrl/rest/v1/hex_numbers?number=ilike.*${encodeFilterValue(digitsOnly)}*&select=number,account_id&limit=10"
+                val hexFilter = encodeFilterValue(digitsOnly)
+                val hexUrl = "$baseUrl/rest/v1/hex_numbers?or=(raw_number.ilike.*$hexFilter*,number.ilike.*$hexFilter*)&status=eq.active&select=raw_number,number,formatted,account_id,owner_id&limit=10"
                 val hexReq = SupabaseHttp.request(hexUrl, token, anonKey)
                 val hResp = httpClient.newCall(hexReq.get().build()).execute()
                 val hBody = hResp.body?.string() ?: ""
@@ -293,8 +296,8 @@ class UserRepository(
                     val hArr = JSONArray(hBody)
                     for (i in 0 until hArr.length()) {
                         val hObj = hArr.getJSONObject(i)
-                        val accId = hObj.optString("account_id", "")
-                        val num = hObj.optString("number", "")
+                        val accId = hObj.optString("account_id").ifBlank { hObj.optString("owner_id") }
+                        val num = hObj.optString("formatted").ifBlank { hObj.optString("number") }
                         if (accId.isNotBlank() && accId != currentUid && results.none { it.userId == accId }) {
                             val pUrl = "$baseUrl/rest/v1/profiles?id=eq.$accId&select=id,username,display_name,avatar_path&limit=1"
                             val pReq = SupabaseHttp.request(pUrl, token, anonKey)
@@ -373,7 +376,7 @@ class UserRepository(
                     // Fetch virtual number
                     var vNum = ""
                     try {
-                        val hexUrl = "$baseUrl/rest/v1/hex_numbers?account_id=eq.$uid&select=number&limit=1"
+                        val hexUrl = "$baseUrl/rest/v1/hex_numbers?or=(account_id.eq.$uid,owner_id.eq.$uid)&status=eq.active&select=number,formatted&limit=1"
                         val hexReq = SupabaseHttp.request(hexUrl, token, anonKey)
                         val hResp = httpClient.newCall(hexReq.get().build()).execute()
                         val hBody = hResp.body?.string() ?: ""

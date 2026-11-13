@@ -86,6 +86,10 @@ fun SettingsScreen(
 
     var showEditProfile by remember { mutableStateOf(false) }
     var showPrivacyDialog by remember { mutableStateOf(false) }
+    var showPasswordDialog by remember { mutableStateOf(false) }
+    var newPassword by remember { mutableStateOf("") }
+    var passwordConfirmation by remember { mutableStateOf("") }
+    var passwordChanging by remember { mutableStateOf(false) }
     var showNotificationsDialog by remember { mutableStateOf(false) }
     var showStorageDialog by remember { mutableStateOf(false) }
     var showLanguage by remember { mutableStateOf(false) }
@@ -427,6 +431,59 @@ fun SettingsScreen(
                 qrStatusMessage = "Error processing image: ${e.message}"
             }
         }
+    }
+
+    if (showPasswordDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!passwordChanging) showPasswordDialog = false },
+            title = { Text(if (currentLang == AppLanguage.RUSSIAN) "Изменить пароль" else "Change password") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(
+                        value = newPassword,
+                        onValueChange = { newPassword = it },
+                        label = { Text(if (currentLang == AppLanguage.RUSSIAN) "Новый пароль" else "New password") },
+                        singleLine = true,
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth().testTag("new_password_input")
+                    )
+                    OutlinedTextField(
+                        value = passwordConfirmation,
+                        onValueChange = { passwordConfirmation = it },
+                        label = { Text(if (currentLang == AppLanguage.RUSSIAN) "Повторите пароль" else "Confirm password") },
+                        singleLine = true,
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth().testTag("confirm_password_input")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (newPassword != passwordConfirmation) {
+                            Toast.makeText(context, if (currentLang == AppLanguage.RUSSIAN) "Пароли не совпадают" else "Passwords do not match", Toast.LENGTH_SHORT).show()
+                        } else {
+                            passwordChanging = true
+                            scope.launch {
+                                when (val result = SupabaseAuthService.changePassword(context, newPassword)) {
+                                    is com.example.network.supabase.PasswordChangeResult.Success -> {
+                                        showPasswordDialog = false
+                                        newPassword = ""
+                                        passwordConfirmation = ""
+                                        Toast.makeText(context, if (currentLang == AppLanguage.RUSSIAN) "Пароль изменён" else "Password changed", Toast.LENGTH_SHORT).show()
+                                    }
+                                    is com.example.network.supabase.PasswordChangeResult.Error ->
+                                        Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                                }
+                                passwordChanging = false
+                            }
+                        }
+                    },
+                    enabled = !passwordChanging && newPassword.length >= 8 && passwordConfirmation.isNotEmpty()
+                ) { Text(if (currentLang == AppLanguage.RUSSIAN) "Сохранить" else "Save") }
+            },
+            dismissButton = { TextButton(onClick = { showPasswordDialog = false }, enabled = !passwordChanging) { Text(strings.cancel) } }
+        )
     }
 
     if (showPrivacyDialog) {
@@ -1919,6 +1976,8 @@ fun SettingsScreen(
                     SettingsItem(icon = Icons.Default.QrCode, title = strings.myProfileQrCode, onClick = { showQrDialog = true })
                     HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = HexDarkBorderSubtle)
                     SettingsItem(icon = Icons.Default.QrCodeScanner, title = strings.scanQrTitle, onClick = { showScanQrDialog = true })
+                    HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = HexDarkBorderSubtle)
+                    SettingsItem(icon = Icons.Default.Lock, title = if (currentLang == AppLanguage.RUSSIAN) "Изменить пароль" else "Change password", onClick = { showPasswordDialog = true })
                     HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = HexDarkBorderSubtle)
                     SettingsItem(icon = Icons.Default.Lock, title = strings.privacySecurity, onClick = { showPrivacyDialog = true })
                     HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = HexDarkBorderSubtle)

@@ -159,6 +159,11 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
             
             val chats by viewModel.chats.collectAsStateWithLifecycle()
             val selectedId by viewModel.selectedChatId.collectAsStateWithLifecycle()
+            var wallpaperRefresh by remember { mutableIntStateOf(0) }
+            val activeWallpaperChat = chats.find { it.id == selectedId }
+            val activeWallpaper = remember(activeWallpaperChat?.id, wallpaperRefresh) {
+                activeWallpaperChat?.let { com.example.data.ChatWallpaperStore.path(context, currentUserId, it.conversationId) }
+            }
             val messages by viewModel.selectedChatMessages.collectAsStateWithLifecycle()
             val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
             val searchResults by viewModel.searchResults.collectAsStateWithLifecycle()
@@ -166,6 +171,10 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
             val typingChatId by viewModel.typingChatId.collectAsStateWithLifecycle()
             val selectedAiModel by viewModel.selectedAiModel.collectAsStateWithLifecycle()
             val aiErrorState by viewModel.aiErrorState.collectAsStateWithLifecycle()
+            val viewingPeerProfile by viewModel.viewingPeerProfile.collectAsStateWithLifecycle()
+            viewingPeerProfile?.let { profile ->
+                PeerProfileDialog(profile = profile, isDark = isDark, onDismiss = { viewModel.dismissPeerProfile() })
+            }
 
             if (isWide) {
                 // Expanded / Tablet Canonical Layout (List-Detail in row)
@@ -228,7 +237,10 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
                                         onEditMessage = { msgId, text -> viewModel.editMessage(msgId, text) },
                                         onDeleteMessage = { msgId -> viewModel.deleteMessage(msgId) },
                                         onForwardMessage = { targetId, msg -> viewModel.forwardMessage(targetId, msg) },
-                                        allChats = chats
+                                        allChats = chats,
+                                        onOpenProfile = { viewModel.openPeerProfile(activeChat) },
+                                        onChangeWallpaper = { wallpaperRefresh++ },
+                                        wallpaperUri = activeWallpaper
                                     )
                                 }
                             }
@@ -318,6 +330,7 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
         }
 
         var pendingPreferredNumber by remember { mutableStateOf("") }
+    var wallpaperRefresh by remember { mutableIntStateOf(0) }
 
         if (showMissingHexShardDialog) {
             HexShardIdMissingDialog(
@@ -1164,12 +1177,16 @@ fun ChatArea(
     onEditMessage: (Int, String) -> Unit = { _, _ -> },
     onDeleteMessage: (Int) -> Unit = {},
     onForwardMessage: (Int, MessageEntity) -> Unit = { _, _ -> },
-    allChats: List<ChatEntity> = emptyList()
+    allChats: List<ChatEntity> = emptyList(),
+    onOpenProfile: () -> Unit = {},
+    onChangeWallpaper: () -> Unit = {},
+    wallpaperUri: String? = null
 ) {
     var replyingToMessage by remember { mutableStateOf<MessageEntity?>(null) }
     var editingMessage by remember { mutableStateOf<MessageEntity?>(null) }
     var messageToDelete by remember { mutableStateOf<MessageEntity?>(null) }
     var messageToForward by remember { mutableStateOf<MessageEntity?>(null) }
+    var showWallpaperMenu by remember { mutableStateOf(false) }
 
     val bg = if (isDark) Color(0xFF0F0F0F) else Color(0xFFF9F9F9)
     val headBg = if (isDark) DarkBgSurface else LightBgSurface
@@ -1180,6 +1197,24 @@ fun ChatArea(
     val strings = LocalStrings.current
     val isRussian = strings == RussianStrings
     val context = androidx.compose.ui.platform.LocalContext.current
+    val wallpaperPicker = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            try { context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: Exception) {}
+            val result = com.example.data.ChatWallpaperStore.set(
+                context,
+                com.example.data.SecurePrefsManager.getUserId(context),
+                chat.conversationId,
+                uri
+            )
+            if (result.isSuccess) {
+                onChangeWallpaper()
+            } else {
+                Toast.makeText(context, if (isRussian) "Не удалось установить обои" else "Could not set wallpaper", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
     val isSelfChat = chat.isSavedMessages
     val isAiChat = chat.isAiAssistant
     val isHexagonActive = isAiChat && (selectedAiModel == com.example.network.AiModelOption.HEXAGON)
@@ -1315,7 +1350,7 @@ fun ChatArea(
                     }
 
                     // Compact Avatar
-                    Box(modifier = Modifier.size(38.dp)) {
+                    Box(modifier = Modifier.size(38.dp).clickable(enabled = !isSelfChat && !isAiChat, onClick = onOpenProfile)) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -1352,7 +1387,7 @@ fun ChatArea(
     Spacer(modifier = Modifier.width(10.dp))
 
     // User Info
-    Column(modifier = Modifier.weight(1f)) {
+    Column(modifier = Modifier.weight(1f).clickable(enabled = !isSelfChat && !isAiChat, onClick = onOpenProfile)) {
         Text(
             text = displayName,
             color = txtMain,
@@ -1379,6 +1414,27 @@ fun ChatArea(
 
     // Quick action items icons
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Box {
+            IconButton(onClick = { showWallpaperMenu = true }) {
+                Icon(Icons.Default.Wallpaper, contentDescription = if (isRussian) "Обои чата" else "Chat wallpaper", tint = txtSec, modifier = Modifier.size(20.dp))
+            }
+            DropdownMenu(expanded = showWallpaperMenu, onDismissRequest = { showWallpaperMenu = false }) {
+                DropdownMenuItem(
+                    text = { Text(if (isRussian) "Выбрать изображение" else "Choose image") },
+                    onClick = { showWallpaperMenu = false; wallpaperPicker.launch(arrayOf("image/*")) }
+                )
+                if (!wallpaperUri.isNullOrBlank()) {
+                    DropdownMenuItem(
+                        text = { Text(if (isRussian) "Сбросить обои" else "Reset wallpaper") },
+                        onClick = {
+                            showWallpaperMenu = false
+                            com.example.data.ChatWallpaperStore.clear(context, com.example.data.SecurePrefsManager.getUserId(context), chat.conversationId)
+                            onChangeWallpaper()
+                        }
+                    )
+                }
+            }
+        }
         IconButton(onClick = { isSearching = true }) {
             Icon(Icons.Default.Search, contentDescription = "Search", tint = txtSec, modifier = Modifier.size(20.dp))
         }
@@ -1455,6 +1511,14 @@ fun ChatArea(
                 .weight(1f)
                 .fillMaxWidth()
         ) {
+            if (!wallpaperUri.isNullOrBlank()) {
+                Image(
+                    painter = coil.compose.rememberAsyncImagePainter(model = wallpaperUri),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize().testTag("chat_wallpaper"),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                )
+            }
             if (filteredMessages.isEmpty()) {
                 Column(
                     modifier = Modifier.fillMaxSize(),

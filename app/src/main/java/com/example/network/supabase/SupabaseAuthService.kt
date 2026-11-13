@@ -47,6 +47,11 @@ sealed class SignInResult {
     data class Error(val message: String) : SignInResult()
 }
 
+sealed class PasswordChangeResult {
+    object Success : PasswordChangeResult()
+    data class Error(val message: String) : PasswordChangeResult()
+}
+
 sealed class DeleteAccountResult {
     data class Success(val accountId: String) : DeleteAccountResult()
     data class Error(val message: String) : DeleteAccountResult()
@@ -85,6 +90,33 @@ object SupabaseAuthService {
             return "Password must be at least 8 characters"
         }
         return null
+    }
+
+    suspend fun changePassword(context: Context, newPassword: String): PasswordChangeResult = withContext(Dispatchers.IO) {
+        validatePassword(newPassword)?.let { return@withContext PasswordChangeResult.Error(it) }
+        val token = SecurePrefsManager.getSupabaseAccessToken(context).takeIf { it.isNotBlank() }
+            ?: return@withContext PasswordChangeResult.Error("Сессия истекла. Войдите снова.")
+        val anonKey = SupabaseConfig.getAnonKey(context)
+        if (anonKey.isBlank()) return@withContext PasswordChangeResult.Error("Supabase не настроен")
+        try {
+            val request = SupabaseHttp.jsonRequest(
+                "${SupabaseConfig.getBaseUrl()}/auth/v1/user", token, anonKey, "PUT",
+                JSONObject().put("password", newPassword).toString()
+            ).build()
+            SupabaseHttp.client.newCall(request).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                if (response.isSuccessful) return@withContext PasswordChangeResult.Success
+                val serverMessage = try {
+                    JSONObject(body).optString("msg").ifBlank { JSONObject(body).optString("error_description") }
+                } catch (_: Exception) { "" }
+                PasswordChangeResult.Error(
+                    if (response.code == 401 || response.code == 403) "Сессия истекла. Войдите снова."
+                    else serverMessage.ifBlank { "Не удалось изменить пароль. Попробуйте позже." }
+                )
+            }
+        } catch (_: Exception) {
+            PasswordChangeResult.Error("Нет соединения с сервером. Проверьте интернет.")
+        }
     }
 
     /**

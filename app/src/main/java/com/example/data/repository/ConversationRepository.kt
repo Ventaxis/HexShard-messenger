@@ -158,8 +158,8 @@ class ConversationRepository(
 
     suspend fun deleteChat(chatId: Int, accountId: String = getCurrentAccountId()) = withContext(Dispatchers.IO) {
         val chat = chatDao.getChatById(chatId, accountId)
-        if (chat != null && (chat.isSavedMessages || chat.isAiAssistant)) {
-            Timber.w("Refusing to delete protected system chat: ${chat.name} (id=$chatId)")
+        if (chat != null && chat.isSavedMessages) {
+            Timber.w("Refusing to delete Saved Messages: ${chat.name} (id=$chatId)")
             return@withContext
         }
         chatDao.deleteChatById(chatId, accountId)
@@ -196,9 +196,10 @@ class ConversationRepository(
 
             val isRussian = LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN
 
-            // 2. Ensure Saved Messages chat exists in local vault
+            // 2. Ensure Saved Messages chat exists unless its owner deleted it.
             var savedChat = chatDao.getSavedMessagesChat(targetAccountId)
-            if (savedChat == null) {
+            val savedDeleted = context?.let { SecurePrefsManager.isConversationDeleted(it, targetAccountId, "self_$targetAccountId") } == true
+            if (savedChat == null && !savedDeleted) {
                 val defaultSaved = ChatEntity(
                     accountId = targetAccountId,
                     name = if (isRussian) "Избранное" else "Saved Messages",
@@ -231,7 +232,7 @@ class ConversationRepository(
                     idempotencyKey = "init_saved_msg_$targetAccountId"
                 )
                 chatDao.insertMessageIfNotExists(welcomeMsg)
-            } else {
+            } else if (savedChat != null) {
                 val msgList = chatDao.getMessagesForChatForAccountList(savedChat.id, targetAccountId)
                 if (msgList.isEmpty()) {
                     val welcomeMsg = MessageEntity(
@@ -251,9 +252,10 @@ class ConversationRepository(
                 }
             }
 
-            // 3. Ensure AI Assistant chat exists in local vault
+            // 3. Ensure AI Assistant chat exists unless its owner deleted it.
             var aiChat = chatDao.getAiAssistantChat(targetAccountId)
-            if (aiChat == null) {
+            val aiDeleted = context?.let { SecurePrefsManager.isConversationDeleted(it, targetAccountId, "ai_$targetAccountId") } == true
+            if (aiChat == null && !aiDeleted) {
                 val defaultAi = ChatEntity(
                     accountId = targetAccountId,
                     name = "Hexagon AI",
@@ -302,7 +304,7 @@ class ConversationRepository(
                 )
                 chatDao.insertMessageIfNotExists(hexagonWelcome)
                 chatDao.insertMessageIfNotExists(ventaxisWelcome)
-            } else {
+            } else if (aiChat != null) {
                 val aiMessages = chatDao.getMessagesForChatForAccountList(aiChat.id, targetAccountId)
                 val hasHexagon = aiMessages.any { it.personaId == "hexagon" || it.sender.contains("Hexagon", ignoreCase = true) }
                 val hasVentaxis = aiMessages.any { it.personaId == "ventaxis" || it.sender.contains("Ventaxis", ignoreCase = true) }
@@ -419,6 +421,28 @@ class ConversationRepository(
         val token = SecurePrefsManager.getSupabaseAccessToken(ctx).takeIf { it.isNotBlank() } ?: return@withContext
 
         try {
+            val localDeletedConversations = SecurePrefsManager.getAllConversationDeleteMarkers(ctx, userId)
+            val deletionsRequest = Request.Builder()
+                .url("$baseUrl/rest/v1/conversation_deletions?select=conversation_id,deleted_through")
+                .header("apikey", anonKey)
+                .header("Authorization", "Bearer $token")
+                .get()
+                .build()
+            val deletionsResponse = try { httpClient.newCall(deletionsRequest).execute() } catch (_: Exception) { null }
+            val deletionsBody = deletionsResponse?.body?.string().orEmpty()
+            if (deletionsResponse?.isSuccessful == true) {
+                val deletions = try { JSONArray(deletionsBody) } catch (_: Exception) { JSONArray() }
+                for (i in 0 until deletions.length()) {
+                    val deletion = deletions.getJSONObject(i)
+                    val conversationId = deletion.optString("conversation_id")
+                    if (conversationId.isNotBlank()) {
+                        SecurePrefsManager.setConversationDeleteMarker(ctx, userId, conversationId, deletion.optLong("deleted_through", 0L))
+                        chatDao.getChatByConversationId(conversationId, userId)?.let { chatDao.deleteChatById(it.id, userId) }
+                    }
+                }
+            }
+            deletionsResponse?.close()
+
             var rpcUrl = "$baseUrl/rest/v1/rpc/get_my_conversations"
             var req = Request.Builder()
                 .url(rpcUrl)
@@ -456,10 +480,14 @@ class ConversationRepository(
 
             if (body.isNotBlank()) {
                 val array = try { JSONArray(body) } catch (_: Exception) { JSONArray() }
+                for (conversationId in localDeletedConversations.keys) {
+                    chatDao.getChatByConversationId(conversationId, userId)?.let { chatDao.deleteChatById(it.id, userId) }
+                }
                 for (i in 0 until array.length()) {
                     val obj = array.getJSONObject(i)
                     val convId = obj.optString("id")
                     if (convId.isBlank()) continue
+                    if (SecurePrefsManager.isConversationDeleted(ctx, userId, convId)) continue
 
                     val convType = obj.optString("type", "DIRECT").uppercase()
                     val title = obj.optString("title", "")
@@ -689,6 +717,9 @@ class ConversationRepository(
         val currentUserId = getCurrentAccountId()
         if (currentUserId.isBlank()) return@withContext Result.failure(IllegalStateException("User is not authenticated"))
         val ctx = context ?: return@withContext Result.failure(IllegalStateException("Context unavailable"))
+        if (SecurePrefsManager.isConversationDeleted(ctx, currentUserId, "self_$currentUserId")) {
+            return@withContext Result.failure(IllegalStateException("Saved Messages was deleted"))
+        }
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(ctx)
         val token = SecurePrefsManager.getSupabaseAccessToken(ctx).takeIf { it.isNotBlank() }
@@ -794,6 +825,9 @@ class ConversationRepository(
         val currentUserId = getCurrentAccountId()
         if (currentUserId.isBlank()) return@withContext Result.failure(IllegalStateException("User is not authenticated"))
         val ctx = context ?: return@withContext Result.failure(IllegalStateException("Context unavailable"))
+        if (SecurePrefsManager.isConversationDeleted(ctx, currentUserId, "ai_$currentUserId")) {
+            return@withContext Result.failure(IllegalStateException("AI chat was deleted"))
+        }
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(ctx)
         val token = SecurePrefsManager.getSupabaseAccessToken(ctx).takeIf { it.isNotBlank() }

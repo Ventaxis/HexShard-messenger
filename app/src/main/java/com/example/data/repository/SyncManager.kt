@@ -199,6 +199,9 @@ class SyncManager(
             }
 
             var maxSeq = chatDao.getMaxSequenceForConversation(convId, currentUserId) ?: 0L
+            if (SecurePrefsManager.isConversationDeleted(ctx, currentUserId, convId)) {
+                maxSeq = maxOf(maxSeq, SecurePrefsManager.getConversationDeleteMarker(ctx, currentUserId, convId))
+            }
 
             // Page cap mirrors the global-stream loop below: a malformed full page (missing/zero
             // sequence values) would otherwise repeat the same URL forever and hang the sync pass.
@@ -311,6 +314,12 @@ class SyncManager(
         // Phase 1: record parsing/classification — blank sender, tombstone and empty
         // payload records are fully handled inside and report as processed
         val record = parseIncomingRecord(obj, currentUserId) ?: return@withContext true
+        val deletionMarker = ctx?.let {
+            if (SecurePrefsManager.isConversationDeleted(it, currentUserId, record.conversationId)) {
+                SecurePrefsManager.getConversationDeleteMarker(it, currentUserId, record.conversationId)
+            } else -1L
+        } ?: -1L
+        if (SyncPolicy.isBeforeDeletion(record.sequence, deletionMarker)) return@withContext true
 
         // P0-04: Existing message detection: update server metadata and check if edited
         val existingMsg = (if (record.docId.isNotBlank()) chatDao.getMessageByServerId(record.docId, currentUserId) else null)
@@ -419,9 +428,9 @@ class SyncManager(
         val editedAt = obj.optString("edited_at").takeIf { it.isNotBlank() && it != "null" }
         val serverStatus = obj.optString("status").takeIf { it.isNotBlank() } ?: "sent"
 
-        val isSelfMessage = (sender == currentUserId && (recipient == currentUserId || recipient == "self" || recipient.isBlank()))
+        val isSelfMessage = SyncPolicy.isSavedMessages(obj, currentUserId)
         val isOutboundFromAnotherDevice = (sender == currentUserId && recipient != currentUserId && recipient.isNotBlank())
-        val isAiConversation = recipient.startsWith("ai_") || recipient == "ai_assistant" || personaId != null || obj.optString("conversation_id").startsWith("ai_")
+        val isAiConversation = SyncPolicy.isAiConversation(obj)
 
         val peerId = when {
             isSelfMessage -> "self"

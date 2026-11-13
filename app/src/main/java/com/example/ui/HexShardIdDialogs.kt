@@ -270,13 +270,20 @@ fun HexShardIdClaimDialog(
         errorMessage = null
         scope.launch {
             val token = SecurePrefsManager.getSupabaseAccessToken(context).ifBlank { currentToken }
-            when (val res = VirtualNumberService.confirmVirtualNumberDetailed(currentUserId, token, targetNumber, context)) {
+            val reservation = VirtualNumberService.reserveCandidateNumber(currentUserId, token, targetNumber, context)
+            if (reservation is VirtualNumberReservationResult.Error) {
+                isConfirming = false
+                errorMessage = reservation.message
+                return@launch
+            }
+            val reservedNumber = (reservation as VirtualNumberReservationResult.Success).raw8Digits
+            when (val res = VirtualNumberService.confirmVirtualNumberDetailed(currentUserId, token, reservedNumber, context)) {
                 is VirtualNumberConfirmationResult.Success -> {
                     isConfirming = false
                     isActivatedSuccess = true
                     reservedFormatted = res.formatted
-                    SessionManager.updateVirtualNumber(context, targetNumber)
-                    SecurePrefsManager.setPrivateVirtualNumber(context, targetNumber, currentUserId)
+                    SessionManager.updateVirtualNumber(context, reservedNumber)
+                    SecurePrefsManager.setPrivateVirtualNumber(context, reservedNumber, currentUserId)
                     Toast.makeText(context, strings.virtualNumberActivatedSuccess, Toast.LENGTH_SHORT).show()
                     onSuccess(res.formatted)
                 }
