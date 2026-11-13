@@ -230,6 +230,8 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
         unfocusedContainerColor = Color(0xFF0F0F18)
     )
 
+    var reservedNumber by remember { mutableStateOf<String?>(null) }
+
     // Action: Step 1 Sign Up -> create account via Supabase
     fun performSignUp() {
         val cleanUsername = usernameInput.trim().removePrefix("@").filterNot { it.isWhitespace() }
@@ -295,8 +297,6 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
     }
 
     // Action: Step 3 -> Confirm private virtual number & advance to Step 4 (Account Ready)
-    var reservedNumber by remember { mutableStateOf<String?>(null) }
-
     fun confirmPrivateNumber() {
         val cleanDigits = raw8DigitsInput.filter { it.isDigit() }
         if (cleanDigits.length != 8) {
