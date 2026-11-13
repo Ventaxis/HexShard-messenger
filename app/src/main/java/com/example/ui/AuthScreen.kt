@@ -276,6 +276,7 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
             when (val res = SupabaseAuthService.reserveVirtualNumber(assignedAccountId, context, preferred)) {
                 is com.example.network.supabase.VirtualNumberReservationResult.Success -> {
                     raw8DigitsInput = res.raw8Digits
+                    reservedNumber = res.raw8Digits
                     isLoading = false
                 }
                 is com.example.network.supabase.VirtualNumberReservationResult.Error -> {
@@ -294,6 +295,8 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
     }
 
     // Action: Step 3 -> Confirm private virtual number & advance to Step 4 (Account Ready)
+    var reservedNumber by remember { mutableStateOf<String?>(null) }
+
     fun confirmPrivateNumber() {
         val cleanDigits = raw8DigitsInput.filter { it.isDigit() }
         if (cleanDigits.length != 8) {
@@ -306,6 +309,23 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
 
         scope.launch {
             val token = com.example.data.SecurePrefsManager.getSupabaseAccessToken(context)
+            if (reservedNumber != cleanDigits) {
+                when (val reservation = SupabaseAuthService.reserveVirtualNumber(assignedAccountId, context, cleanDigits)) {
+                    is com.example.network.supabase.VirtualNumberReservationResult.Success -> {
+                        if (reservation.raw8Digits != cleanDigits) {
+                            isLoading = false
+                            errorMessage = if (isRussian) "Выбранный номер недоступен. Выберите другой." else "The requested number is unavailable. Choose another."
+                            return@launch
+                        }
+                        reservedNumber = cleanDigits
+                    }
+                    is com.example.network.supabase.VirtualNumberReservationResult.Error -> {
+                        isLoading = false
+                        errorMessage = reservation.message
+                        return@launch
+                    }
+                }
+            }
             when (val confResult = com.example.network.supabase.VirtualNumberService.confirmVirtualNumberDetailed(assignedAccountId, token, cleanDigits, context)) {
                 is com.example.network.supabase.VirtualNumberConfirmationResult.Success -> {
                     confirmedVirtualNumber = confResult.formatted
@@ -1181,6 +1201,7 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
                                                 val digitsOnly = newVal.filter { it.isDigit() }
                                                 if (digitsOnly.length <= 8) {
                                                     raw8DigitsInput = digitsOnly
+                                                    reservedNumber = null
                                                 }
                                             },
                                             singleLine = true,
@@ -1207,7 +1228,7 @@ fun AuthScreen(onAuthComplete: () -> Unit) {
 
                                         if (raw8DigitsInput.isNotEmpty()) {
                                             IconButton(
-                                                onClick = { raw8DigitsInput = "" },
+                                                onClick = { raw8DigitsInput = ""; reservedNumber = null },
                                                 modifier = Modifier.size(24.dp)
                                             ) {
                                                 Icon(

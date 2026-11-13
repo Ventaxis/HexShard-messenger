@@ -44,6 +44,15 @@ jobs:
       - name: Assemble debug APK
         run: ./gradlew :app:assembleDebug --stacktrace --console=plain
 
+      - name: Prepare verified update metadata
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          sha256sum app/build/outputs/apk/debug/app-debug.apk > app-debug.apk.sha256
+          VERSION_CODE=$(grep -E '^\s*versionCode\s*=' app/build.gradle.kts | grep -oE '[0-9]+')
+          SIZE=$(stat -c %s app/build/outputs/apk/debug/app-debug.apk)
+          printf '{"package":"com.ventaxiscorp.hexshard","tag":"%s","versionCode":%s,"size":%s,"apkUrl":"https://github.com/Ventaxis/HexShard-messenger/releases/download/%s/app-debug.apk","sha256Url":"https://github.com/Ventaxis/HexShard-messenger/releases/download/%s/app-debug.apk.sha256"}\n' "$TAG" "$VERSION_CODE" "$SIZE" "$TAG" "$TAG" > update.json
+
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -51,5 +60,7 @@ jobs:
         run: |
           gh release create "$TAG" \
             --title "HexShard $TAG" \
-            --generate-notes \
-            "app/build/outputs/apk/debug/app-debug.apk#HexShard-$TAG-debug.apk"
+            --notes-file RELEASE_NOTES.md \
+            "app/build/outputs/apk/debug/app-debug.apk" \
+            "app-debug.apk.sha256" \
+            "update.json"

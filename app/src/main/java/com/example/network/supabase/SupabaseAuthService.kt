@@ -8,6 +8,7 @@ import com.example.data.database.AppDatabase
 import com.example.network.SupabaseHttp
 import com.example.util.VirtualNumberGenerator
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -305,6 +306,32 @@ object SupabaseAuthService {
                 Base64.getEncoder().encodeToString(E2ECryptoManager.getMySigningPublicKey(accountId).encoded)
             } catch (_: Exception) { "" }
 
+            // The profile and device use the same generated public keys but independent
+            // rows. Register them concurrently to remove one network round-trip wait.
+            val deviceRegistration = async(Dispatchers.IO) {
+                try {
+                    val deviceId = SecurePrefsManager.getDeviceId(context)
+                    val devPayload = JSONObject().apply {
+                        put("account_id", accountId)
+                        put("device_id", deviceId)
+                        put("public_key", identityPubKey)
+                        put("signing_key", signingPubKey)
+                        put("platform", "android")
+                        put("device_name", "Android Device")
+                        put("last_seen_at", java.time.Instant.now().toString())
+                    }
+                    val devReq = SupabaseHttp.request("$baseUrl/rest/v1/devices", accessToken, anonKey)
+                        .header("Prefer", "resolution=merge-duplicates")
+                        .post(devPayload.toString().toRequestBody(SupabaseHttp.JSON_MEDIA))
+                        .build()
+                    SupabaseHttp.client.newCall(devReq).execute().use { devResp ->
+                        if (!devResp.isSuccessful) Timber.w("Device registration returned HTTP ${devResp.code}")
+                    }
+                } catch (e: Exception) {
+                    Timber.d("Device registration deferred: ${e.message}")
+                }
+            }
+
             // 1. Create public profile row in profiles table
             try {
                 val profilePayload = JSONObject().apply {
@@ -315,77 +342,28 @@ object SupabaseAuthService {
                     put("public_key", identityPubKey)
                     put("signing_key", signingPubKey)
                 }
-                var profReq = SupabaseHttp.request("$baseUrl/rest/v1/profiles", accessToken, anonKey)
+                val profReq = SupabaseHttp.request("$baseUrl/rest/v1/profiles", accessToken, anonKey)
                     .header("Prefer", "resolution=merge-duplicates")
                     .post(profilePayload.toString().toRequestBody(SupabaseHttp.JSON_MEDIA))
                     .build()
-                var profResp = SupabaseHttp.client.newCall(profReq).execute()
-                var pBody = profResp.body?.string() ?: ""
-                var retryP = 0
-                while (!profResp.isSuccessful && retryP < 3) {
-                    profResp.close()
-                    retryP++
-                    if (pBody.contains("public_key", ignoreCase = true)) {
-                        profilePayload.remove("public_key")
-                    } else if (pBody.contains("normalized_username", ignoreCase = true)) {
-                        profilePayload.remove("normalized_username")
-                    } else {
-                        break
-                    }
-                    profReq = SupabaseHttp.request("$baseUrl/rest/v1/profiles", accessToken, anonKey)
-                        .header("Prefer", "resolution=merge-duplicates")
-                        .post(profilePayload.toString().toRequestBody(SupabaseHttp.JSON_MEDIA))
-                        .build()
-                    profResp = SupabaseHttp.client.newCall(profReq).execute()
-                    pBody = profResp.body?.string() ?: ""
-                }
-                if (!profResp.isSuccessful) {
-                    Timber.w("Profile initial sync returned HTTP ${profResp.code} - $pBody")
-                    // A failed profile insert previously vanished silently: the auth user
-                    // existed but had no profile (and reserved-username rejections died
-                    // here). Surface it to the caller instead.
-                    val reserved = pBody.contains("reserved", ignoreCase = true) ||
-                            pBody.contains("username", ignoreCase = true) ||
-                            pBody.contains("23505")
-                    profResp.close()
-                    return@withContext if (reserved) {
-                        SignUpResult.Error(
-                            "Username is already taken or reserved by the operator. Please choose another.",
-                            isUsernameTaken = true
-                        )
-                    } else {
-                        SignUpResult.Error("Account created, but profile initialization failed (HTTP ${profResp.code}). Please try signing in.")
+                SupabaseHttp.client.newCall(profReq).execute().use { profResp ->
+                    val pBody = profResp.body?.string().orEmpty()
+                    if (!profResp.isSuccessful) {
+                        Timber.w("Profile initial sync returned HTTP ${profResp.code}")
+                        deviceRegistration.await()
+                        return@withContext if (pBody.contains("23505")) {
+                            SignUpResult.Error("Username is already taken or reserved by the operator. Please choose another.", isUsernameTaken = true)
+                        } else {
+                            SignUpResult.Error("Account created, but profile initialization failed (HTTP ${profResp.code}). Please try signing in.")
+                        }
                     }
                 }
-                profResp.close()
             } catch (e: Exception) {
                 Timber.w(e, "Profile initial sync exception")
+                deviceRegistration.await()
+                return@withContext SignUpResult.Error("Account created, but profile initialization failed. Please try signing in.")
             }
-
-            // 2. Register current device keys in devices table
-            try {
-                val deviceId = SecurePrefsManager.getDeviceId(context)
-                val devPayload = JSONObject().apply {
-                    put("account_id", accountId)
-                    put("device_id", deviceId)
-                    put("public_key", identityPubKey)
-                    put("signing_key", signingPubKey)
-                    put("platform", "android")
-                    put("device_name", "Android Device")
-                    put("last_seen_at", java.time.Instant.now().toString())
-                }
-                val devReq = SupabaseHttp.request("$baseUrl/rest/v1/devices", accessToken, anonKey)
-                    .header("Prefer", "resolution=merge-duplicates")
-                    .post(devPayload.toString().toRequestBody(SupabaseHttp.JSON_MEDIA))
-                    .build()
-                val devResp = SupabaseHttp.client.newCall(devReq).execute()
-                if (!devResp.isSuccessful) {
-                    Timber.w("Device registration returned HTTP ${devResp.code}")
-                }
-                devResp.close()
-            } catch (e: Exception) {
-                Timber.d("Device registration deferred: ${e.message}")
-            }
+            deviceRegistration.await()
 
             SignUpResult.Success(
                 accountId = accountId,

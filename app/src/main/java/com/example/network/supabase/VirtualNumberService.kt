@@ -72,7 +72,7 @@ object VirtualNumberService {
         }
     }
 
-    private fun parseReservationJson(body: String): VirtualNumberReservationResult.Success? {
+    private fun parseReservationJson(body: String, preferred: String? = null): VirtualNumberReservationResult.Success? {
         return try {
             val json = JSONObject(body)
             val rawField = json.optString("raw_number", json.optString("number", ""))
@@ -81,6 +81,11 @@ object VirtualNumberService {
                 cleanDigits = cleanDigits.substring(3)
             }
             if (cleanDigits.length == 8) {
+                if (!preferred.isNullOrBlank()) {
+                    var requested = preferred.filter { it.isDigit() }
+                    if (requested.length == 11 && requested.startsWith("999")) requested = requested.substring(3)
+                    if (cleanDigits != requested) return null
+                }
                 val formatted = json.optString("formatted", VirtualNumberGenerator.format8Digits(cleanDigits))
                 val expiresAt = json.optLong("expires_at", System.currentTimeMillis() + 600_000L)
                 VirtualNumberReservationResult.Success(
@@ -139,10 +144,11 @@ object VirtualNumberService {
             val body = resp.body?.string() ?: ""
 
             if (resp.isSuccessful && body.isNotEmpty()) {
-                val parsed = parseReservationJson(body)
+                val parsed = parseReservationJson(body, preferred)
                 if (parsed != null) {
                     return@withContext parsed
                 }
+                return@withContext VirtualNumberReservationResult.Error("Сервер не подтвердил выбранный номер. Выберите другой или повторите попытку.")
             }
 
             // Handle 401 Unauthorized with token refresh retry
@@ -177,37 +183,11 @@ object VirtualNumberService {
                 return@withContext VirtualNumberReservationResult.Error("Превышен лимит запросов. Попробуйте позже.")
             }
 
-            // Schema cache / PostgREST deployment issue: gracefully allocate server-account candidate
+            // Reservation and activation are authoritative server operations. Never report
+            // a local candidate as reserved while the canonical RPC is unavailable.
             if (code == 404 || body.contains("schema cache") || body.contains("PGRST202")) {
-                Timber.w("reserve_hex_number RPC missing on server: HTTP $code - $body. Falling back to account-bound candidate allocation.")
-                if (context != null) {
-                    val existing = SecurePrefsManager.getRawPrivateVirtualNumber(context, userId)
-                    if (existing.length == 8) {
-                        return@withContext VirtualNumberReservationResult.Success(
-                            raw8Digits = existing,
-                            formatted = VirtualNumberGenerator.format8Digits(existing),
-                            expiresAt = System.currentTimeMillis() + 86400_000L
-                        )
-                    }
-                }
-
-                val candidate = if (!preferred.isNullOrBlank()) {
-                    val clean = preferred.filter { it.isDigit() }
-                    val cand8 = if (clean.length == 11 && clean.startsWith("999")) clean.substring(3) else clean
-                    if (cand8.length != 8) {
-                        return@withContext VirtualNumberReservationResult.Error("Номер должен содержать ровно 8 цифр.")
-                    }
-                    cand8
-                } else {
-                    VirtualNumberGenerator.generateCandidate8Digits(userId)
-                }
-
-                val formattedCand = VirtualNumberGenerator.format8Digits(candidate)
-                return@withContext VirtualNumberReservationResult.Success(
-                    raw8Digits = candidate,
-                    formatted = formattedCand,
-                    expiresAt = System.currentTimeMillis() + 600_000L
-                )
+                Timber.w("reserve_hex_number RPC unavailable: HTTP $code")
+                return@withContext VirtualNumberReservationResult.Error("Сервис резервации временно недоступен. Обновите приложение или повторите попытку позже.")
             }
 
             val friendlyFallback = "Не удалось зарезервировать номер на сервере. Попробуйте позже."
@@ -297,45 +277,8 @@ object VirtualNumberService {
             }
 
             if (code == 404 || body.contains("schema cache") || body.contains("PGRST202")) {
-                Timber.w("confirm_hex_number RPC missing on server: HTTP $code - $body. Committing directly to Supabase Auth user_metadata.")
-                val metaPayload = JSONObject().apply {
-                    put("data", JSONObject().apply {
-                        put("hex_number", cleanDigits)
-                        put("virtual_number", formatted)
-                        put("hex_number_status", "active")
-                        put("hex_number_activated_at", System.currentTimeMillis())
-                    })
-                }
-                val metaReq = Request.Builder()
-                    .url("$baseUrl/auth/v1/user")
-                    .header("apikey", anonKey)
-                    .header("Authorization", "Bearer $accessToken")
-                    .header("Content-Type", "application/json")
-                    .put(metaPayload.toString().toRequestBody(JSON_MEDIA))
-                    .build()
-
-                val metaResp = httpClient.newCall(metaReq).execute()
-                val metaBody = metaResp.body?.string() ?: ""
-
-                if (metaResp.isSuccessful) {
-                    try {
-                        val profReq = Request.Builder()
-                            .url("$baseUrl/rest/v1/profiles?id=eq.$userId")
-                            .header("apikey", anonKey)
-                            .header("Authorization", "Bearer $accessToken")
-                            .header("Content-Type", "application/json")
-                            .patch(JSONObject().apply { put("hex_number", cleanDigits) }.toString().toRequestBody(JSON_MEDIA))
-                            .build()
-                        httpClient.newCall(profReq).execute().close()
-                    } catch (_: Exception) {}
-
-                    SessionManager.updateVirtualNumber(context, cleanDigits)
-                    SecurePrefsManager.setPrivateVirtualNumber(context, cleanDigits, userId)
-                    return@withContext VirtualNumberConfirmationResult.Success(cleanDigits, formatted)
-                } else {
-                    val err = parseErrorMessage(metaBody, "Не удалось сохранить номер в аккаунте на сервере")
-                    return@withContext VirtualNumberConfirmationResult.Error(err)
-                }
+                Timber.w("confirm_hex_number RPC unavailable: HTTP $code")
+                return@withContext VirtualNumberConfirmationResult.Error("Сервис активации номера временно недоступен. Резервация не была подтверждена.")
             }
 
             val friendlyFallback = "Не удалось подтвердить номер на сервере. Попробуйте снова."

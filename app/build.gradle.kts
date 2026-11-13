@@ -15,8 +15,8 @@ android {
     applicationId = "com.ventaxiscorp.hexshard"
     minSdk = 24
     targetSdk = 36
-    versionCode = 13
-    versionName = "1.9.0"
+    versionCode = 14
+    versionName = "1.10.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -128,6 +128,7 @@ dependencies {
   testImplementation(libs.roborazzi.compose)
   testImplementation(libs.roborazzi.junit.rule)
   testImplementation(libs.mockk)
+  testImplementation("com.squareup.okhttp3:mockwebserver:4.10.0")
   testImplementation(libs.truth)
   androidTestImplementation(platform(libs.androidx.compose.bom))
   androidTestImplementation(libs.androidx.compose.ui.test.junit4)

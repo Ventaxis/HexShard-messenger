@@ -103,7 +103,7 @@ class ProfileRepository(private val context: Context?) {
                             obj.optString("avatar_url", "")
                         obj.has("avatar_path") && !obj.isNull("avatar_path") && obj.optString("avatar_path", "").isNotBlank() -> {
                             val p = obj.optString("avatar_path", "")
-                            if (p.startsWith("http")) p else "$baseUrl/storage/v1/object/public/avatars/$p"
+                            if (p.startsWith("http") || p.startsWith("data:image/")) p else "$baseUrl/storage/v1/object/public/avatars/$p"
                         }
                         else -> ""
                     }
@@ -639,6 +639,8 @@ class ProfileRepository(private val context: Context?) {
             val pathVal = if (finalAvatarUri.startsWith("data:")) finalAvatarUri else objectPath
             val patchPayload = JSONObject().apply {
                 put("avatar_path", pathVal)
+                put("avatar_url", publicUrl)
+                put("avatar_storage_path", objectPath)
             }
             val patchReq = Request.Builder()
                 .url("$baseUrl/rest/v1/profiles?id=eq.$userId")
@@ -658,26 +660,27 @@ class ProfileRepository(private val context: Context?) {
                 // A successful PATCH must contain this user's returned row, not only HTTP 200.
                 patchSuccess = false
                 val resolvedUsername = SecurePrefsManager.getUsername(ctx)
-                // The upsert must satisfy the same NOT NULL profile constraints as registration.
+                if (resolvedUsername.isBlank()) {
+                    Timber.w("Cannot restore an avatar profile without an account username")
+                    return@withContext null
+                }
+                // INSERT only repairs a missing row. Never merge blank local keys over an
+                // existing identity; profile keys are also restored by account sync.
                 val upsertPayload = JSONObject().apply {
                     put("id", userId)
                     put("username", resolvedUsername)
                     put("normalized_username", resolvedUsername.lowercase(java.util.Locale.ROOT))
-                    put("display_name", SecurePrefsManager.getDisplayName(ctx, userId))
+                    put("display_name", SecurePrefsManager.getDisplayName(ctx, userId).ifBlank { resolvedUsername })
                     put("avatar_path", pathVal)
-                    put("public_key", java.util.Base64.getEncoder().encodeToString(
-                        com.example.crypto.E2ECryptoManager.getMyPublicKey(userId).encoded
-                    ))
-                    put("signing_key", java.util.Base64.getEncoder().encodeToString(
-                        com.example.crypto.E2ECryptoManager.getMySigningPublicKey(userId).encoded
-                    ))
+                    put("avatar_url", publicUrl)
+                    put("avatar_storage_path", objectPath)
                 }
                 val upsertReq = Request.Builder()
                     .url("$baseUrl/rest/v1/profiles")
                     .header("apikey", anonKey)
                     .header("Authorization", "Bearer $token")
                     .header("Content-Type", "application/json")
-                    .header("Prefer", "resolution=merge-duplicates")
+                    .header("Prefer", "return=representation")
                     .post(upsertPayload.toString().toRequestBody(JSON_MEDIA))
                     .build()
                 val upsertResp = try { httpClient.newCall(upsertReq).execute() } catch (_: Exception) { null }

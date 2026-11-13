@@ -103,6 +103,7 @@ fun SettingsScreen(
     var manualQrInput by remember { mutableStateOf("") }
     var qrStatusMessage by remember { mutableStateOf<String?>(null) }
     var showClaimHexShardDialog by remember { mutableStateOf(false) }
+    var showUpdateCenter by remember { mutableStateOf(false) }
     var showDatePickerDialog by remember { mutableStateOf(false) }
 
     var creditVisualBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
@@ -2007,6 +2008,13 @@ fun SettingsScreen(
                     )
                     HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = HexDarkBorderSubtle)
                     SettingsItem(icon = Icons.Default.Storage, title = strings.storageData, onClick = { showStorageDialog = true })
+                    HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = HexDarkBorderSubtle)
+                    SettingsItem(
+                        icon = Icons.Default.SystemUpdate,
+                        title = if (currentLang == AppLanguage.RUSSIAN) "Обновления и исправления" else "Updates and fixes",
+                        subtitle = "${if (currentLang == AppLanguage.RUSSIAN) "Версия" else "Version"} ${BuildConfig.VERSION_NAME}",
+                        onClick = { showUpdateCenter = true }
+                    )
                 }
             }
 
@@ -2129,6 +2137,9 @@ fun SettingsScreen(
             Spacer(modifier = Modifier.height(36.dp))
         }
 
+        if (showUpdateCenter) {
+            UpdateCenterDialog(onDismiss = { showUpdateCenter = false })
+        }
         if (showClaimHexShardDialog) {
             HexShardIdClaimDialog(
                 initialPreferred = privateVirtualNumber,
