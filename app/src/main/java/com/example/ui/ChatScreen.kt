@@ -321,7 +321,9 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
                                 onEditMessage = { msgId, text -> viewModel.editMessage(msgId, text) },
                                 onDeleteMessage = { msgId -> viewModel.deleteMessage(msgId) },
                                 onForwardMessage = { targetId, msg -> viewModel.forwardMessage(targetId, msg) },
-                                allChats = chats
+                                allChats = chats,
+                                onChangeWallpaper = { wallpaperRefresh++ },
+                                wallpaperUri = activeWallpaper
                             )
                         }
                     }
@@ -330,7 +332,6 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
         }
 
         var pendingPreferredNumber by remember { mutableStateOf("") }
-    var wallpaperRefresh by remember { mutableIntStateOf(0) }
 
         if (showMissingHexShardDialog) {
             HexShardIdMissingDialog(
@@ -1211,7 +1212,8 @@ fun ChatArea(
             if (result.isSuccess) {
                 onChangeWallpaper()
             } else {
-                Toast.makeText(context, if (isRussian) "Не удалось установить обои" else "Could not set wallpaper", Toast.LENGTH_SHORT).show()
+                val reason = result.exceptionOrNull()?.message
+                Toast.makeText(context, reason ?: if (isRussian) "Не удалось установить обои" else "Could not set wallpaper", Toast.LENGTH_SHORT).show()
             }
         }
     }

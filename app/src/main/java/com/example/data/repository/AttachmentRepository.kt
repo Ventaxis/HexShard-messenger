@@ -204,7 +204,11 @@ class AttachmentRepository(
         val sharedSecret = if (isSelf) {
             E2ECryptoManager.deriveSelfStorageSecret(currentUserId)
         } else {
-            val recPubKey = userRepository.getOrFetchUserPublicKey(recipientId)
+            // TOFU: encrypt to the PINNED key, not whatever the server serves now —
+            // same trust model as message encryption (CryptoRepository), otherwise a
+            // substituted key would silently re-encrypt the attachment to an attacker.
+            val trusted = userRepository.getTrustedUserPublicKey(recipientId)
+            val recPubKey = trusted?.pinnedKey ?: trusted?.key
             if (recPubKey == null) {
                 Timber.w("Recipient public key not found for $logLabel upload")
                 return null
@@ -403,7 +407,11 @@ class AttachmentRepository(
                 val sharedSecret = if (isSelf) {
                     E2ECryptoManager.deriveSelfStorageSecret(currentUserId)
                 } else {
-                    val senderPubKey = userRepository.getOrFetchUserPublicKey(senderId)
+                    // Mirror message decryption: verify against the PINNED sender key,
+                    // not whatever the server serves now. Attachments encrypted under
+                    // the served key still decrypt via the sharedSecret fallback below.
+                    val trustedSender = userRepository.getTrustedUserPublicKey(senderId)
+                    val senderPubKey = trustedSender?.pinnedKey ?: trustedSender?.key
                         ?: return@withContext null
                     E2ECryptoManager.deriveSharedSecret(senderPubKey, currentUserId)
                 }

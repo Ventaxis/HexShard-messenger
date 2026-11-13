@@ -615,24 +615,31 @@ class ProfileRepository(private val context: Context?) {
 
             val publicUrl = finalAvatarUri ?: "$baseUrl/storage/v1/object/public/avatars/$objectPath"
 
-            // 1. Always persist avatar in Supabase Auth server metadata (survives app reinstallation)
-            try {
-                val authMetaPayload = JSONObject().apply {
-                    put("data", JSONObject().apply {
-                        put("avatar_url", publicUrl)
-                        put("avatar_path", publicUrl)
-                    })
+            // 1. Always persist avatar in Supabase Auth server metadata (survives app reinstallation).
+            // Every access JWT embeds user_metadata; a legacy build once wrote the whole base64
+            // data-URI here, producing a ~46KB Authorization header that the ingress rejected
+            // (observed by users as "error 520"). Only real storage URLs may enter metadata.
+            if (publicUrl.startsWith("https://")) {
+                try {
+                    val authMetaPayload = JSONObject().apply {
+                        put("data", JSONObject().apply {
+                            put("avatar_url", publicUrl)
+                            put("avatar_path", publicUrl)
+                        })
+                    }
+                    val authReq = Request.Builder()
+                        .url("$baseUrl/auth/v1/user")
+                        .header("apikey", anonKey)
+                        .header("Authorization", "Bearer $token")
+                        .header("Content-Type", "application/json")
+                        .put(authMetaPayload.toString().toRequestBody(JSON_MEDIA))
+                        .build()
+                    httpClient.newCall(authReq).execute().close()
+                } catch (authEx: Exception) {
+                    Timber.w(authEx, "Non-fatal: could not update avatar in Supabase auth metadata")
                 }
-                val authReq = Request.Builder()
-                    .url("$baseUrl/auth/v1/user")
-                    .header("apikey", anonKey)
-                    .header("Authorization", "Bearer $token")
-                    .header("Content-Type", "application/json")
-                    .put(authMetaPayload.toString().toRequestBody(JSON_MEDIA))
-                    .build()
-                httpClient.newCall(authReq).execute().close()
-            } catch (authEx: Exception) {
-                Timber.w(authEx, "Non-fatal: could not update avatar in Supabase auth metadata")
+            } else {
+                Timber.w("Skipping auth-metadata avatar write: reference is not a storage URL")
             }
 
             // 2. Update profiles table using verified avatar_path column
