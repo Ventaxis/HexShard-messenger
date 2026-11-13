@@ -100,19 +100,12 @@ class ChatViewModel @Inject constructor(
         if (chat.isSavedMessages || chat.isAiAssistant) return
         viewModelScope.launch {
             val peerId = chat.recipientId.ifBlank { chat.name }
-            val profile = repository.fetchPeerProfile(peerId) ?: com.example.data.repository.UserRepository.PeerProfileInfo(
-                id = chat.recipientId.ifBlank { chat.name },
-                username = chat.name.removePrefix("@"),
-                displayName = chat.name,
-                virtualNumber = "",
-                avatarUrl = null,
-                backgroundPath = null,
-                backgroundType = null,
-                bio = "",
-                dateOfBirth = "",
-                isOnline = chat.status == "online"
-            )
-            _viewingPeerProfile.value = profile
+            val profile = repository.fetchPeerProfile(peerId)
+            if (profile != null) {
+                _viewingPeerProfile.value = profile
+            } else {
+                _chatCreateError.value = "Не удалось загрузить профиль. Проверьте соединение и попробуйте снова."
+            }
         }
     }
 

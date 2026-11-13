@@ -12,6 +12,7 @@ REVOKE ALL ON public.conversation_deletions FROM PUBLIC, anon;
 DROP POLICY IF EXISTS "deletions_select_own" ON public.conversation_deletions;
 CREATE POLICY "deletions_select_own" ON public.conversation_deletions FOR SELECT TO authenticated
 USING (account_id = auth.uid());
+GRANT SELECT ON public.conversation_deletions TO authenticated;
 
 CREATE OR REPLACE FUNCTION public.delete_conversation_for_me(p_conversation_id TEXT)
 RETURNS BIGINT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$

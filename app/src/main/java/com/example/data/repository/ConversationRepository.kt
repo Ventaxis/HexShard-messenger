@@ -170,7 +170,11 @@ class ConversationRepository(
     }
 
     suspend fun populateInitialDataIfNeeded(accountId: String = getCurrentAccountId()) = withContext(Dispatchers.IO) {
-        ensureDefaultChatsExist(accountId)
+        val targetAccountId = accountId.ifBlank { getCurrentAccountId() }
+        if (targetAccountId.isBlank()) return@withContext
+        // Server markers must arrive before recreating system chats on a fresh install.
+        syncConversationsFromServer(targetAccountId)
+        ensureDefaultChatsExist(targetAccountId)
     }
 
     suspend fun ensureDefaultChatsExist(accountId: String = getCurrentAccountId()) = withContext(Dispatchers.IO) {
