@@ -27,10 +27,12 @@ import org.robolectric.annotation.Config
 class AvatarMetadataGuardTest {
     private lateinit var server: MockWebServer
 
-    private fun tinyJpeg(): ByteArray = byteArrayOf(
-        0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte(), 0x00, 0x10,
-        0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01,
-        0x00, 0x00, 0xFF.toByte(), 0xD9.toByte()
+    private fun tinyJpeg(): ByteArray = android.util.Base64.decode(
+        "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRof" +
+            "Hh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAF" +
+            "AABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN/" +
+            "/2Q==",
+        android.util.Base64.DEFAULT
     )
 
     @Before
