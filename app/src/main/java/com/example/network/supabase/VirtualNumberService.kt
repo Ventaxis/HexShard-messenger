@@ -200,6 +200,46 @@ object VirtualNumberService {
     }
 
     /**
+     * Releases the account's ACTIVE +999 identity (server-authoritative). Used by the
+     * "change number" flow: release first, then reserve+confirm the new number. Local
+     * caches are cleared only after a verified server release.
+     */
+    suspend fun releaseActiveNumber(
+        accountId: String,
+        accessToken: String,
+        context: android.content.Context
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val baseUrl = SupabaseConfig.getBaseUrl()
+        val anonKey = SupabaseConfig.getAnonKey(context)
+        try {
+            val rpcReq = Request.Builder()
+                .url("$baseUrl/rest/v1/rpc/release_hex_number")
+                .header("apikey", anonKey)
+                .header("Authorization", "Bearer $accessToken")
+                .header("Content-Type", "application/json")
+                .post("{}".toRequestBody(JSON_MEDIA))
+                .build()
+            val resp = httpClient.newCall(rpcReq).execute()
+            val body = resp.body?.string()?.trim() ?: ""
+            resp.close()
+            if (!resp.isSuccessful) {
+                Timber.w("release_hex_number returned HTTP ${resp.code}")
+                return@withContext Result.failure(Exception(parseErrorMessage(body, "Сервер не смог освободить текущий номер.")))
+            }
+            val released = try { JSONObject(body).optString("released", "") } catch (_: Exception) { "" }
+            SessionManager.updateVirtualNumber(context, "")
+            SecurePrefsManager.clearPrivateVirtualNumber(context, accountId)
+            if (released.isNotBlank()) {
+                Timber.i("Active hex number released for account $accountId")
+            }
+            Result.success(released)
+        } catch (e: Exception) {
+            Timber.e(e, "release_hex_number network failure")
+            Result.failure(Exception("Ошибка сети при освобождении номера: ${e.message}"))
+        }
+    }
+
+    /**
      * Confirms the reserved +999 number via canonical Supabase RPC confirm_hex_number,
      * or authoritatively binds it to the account's Supabase Auth user_metadata when RPC is absent.
      * STRICT: Only updates local preferences after verified server activation!

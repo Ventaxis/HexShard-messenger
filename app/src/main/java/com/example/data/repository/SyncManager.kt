@@ -596,7 +596,7 @@ class SyncManager(
                     name = "Saved Messages",
                     ava = "🔖",
                     status = "",
-                    preview = if (content.isDecryptionError) "⚠️ Corrupted message" else content.resolvedText,
+                    preview = if (content.isDecryptionError) "⚠️ Corrupted message" else com.example.util.TextSanitizer.stripMarkdown(content.resolvedText),
                     time = record.timeStr,
                     recipientId = "self",
                     conversationId = "self_$currentUserId",
@@ -607,7 +607,7 @@ class SyncManager(
                     name = "HexShard AI",
                     ava = "HX",
                     status = "online",
-                    preview = content.resolvedText,
+                    preview = com.example.util.TextSanitizer.stripMarkdown(content.resolvedText),
                     time = record.timeStr,
                     recipientId = "ai_assistant",
                     conversationId = "ai_$currentUserId",
@@ -618,7 +618,7 @@ class SyncManager(
                     name = record.peerId,
                     ava = record.peerId.take(2).uppercase(),
                     status = "offline",
-                    preview = if (content.isDecryptionError) "⚠️ Corrupted message" else content.resolvedText,
+                    preview = if (content.isDecryptionError) "⚠️ Corrupted message" else com.example.util.TextSanitizer.stripMarkdown(content.resolvedText),
                     time = record.timeStr,
                     recipientId = record.peerId,
                     conversationId = record.conversationId,
@@ -655,7 +655,7 @@ class SyncManager(
             if (healFailedRow || (record.editedAt != null && !content.isDecryptionError)) {
                 chatDao.updateMessageText(existing.id, content.resolvedText, System.currentTimeMillis(), currentUserId)
                 chatDao.updateMessageStatus(existing.id, messageStatus, currentUserId)
-                conversationRepository.updateChatPreview(existing.chatId, content.resolvedText, record.timeStr, System.currentTimeMillis())
+                conversationRepository.updateChatPreview(existing.chatId, com.example.util.TextSanitizer.stripMarkdown(content.resolvedText), record.timeStr, System.currentTimeMillis())
             }
             return true
         }
@@ -696,7 +696,7 @@ class SyncManager(
                 "voice" -> "🎤 Voice message"
                 "image" -> "📷 Photo"
                 "location" -> "📍 Location"
-                else -> if (content.isDecryptionError) "⚠️ Corrupted message" else content.resolvedText
+                else -> if (content.isDecryptionError) "⚠️ Corrupted message" else com.example.util.TextSanitizer.stripMarkdown(content.resolvedText)
             }
             chatDao.updateChatPreview(resolvedChatId, previewText, record.timeStr, System.currentTimeMillis(), currentUserId)
             if (token.isNotBlank() && !content.isMe && !content.isDecryptionError && content.signatureValid && !record.isAiConversation) {

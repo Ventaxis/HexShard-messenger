@@ -251,7 +251,7 @@ class UserRepository(
         val results = mutableListOf<UserSearchResult>()
 
         try {
-            val url = "$baseUrl/rest/v1/profiles?or=(username.ilike.*$encoded*,normalized_username.ilike.*$encoded*,display_name.ilike.*$encoded*)&select=id,username,display_name,avatar_path&limit=15"
+            val url = "$baseUrl/rest/v1/profiles?or=(username.ilike.*$encoded*,normalized_username.ilike.*$encoded*,display_name.ilike.*$encoded*)&select=id,username,display_name,avatar_url&limit=15"
             val req = SupabaseHttp.request(url, token, anonKey)
                 .get()
                 .build()
@@ -265,7 +265,7 @@ class UserRepository(
                     if (uid == currentUid || uid.isBlank()) continue
                     val uname = obj.optString("username", "")
                     val dname = obj.optString("display_name", uname)
-                    val ava = obj.optString("avatar_path", "")
+                    val ava = obj.optString("avatar_url", "")
                     results.add(
                         UserSearchResult(
                             userId = uid,
@@ -286,47 +286,48 @@ class UserRepository(
         }
         if (digitsOnly.length >= 4) {
             try {
-                val hexFilter = encodeFilterValue(digitsOnly)
-                val hexUrl = "$baseUrl/rest/v1/hex_numbers?or=(raw_number.ilike.*$hexFilter*,number.ilike.*$hexFilter*)&status=eq.active&select=raw_number,number,formatted,account_id,owner_id&limit=10"
-                val hexReq = SupabaseHttp.request(hexUrl, token, anonKey)
-                val hResp = httpClient.newCall(hexReq.get().build()).execute()
+                // RLS hides other users' active numbers, so the number search goes
+                // through a SECURITY DEFINER RPC returning only public profile fields.
+                val rpcUrl = "$baseUrl/rest/v1/rpc/search_users_by_number"
+                val rpcReq = SupabaseHttp.jsonRequest(
+                    rpcUrl, token, anonKey, "POST",
+                    JSONObject().put("p_query", digitsOnly).toString()
+                ).build()
+                val hResp = httpClient.newCall(rpcReq).execute()
                 val hBody = hResp.body?.string() ?: ""
                 hResp.close()
                 if (hResp.isSuccessful && hBody.isNotBlank()) {
-                    val hArr = JSONArray(hBody)
+                    val hArr = JSONObject(hBody).optJSONArray("results") ?: JSONArray()
                     for (i in 0 until hArr.length()) {
                         val hObj = hArr.getJSONObject(i)
-                        val accId = hObj.optString("account_id").ifBlank { hObj.optString("owner_id") }
-                        val num = hObj.optString("formatted").ifBlank { hObj.optString("number") }
+                        val accId = hObj.optString("account_id")
+                        val num = hObj.optString("formatted")
+                        val un = hObj.optString("username", "")
+                        val dn = hObj.optString("display_name", un)
                         if (accId.isNotBlank() && accId != currentUid && results.none { it.userId == accId }) {
-                            val pUrl = "$baseUrl/rest/v1/profiles?id=eq.$accId&select=id,username,display_name,avatar_path&limit=1"
+                            val pUrl = "$baseUrl/rest/v1/profiles?id=eq.$accId&select=id,username,display_name,avatar_url&limit=1"
                             val pReq = SupabaseHttp.request(pUrl, token, anonKey)
                             val pResp = try { httpClient.newCall(pReq.get().build()).execute() } catch (_: Exception) { null }
                             val pBody = pResp?.body?.string() ?: ""
                             pResp?.close()
-                            if (pBody.isNotBlank()) {
+                            val av = if (pBody.isNotBlank()) {
                                 val pArr = JSONArray(pBody)
-                                if (pArr.length() > 0) {
-                                    val pObj = pArr.getJSONObject(0)
-                                    val un = pObj.optString("username", "")
-                                    val dn = pObj.optString("display_name", un)
-                                    val av = pObj.optString("avatar_path", "")
-                                    results.add(
-                                        UserSearchResult(
-                                            userId = accId,
-                                            username = un,
-                                            displayName = dn.ifBlank { un },
-                                            avatarUrl = av.ifBlank { null },
-                                            virtualNumber = num
-                                        )
-                                    )
-                                }
-                            }
+                                if (pArr.length() > 0) pArr.getJSONObject(0).optString("avatar_url", "") else ""
+                            } else ""
+                            results.add(
+                                UserSearchResult(
+                                    userId = accId,
+                                    username = un,
+                                    displayName = dn.ifBlank { un },
+                                    avatarUrl = av.ifBlank { null },
+                                    virtualNumber = num
+                                )
+                            )
                         }
                     }
                 }
             } catch (hexEx: Exception) {
-                Timber.w(hexEx, "searchUsers hex_numbers lookup error")
+                Timber.w(hexEx, "searchUsers number lookup error")
             }
         }
 
@@ -364,7 +365,7 @@ class UserRepository(
                     val uid = obj.optString("id", clean)
                     val uname = obj.optString("username", clean)
                     val dname = obj.optString("display_name", uname).ifBlank { uname }
-                    val ava = obj.optString("avatar_url", obj.optString("avatar_path", "")).takeIf { it.isNotBlank() }
+                    val ava = obj.optString("avatar_url", obj.optString("avatar_url", "")).takeIf { it.isNotBlank() }
                     val fullAva = if (ava != null && !ava.startsWith("http") && !ava.startsWith("data:")) {
                         "$baseUrl/storage/v1/object/public/avatars/$ava"
                     } else ava
@@ -373,21 +374,25 @@ class UserRepository(
                     val bio = obj.optString("bio", "")
                     val dob = obj.optString("date_of_birth", "")
 
-                    // Fetch virtual number
+                    // Fetch virtual number: RLS hides other users' active numbers, so
+                    // the formatted ID comes from a SECURITY DEFINER RPC. The raw
+                    // PostgREST query always returned empty for peers.
                     var vNum = ""
                     try {
-                        val hexUrl = "$baseUrl/rest/v1/hex_numbers?or=(account_id.eq.$uid,owner_id.eq.$uid)&status=eq.active&select=number,formatted&limit=1"
-                        val hexReq = SupabaseHttp.request(hexUrl, token, anonKey)
-                        val hResp = httpClient.newCall(hexReq.get().build()).execute()
+                        val hexRpcUrl = "$baseUrl/rest/v1/rpc/get_public_hex_number"
+                        val hexReq = SupabaseHttp.jsonRequest(
+                            hexRpcUrl, token, anonKey, "POST",
+                            JSONObject().put("p_account_id", uid).toString()
+                        ).build()
+                        val hResp = httpClient.newCall(hexReq).execute()
                         val hBody = hResp.body?.string() ?: ""
                         hResp.close()
-                        if (hResp.isSuccessful && hBody.isNotBlank()) {
-                            val hArr = JSONArray(hBody)
-                            if (hArr.length() > 0) {
-                                vNum = hArr.getJSONObject(0).optString("number", "")
-                            }
+                        if (hResp.isSuccessful && hBody.isNotBlank() && hBody != "null") {
+                            vNum = JSONObject(hBody).optString("formatted", "")
                         }
-                    } catch (_: Exception) {}
+                    } catch (hexEx: Exception) {
+                        Timber.w(hexEx, "get_public_hex_number failed for $uid")
+                    }
 
                     return@withContext PeerProfileInfo(
                         id = uid,

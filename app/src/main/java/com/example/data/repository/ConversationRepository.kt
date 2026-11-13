@@ -525,8 +525,13 @@ class ConversationRepository(
                                         resolvedRecipientId = mAccId
                                         val mDisplayName = mObj.optString("display_name", "")
                                         val mUsername = mObj.optString("username", "")
+                                        // DIRECT chats are named by the PEER, never by the
+                                        // shared server title: the creator writes their own
+                                        // recipient's name into p_title, so both sides used
+                                        // to see the same (wrong) name. Titles remain only
+                                        // for GROUP conversations.
                                         resolvedName = when {
-                                            title.isNotBlank() -> title
+                                            convType == "GROUP" && title.isNotBlank() -> title
                                             mDisplayName.isNotBlank() -> mDisplayName
                                             mUsername.isNotBlank() -> mUsername
                                             else -> "User"
@@ -563,7 +568,7 @@ class ConversationRepository(
                         val chatToUpsert = if (existing != null) {
                             existing.copy(
                                 conversationId = convId,
-                                name = if (resolvedName.isNotBlank()) resolvedName else existing.name,
+                                name = if (resolvedName.isNotBlank() && resolvedName != "User") resolvedName else existing.name,
                                 ava = if (resolvedAva.isNotBlank()) resolvedAva else existing.ava,
                                 isPinned = isPinned,
                                 conversationType = convType,
@@ -984,7 +989,10 @@ class ConversationRepository(
 
     suspend fun persistConversationToCloud(userId: String, chat: ChatEntity) = withContext(Dispatchers.IO) {
         if (userId.isBlank() || chat.isSavedMessages || chat.isAiAssistant) return@withContext
-        val returnedId = createOrGetConversationRemote(chat.conversationType, chat.recipientId, chat.name)
+        // DIRECT: send no p_title — the shared server title would name the chat the
+        // same for BOTH sides. The recipient's side resolves the peer's own name.
+        val titleForServer = if (chat.conversationType == "GROUP") chat.name else ""
+        val returnedId = createOrGetConversationRemote(chat.conversationType, chat.recipientId, titleForServer)
         if (returnedId != null) {
             // Guard: never run a re-bind against a blank id — it would rewrite every
             // conversation-less chat row of the account.
@@ -1000,7 +1008,7 @@ class ConversationRepository(
             val payload = JSONObject().apply {
                 put("p_type", chat.conversationType)
                 put("p_recipient_id", chat.recipientId)
-                if (chat.name.isNotBlank()) put("p_title", chat.name)
+                if (chat.conversationType == "GROUP" && chat.name.isNotBlank()) put("p_title", chat.name)
             }
             chatDao.insertOutbox(
                 com.example.data.database.OutboxEntity(

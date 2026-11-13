@@ -104,6 +104,8 @@ fun SettingsScreen(
     var manualQrInput by remember { mutableStateOf("") }
     var qrStatusMessage by remember { mutableStateOf<String?>(null) }
     var showClaimHexShardDialog by remember { mutableStateOf(false) }
+    var showChangeNumberConfirm by remember { mutableStateOf(false) }
+    var changingNumber by remember { mutableStateOf(false) }
     var showUpdateCenter by remember { mutableStateOf(false) }
     var showDatePickerDialog by remember { mutableStateOf(false) }
 
@@ -1797,7 +1799,7 @@ fun SettingsScreen(
                             value = privateVirtualNumber,
                             isAccent = true,
                             badge = "HexShard ID",
-                            onClick = { showClaimHexShardDialog = true },
+                            onClick = { showChangeNumberConfirm = true },
                             onCopy = {
                                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                                 clipboard.setPrimaryClip(ClipData.newPlainText("Virtual Number", privateVirtualNumber))
@@ -2141,9 +2143,52 @@ fun SettingsScreen(
         if (showUpdateCenter) {
             UpdateCenterDialog(onDismiss = { showUpdateCenter = false })
         }
+        if (showChangeNumberConfirm) {
+            val currentLang = LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { if (!changingNumber) showChangeNumberConfirm = false },
+                title = { Text(if (currentLang) "Сменить номер?" else "Change number?", color = HexTextPrimary) },
+                text = {
+                    Text(
+                        if (currentLang)
+                            "Текущий номер $privateVirtualNumber будет освобождён и станет доступен другим. Новый номер выбирается сразу после этого. Чаты и сообщения останутся."
+                        else "Your current number $privateVirtualNumber will be released and become available to others. You will pick the new number right after. Chats and messages stay.",
+                        color = HexTextSecondary
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        enabled = !changingNumber,
+                        onClick = {
+                            changingNumber = true
+                            scope.launch {
+                                val uid = com.example.data.SecurePrefsManager.getUserId(context)
+                                val token = com.example.data.SecurePrefsManager.getSupabaseAccessToken(context)
+                                val result = com.example.network.supabase.VirtualNumberService.releaseActiveNumber(uid, token, context)
+                                changingNumber = false
+                                result.onSuccess {
+                                    showChangeNumberConfirm = false
+                                    showClaimHexShardDialog = true
+                                }.onFailure { err ->
+                                    Toast.makeText(context, err.message ?: "Не удалось освободить номер", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = HexShardTeal)
+                    ) { Text(if (currentLang) "Освободить и выбрать новый" else "Release and pick new") }
+                },
+                dismissButton = {
+                    TextButton(enabled = !changingNumber, onClick = { showChangeNumberConfirm = false }) {
+                        Text(if (currentLang) "Отмена" else "Cancel")
+                    }
+                }
+            )
+        }
         if (showClaimHexShardDialog) {
             HexShardIdClaimDialog(
-                initialPreferred = privateVirtualNumber,
+                // After a release the old number must not be prefilled: the point of
+                // the flow is picking a NEW identity.
+                initialPreferred = "",
                 onDismiss = { showClaimHexShardDialog = false },
                 onSuccess = { formattedNumber ->
                     showClaimHexShardDialog = false

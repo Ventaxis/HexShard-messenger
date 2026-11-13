@@ -304,36 +304,45 @@ fun parseInlineMarkdown(text: String, defaultColor: Color, isDark: Boolean): Ann
     val codeInlineBg = if (isDark) Color(0xFF202A36) else Color(0xFFE2E8F0)
     val codeInlineColor = if (isDark) Color(0xFF4EE2A0) else Color(0xFF03A062)
 
+    // Models sometimes emit stray/truncated HTML (<bf4>, <b>, <br>). Compose renders
+    // no HTML, so raw tags would just pollute the bubble — drop them before parsing.
+    val sanitized = text.replace(Regex("</?[a-zA-Z][^>\\n]{0,120}>"), "")
+
     return buildAnnotatedString {
         var cursor = 0
-        val len = text.length
+        val len = sanitized.length
 
         while (cursor < len) {
-            // Check for links [label](url)
-            if (text[cursor] == '[') {
-                val closeBracket = text.indexOf(']', cursor)
-                if (closeBracket != -1 && closeBracket + 1 < len && text[closeBracket + 1] == '(') {
-                    val closeParen = text.indexOf(')', closeBracket + 1)
+            // Check for links [label](url) — http/https only, never intent/content/file
+            if (sanitized[cursor] == '[') {
+                val closeBracket = sanitized.indexOf(']', cursor)
+                if (closeBracket != -1 && closeBracket + 1 < len && sanitized[closeBracket + 1] == '(') {
+                    val closeParen = sanitized.indexOf(')', closeBracket + 1)
                     if (closeParen != -1) {
-                        val label = text.substring(cursor + 1, closeBracket)
-                        val url = text.substring(closeBracket + 2, closeParen)
-                        val start = length
-                        append(label)
-                        addStyle(
-                            style = SpanStyle(
-                                color = linkColor,
-                                textDecoration = TextDecoration.Underline,
-                                fontWeight = FontWeight.Medium
-                            ),
-                            start = start,
-                            end = length
-                        )
-                        addStringAnnotation(
-                            tag = "URL",
-                            annotation = url,
-                            start = start,
-                            end = length
-                        )
+                        val label = sanitized.substring(cursor + 1, closeBracket)
+                        val url = sanitized.substring(closeBracket + 2, closeParen)
+                        val safeUrl = url.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+                        if (safeUrl != null) {
+                            val start = length
+                            append(label)
+                            addStyle(
+                                style = SpanStyle(
+                                    color = linkColor,
+                                    textDecoration = TextDecoration.Underline,
+                                    fontWeight = FontWeight.Medium
+                                ),
+                                start = start,
+                                end = length
+                            )
+                            addStringAnnotation(
+                                tag = "URL",
+                                annotation = safeUrl,
+                                start = start,
+                                end = length
+                            )
+                        } else {
+                            append(label)
+                        }
                         cursor = closeParen + 1
                         continue
                     }
@@ -341,10 +350,10 @@ fun parseInlineMarkdown(text: String, defaultColor: Color, isDark: Boolean): Ann
             }
 
             // Check for inline code `code`
-            if (text[cursor] == '`') {
-                val nextBacktick = text.indexOf('`', cursor + 1)
+            if (sanitized[cursor] == '`') {
+                val nextBacktick = sanitized.indexOf('`', cursor + 1)
                 if (nextBacktick != -1) {
-                    val codeContent = text.substring(cursor + 1, nextBacktick)
+                    val codeContent = sanitized.substring(cursor + 1, nextBacktick)
                     val start = length
                     append(codeContent)
                     addStyle(
@@ -362,16 +371,17 @@ fun parseInlineMarkdown(text: String, defaultColor: Color, isDark: Boolean): Ann
                 }
             }
 
-            // Check for bold **text** or __text__
-            if ((text.startsWith("**", cursor) || text.startsWith("__", cursor)) && cursor + 2 < len) {
-                val token = text.substring(cursor, cursor + 2)
-                val closeIdx = text.indexOf(token, cursor + 2)
+            // Check for bold **text** or __text__ — inner parsed recursively so
+            // nested emphasis keeps working instead of leaking raw asterisks.
+            if ((sanitized.startsWith("**", cursor) || sanitized.startsWith("__", cursor)) && cursor + 2 < len) {
+                val token = sanitized.substring(cursor, cursor + 2)
+                val closeIdx = sanitized.indexOf(token, cursor + 2)
                 if (closeIdx != -1) {
-                    val inner = text.substring(cursor + 2, closeIdx)
+                    val inner = sanitized.substring(cursor + 2, closeIdx)
                     val start = length
-                    append(inner)
+                    append(parseInlineMarkdown(inner, defaultColor, isDark))
                     addStyle(
-                        style = SpanStyle(fontWeight = FontWeight.Bold, color = defaultColor),
+                        style = SpanStyle(fontWeight = FontWeight.Bold),
                         start = start,
                         end = length
                     )
@@ -380,12 +390,17 @@ fun parseInlineMarkdown(text: String, defaultColor: Color, isDark: Boolean): Ann
                 }
             }
 
-            // Check for italic *text* or _text_
-            if ((text[cursor] == '*' || text[cursor] == '_') && cursor + 1 < len && text[cursor + 1] != '*' && text[cursor + 1] != '_') {
-                val token = text[cursor]
-                val closeIdx = text.indexOf(token, cursor + 1)
-                if (closeIdx != -1 && closeIdx > cursor + 1) {
-                    val inner = text.substring(cursor + 1, closeIdx)
+            // Check for italic *text* or _text_ — underscores must not swallow
+            // snake_case identifiers (my_var_name stays intact).
+            val ch = sanitized[cursor]
+            if ((ch == '*' || ch == '_') && cursor + 1 < len && sanitized[cursor + 1] != '*' && sanitized[cursor + 1] != '_') {
+                val boundaryOk = cursor == 0 || !sanitized[cursor - 1].isLetterOrDigit()
+                val closeIdx = if (boundaryOk) sanitized.indexOf(ch, cursor + 1) else -1
+                val closeBoundaryOk = closeIdx != -1 &&
+                    (closeIdx == cursor + 1 || !sanitized[closeIdx - 1].isWhitespace()) &&
+                    (closeIdx + 1 >= len || !sanitized[closeIdx + 1].isLetterOrDigit())
+                if (closeIdx != -1 && closeIdx > cursor + 1 && closeBoundaryOk) {
+                    val inner = sanitized.substring(cursor + 1, closeIdx)
                     val start = length
                     append(inner)
                     addStyle(
@@ -400,7 +415,7 @@ fun parseInlineMarkdown(text: String, defaultColor: Color, isDark: Boolean): Ann
 
             // Plain character
             val start = length
-            append(text[cursor])
+            append(sanitized[cursor])
             addStyle(
                 style = SpanStyle(color = defaultColor, fontSize = 14.sp),
                 start = start,

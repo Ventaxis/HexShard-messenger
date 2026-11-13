@@ -150,6 +150,12 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
         viewModel.onAccountChanged()
     }
 
+    // System back must navigate up (close the open chat first), not exit the app.
+    val selectedIdForBack by viewModel.selectedChatId.collectAsStateWithLifecycle()
+    androidx.activity.compose.BackHandler(enabled = selectedIdForBack != null) {
+        viewModel.deselectChat()
+    }
+
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = bg
@@ -963,7 +969,8 @@ fun ChatListItem(
                     },
                     leadingIcon = { Icon(Icons.Default.CleaningServices, null, tint = Color.Red) }
                 )
-            } else {
+            } else if (!isAiChat) {
+                // The AI assistant is a system chat: no delete entries at all.
                 DropdownMenuItem(
                     text = { Text(strings.deleteChat, color = Color.Red) },
                     onClick = {
@@ -972,6 +979,16 @@ fun ChatListItem(
                     },
                     leadingIcon = { Icon(Icons.Default.Delete, null, tint = Color.Red) }
                 )
+                DropdownMenuItem(
+                    text = { Text(strings.clearMessages, color = Color.Red) },
+                    onClick = {
+                        expanded = false
+                        onDeleteConversation(chat.id, "clear")
+                    },
+                    leadingIcon = { Icon(Icons.Default.CleaningServices, null, tint = Color.Red) }
+                )
+            } else {
+                // AI chat: clearing messages is fine, deleting the chat is not.
                 DropdownMenuItem(
                     text = { Text(strings.clearMessages, color = Color.Red) },
                     onClick = {

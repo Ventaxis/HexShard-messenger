@@ -101,6 +101,9 @@ class ChatViewModel @Inject constructor(
         viewModelScope.launch {
             val peerId = chat.recipientId.ifBlank { chat.name }
             val profile = repository.fetchPeerProfile(peerId)
+                // Chats created before recipient ids existed carry only a display name:
+                // resolve it to a real account before giving up.
+                ?: repository.resolveUser(chat.name)?.first?.let { repository.fetchPeerProfile(it) }
             if (profile != null) {
                 _viewingPeerProfile.value = profile
             } else {
@@ -259,6 +262,16 @@ class ChatViewModel @Inject constructor(
 
     fun deleteChat(chatId: Int) {
         viewModelScope.launch {
+            val chat = repository.getChatById(chatId)
+            if (chat != null && chat.isAiAssistant) {
+                // The AI assistant is a system chat: never deletable.
+                _aiErrorState.value = AiUiError.Custom(
+                    if (LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN)
+                        "Чат с ИИ удалить нельзя."
+                    else "The AI chat cannot be deleted."
+                )
+                return@launch
+            }
             if (_selectedChatId.value == chatId) {
                 _selectedChatId.value = null
             }
@@ -270,6 +283,15 @@ class ChatViewModel @Inject constructor(
     fun deleteConversation(chatId: Int, mode: String, context: android.content.Context) {
         viewModelScope.launch {
             val chat = repository.getChatById(chatId) ?: return@launch
+            if (chat.isAiAssistant && mode != "clear") {
+                // The AI assistant is a system chat: deletion forbidden, clearing OK.
+                _aiErrorState.value = AiUiError.Custom(
+                    if (LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN)
+                        "Чат с ИИ удалить нельзя."
+                    else "The AI chat cannot be deleted."
+                )
+                return@launch
+            }
             val ok = when (mode) {
                 "me" -> repository.deleteConversationForMe(chat, context)
                 "both" -> repository.deleteConversationForBoth(chat, context)
@@ -941,22 +963,26 @@ class ChatViewModel @Inject constructor(
             }
 
             val resolved = repository.resolveUser(trimmed)
-            val finalRecipientId = resolved?.first ?: run {
-                val searchList = try { repository.searchUsers(trimmed) } catch (_: Exception) { emptyList() }
-                val match = searchList.firstOrNull { 
-                    it.username.equals(trimmed.removePrefix("@"), ignoreCase = true) ||
-                    it.displayName.equals(trimmed, ignoreCase = true) ||
-                    (it.virtualNumber != null && it.virtualNumber.contains(trimmed.filter { c -> c.isDigit() }))
-                }
-                match?.userId ?: trimmed
+            // No local fake contacts: if the name/number does not resolve to a real
+            // account, the "+" flow fails loudly instead of inventing a user.
+            val searchList = try { repository.searchUsers(trimmed) } catch (_: Exception) { emptyList() }
+            val match = searchList.firstOrNull {
+                it.username.equals(trimmed.removePrefix("@"), ignoreCase = true) ||
+                it.displayName.equals(trimmed, ignoreCase = true) ||
+                (it.virtualNumber != null && it.virtualNumber.contains(trimmed.filter { c -> c.isDigit() }))
             }
-            val finalName = resolved?.second ?: run {
-                val searchList = try { repository.searchUsers(trimmed) } catch (_: Exception) { emptyList() }
-                val match = searchList.firstOrNull { 
-                    it.username.equals(trimmed.removePrefix("@"), ignoreCase = true) ||
-                    it.displayName.equals(trimmed, ignoreCase = true)
-                }
-                match?.displayName?.ifBlank { match.username } ?: trimmed
+            val finalRecipientId = resolved?.first ?: match?.userId
+            val finalName = resolved?.second
+                ?: match?.displayName?.ifBlank { match.username }
+                ?: match?.username
+                ?: trimmed
+            if (finalRecipientId.isNullOrBlank() || finalRecipientId == trimmed) {
+                _aiErrorState.value = AiUiError.Custom(
+                    if (LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN)
+                        "Пользователь «$trimmed» не найден. Ищи по юзернейму или номеру +999 в поиске."
+                    else "User \"$trimmed\" not found. Search by username or +999 number."
+                )
+                return@launch
             }
 
             val res = repository.getOrCreateDirectConversation(finalRecipientId, finalName)

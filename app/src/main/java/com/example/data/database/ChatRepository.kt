@@ -349,15 +349,22 @@ open class ChatRepository(
             val token = com.example.data.SecurePrefsManager.getSupabaseAccessToken(context)
             val baseUrl = com.example.network.supabase.SupabaseConfig.getBaseUrl()
             val anonKey = com.example.network.supabase.SupabaseConfig.getAnonKey(context)
+            // Local-only rows (offline creations) have no server conversation: delete
+            // locally instead of routing invented ids ("self_<uid>", recipientId) into
+            // the RPC — that used to fail server-side and leave the chat undeletable.
+            if (chat.conversationId.isBlank()) {
+                if (accountId.isNotBlank()) {
+                    chatDao.deleteMessagesByChat(chat.id, accountId)
+                    chatDao.deleteChatById(chat.id, accountId)
+                }
+                return@withContext true
+            }
             val marker = callConversationRpc(
-                "delete_conversation_for_me", chat.conversationId.ifBlank { "self_$accountId" },
+                "delete_conversation_for_me", chat.conversationId,
                 token, baseUrl, anonKey
             ) ?: return@withContext false
             if (accountId.isNotBlank()) {
-                val conversationId = chat.conversationId.ifBlank {
-                    if (chat.isAiAssistant) "ai_$accountId" else "self_$accountId"
-                }
-                com.example.data.SecurePrefsManager.setConversationDeleteMarker(context, accountId, conversationId, marker)
+                com.example.data.SecurePrefsManager.setConversationDeleteMarker(context, accountId, chat.conversationId, marker)
                 chatDao.deleteMessagesByChat(chat.id, accountId)
                 chatDao.deleteChatById(chat.id, accountId)
             }
@@ -371,8 +378,16 @@ open class ChatRepository(
             val token = com.example.data.SecurePrefsManager.getSupabaseAccessToken(context)
             val baseUrl = com.example.network.supabase.SupabaseConfig.getBaseUrl()
             val anonKey = com.example.network.supabase.SupabaseConfig.getAnonKey(context)
+            if (chat.conversationId.isBlank()) {
+                // Nothing shared server-side — "both" degenerates to a local delete.
+                if (accountId.isNotBlank()) {
+                    chatDao.deleteMessagesByChat(chat.id, accountId)
+                    chatDao.deleteChatById(chat.id, accountId)
+                }
+                return@withContext true
+            }
             callConversationRpc(
-                "delete_conversation_for_both", chat.conversationId.ifBlank { chat.recipientId },
+                "delete_conversation_for_both", chat.conversationId,
                 token, baseUrl, anonKey
             ) ?: return@withContext false
             if (accountId.isNotBlank()) {
@@ -389,8 +404,12 @@ open class ChatRepository(
             val token = com.example.data.SecurePrefsManager.getSupabaseAccessToken(context)
             val baseUrl = com.example.network.supabase.SupabaseConfig.getBaseUrl()
             val anonKey = com.example.network.supabase.SupabaseConfig.getAnonKey(context)
+            if (chat.conversationId.isBlank()) {
+                if (accountId.isNotBlank()) chatDao.deleteMessagesByChat(chat.id, accountId)
+                return@withContext true
+            }
             val marker = callConversationRpc(
-                "clear_conversation_messages", chat.conversationId.ifBlank { chat.recipientId },
+                "clear_conversation_messages", chat.conversationId,
                 token, baseUrl, anonKey
             ) ?: return@withContext false
             if (accountId.isNotBlank()) {
