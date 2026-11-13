@@ -412,7 +412,8 @@ class AttachmentRepository(
                     // not whatever the server serves now. Attachments encrypted under
                     // the served key still decrypt via the fallbacks below.
                     val trustedSender = userRepository.getTrustedUserPublicKey(senderId)
-                    val senderPubKey = trustedSender?.pinnedKey ?: trustedSender?.key
+                        ?: return@withContext null
+                    val senderPubKey = trustedSender.pinnedKey ?: trustedSender.key
                         ?: return@withContext null
                     val pinnedSecret = E2ECryptoManager.deriveSharedSecret(senderPubKey, currentUserId)
                     // TOFU rotation fallback: attachments sent after the peer rotated
