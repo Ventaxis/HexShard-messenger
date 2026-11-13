@@ -338,8 +338,11 @@ class SyncManager(
                     accountId = currentUserId
                 )
             }
-            if (record.editedAt == null) {
-                // Not edited, already present in local database
+            if (record.editedAt == null && existingMsg.status != "integrity_error") {
+                // Not edited, already present and healthy — nothing to do.
+                // Failed-decryption rows fall through so a later sync pass with
+                // restored/rotated keys can re-decrypt and heal them: the server
+                // still holds the ciphertext.
                 return@withContext true
             }
         }
@@ -645,15 +648,14 @@ class SyncManager(
             ?: (if (record.idempotencyKey.isNotBlank()) chatDao.getMessageByIdempotencyKey(record.idempotencyKey, currentUserId) else null)
 
         if (existing != null) {
-            if (record.editedAt != null) {
-                // Only overwrite a good local text with a GOOD decryption: a failed
-                // pass (peer key rotated, cache cold) must never replace readable
-                // content with a decryption-error stub.
-                if (!content.isDecryptionError) {
-                    chatDao.updateMessageText(existing.id, content.resolvedText, System.currentTimeMillis(), currentUserId)
-                    chatDao.updateMessageStatus(existing.id, messageStatus, currentUserId)
-                    conversationRepository.updateChatPreview(existing.chatId, content.resolvedText, record.timeStr, System.currentTimeMillis())
-                }
+            // Healing: a row persisted as a decryption failure is overwritten when a
+            // later pass decrypts it successfully (keys restored, rotation accepted).
+            // A failed pass must never replace readable content with a stub.
+            val healFailedRow = existing.status == "integrity_error" && !content.isDecryptionError
+            if (healFailedRow || (record.editedAt != null && !content.isDecryptionError)) {
+                chatDao.updateMessageText(existing.id, content.resolvedText, System.currentTimeMillis(), currentUserId)
+                chatDao.updateMessageStatus(existing.id, messageStatus, currentUserId)
+                conversationRepository.updateChatPreview(existing.chatId, content.resolvedText, record.timeStr, System.currentTimeMillis())
             }
             return true
         }

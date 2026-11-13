@@ -404,16 +404,25 @@ class AttachmentRepository(
                 // must resolve to isSelf as well, or decryption always fails.
                 val isSelf = senderId == "self" || senderId == "me" || senderId == currentUserId || senderId.isBlank() ||
                         senderId == "ai_assistant" || senderId.startsWith("ai_")
-                val sharedSecret = if (isSelf) {
+                var servedSecret: ByteArray? = null
+                val sharedSecret: ByteArray = if (isSelf) {
                     E2ECryptoManager.deriveSelfStorageSecret(currentUserId)
                 } else {
                     // Mirror message decryption: verify against the PINNED sender key,
                     // not whatever the server serves now. Attachments encrypted under
-                    // the served key still decrypt via the sharedSecret fallback below.
+                    // the served key still decrypt via the fallbacks below.
                     val trustedSender = userRepository.getTrustedUserPublicKey(senderId)
                     val senderPubKey = trustedSender?.pinnedKey ?: trustedSender?.key
                         ?: return@withContext null
-                    E2ECryptoManager.deriveSharedSecret(senderPubKey, currentUserId)
+                    val pinnedSecret = E2ECryptoManager.deriveSharedSecret(senderPubKey, currentUserId)
+                    // TOFU rotation fallback: attachments sent after the peer rotated
+                    // keys decrypt only under the served key — retry before giving up.
+                    if (trustedSender.keyChanged && trustedSender.key != null) {
+                        servedSecret = runCatching {
+                            E2ECryptoManager.deriveSharedSecret(trustedSender.key, currentUserId)
+                        }.getOrNull()?.takeIf { !it.contentEquals(pinnedSecret) }
+                    }
+                    pinnedSecret
                 }
 
                 val primaryKey = if (idempotencyKey.isNotBlank()) {
@@ -438,6 +447,21 @@ class AttachmentRepository(
                     } catch (fallbackEx: Exception) {
                         tempDecFile.delete()
                         Timber.e(fallbackEx, "Attachment decryption fallback failed")
+                    }
+                }
+
+                // Fallback for attachments encrypted under the served (rotated) key
+                if (!decryptedOk && servedSecret != null) {
+                    val servedKey = if (idempotencyKey.isNotBlank()) {
+                        E2ECryptoManager.deriveMessageKey(servedSecret, idempotencyKey)
+                    } else {
+                        servedSecret
+                    }
+                    try {
+                        decryptedOk = decryptAttachmentWithKey(tempEncFile, tempDecFile, servedKey)
+                    } catch (rotationEx: Exception) {
+                        tempDecFile.delete()
+                        Timber.w(rotationEx, "Served-key attachment decryption failed")
                     }
                 }
 

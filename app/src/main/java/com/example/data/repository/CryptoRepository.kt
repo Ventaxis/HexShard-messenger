@@ -175,6 +175,7 @@ class CryptoRepository(
         // a different one, and let the caller warn the user about the rotation.
         var senderKeyChanged = false
         var sharedSecret: ByteArray? = null
+        var servedSecret: ByteArray? = null
         if (isSelf) {
             sharedSecret = E2ECryptoManager.deriveSelfStorageSecret(recipientId)
         } else {
@@ -195,6 +196,22 @@ class CryptoRepository(
             } catch (e: Exception) {
                 Timber.w(e, "Shared secret derivation failed for sender $senderId")
                 null
+            }
+            // TOFU key rotation fallback: after a peer reinstalled (keys regenerated),
+            // messages encrypted under the NEW identity would fail against the pinned
+            // key forever and be branded corrupted. Derive the served-key secret as a
+            // retry; the payload decryptors use it only if the pinned HMAC fails, and
+            // senderKeyChanged still surfaces the rotation warning to the user.
+            if (trusted.keyChanged && trusted.key != null) {
+                servedSecret = try {
+                    E2ECryptoManager.deriveSharedSecret(trusted.key, recipientId)
+                } catch (e: Exception) {
+                    Timber.w(e, "Served-key secret derivation failed for sender $senderId")
+                    null
+                }
+                if (servedSecret != null && sharedSecret != null && servedSecret.contentEquals(sharedSecret)) {
+                    servedSecret = null
+                }
             }
         }
 
@@ -226,6 +243,13 @@ class CryptoRepository(
                     )
                     val sigBytes = Base64.getDecoder().decode(base64Signature)
                     signatureValid = E2ECryptoManager.verifySignature(canonicalEnvelope, sigBytes, senderSigningKey)
+                    // Rotation: a signature that fails against the PINNED signing key may
+                    // legitimately verify under the peer's NEW signing key. Verify there
+                    // too — senderKeyChanged still keeps the rotation warning visible,
+                    // but the message no longer renders as a withheld security alert.
+                    if (!signatureValid && trustedSign?.keyChanged == true && trustedSign.key != null) {
+                        signatureValid = E2ECryptoManager.verifySignature(canonicalEnvelope, sigBytes, trustedSign.key)
+                    }
                 } else {
                     Timber.w("Sender signing key unavailable for verification: $senderId")
                 }
@@ -238,12 +262,12 @@ class CryptoRepository(
 
         if (isV3) {
             return decryptV3Payload(
-                combinedBytes, masterSecret, conversationId, idempotencyKey,
+                combinedBytes, masterSecret, servedSecret, conversationId, idempotencyKey,
                 envelopeSenderId, envelopeRecipientId, isSelf, signatureValid, senderKeyChanged
             )
         }
         return decryptV2Payload(
-            combinedBytes, masterSecret, idempotencyKey, isSelf,
+            combinedBytes, masterSecret, servedSecret, idempotencyKey, isSelf,
             signatureValid, signaturePresent, senderKeyChanged
         )
     }
@@ -252,6 +276,7 @@ class CryptoRepository(
     private fun decryptV3Payload(
         combinedBytes: ByteArray,
         masterSecret: ByteArray,
+        servedSecret: ByteArray?,
         conversationId: String,
         idempotencyKey: String,
         senderId: String,
@@ -270,20 +295,27 @@ class CryptoRepository(
             )
         }
 
-        val encKey = E2ECryptoManager.deriveEncryptionKey(masterSecret, idempotencyKey)
-        val macKey = E2ECryptoManager.deriveMacKey(masterSecret, idempotencyKey)
-
         val receivedHmac = body.copyOfRange(0, 32)
         val ivAndCipher = body.copyOfRange(32, body.size)
 
-        if (!E2ECryptoManager.verifyHMAC(ivAndCipher, receivedHmac, macKey)) {
-            return DecryptedResult(
-                plainText = "[Message integrity verification failed: tampered ciphertext]",
-                isSignatureValid = false,
-                senderKeyChanged = senderKeyChanged,
-                trustStatus = DecryptionTrustStatus.CORRUPT_PAYLOAD
-            )
+        var activeSecret = masterSecret
+        if (!E2ECryptoManager.verifyHMAC(ivAndCipher, receivedHmac, E2ECryptoManager.deriveMacKey(masterSecret, idempotencyKey))) {
+            // Pinned-key HMAC failed: retry with the served key before declaring
+            // the payload tampered — the peer may have legitimately rotated keys.
+            if (servedSecret == null ||
+                !E2ECryptoManager.verifyHMAC(ivAndCipher, receivedHmac, E2ECryptoManager.deriveMacKey(servedSecret, idempotencyKey))
+            ) {
+                return DecryptedResult(
+                    plainText = "[Message integrity verification failed: tampered ciphertext]",
+                    isSignatureValid = false,
+                    senderKeyChanged = senderKeyChanged,
+                    trustStatus = DecryptionTrustStatus.CORRUPT_PAYLOAD
+                )
+            }
+            activeSecret = servedSecret
         }
+
+        val encKey = E2ECryptoManager.deriveEncryptionKey(activeSecret, idempotencyKey)
 
         val iv = ivAndCipher.copyOfRange(0, 12)
         val cipherText = ivAndCipher.copyOfRange(12, ivAndCipher.size)
@@ -324,18 +356,13 @@ class CryptoRepository(
     private fun decryptV2Payload(
         combinedBytes: ByteArray,
         masterSecret: ByteArray,
+        servedSecret: ByteArray?,
         idempotencyKey: String,
         isSelf: Boolean,
         signatureValid: Boolean,
         signaturePresent: Boolean,
         senderKeyChanged: Boolean
     ): DecryptedResult {
-        val messageKey = if (idempotencyKey.isNotBlank()) {
-            E2ECryptoManager.deriveMessageKey(masterSecret, idempotencyKey)
-        } else {
-            masterSecret
-        }
-
         if (combinedBytes.size < 44) { // 32 bytes HMAC + 12 bytes IV
             return DecryptedResult(
                 plainText = "[Corrupt payload: truncated envelope]",
@@ -352,13 +379,26 @@ class CryptoRepository(
         val receivedHmac = ByteArray(32)
         System.arraycopy(combinedBytes, 0, receivedHmac, 0, 32)
 
-        if (!E2ECryptoManager.verifyHMAC(ivAndCipher, receivedHmac, messageKey)) {
-            return DecryptedResult(
-                plainText = "[Message integrity verification failed: tampered ciphertext]",
-                isSignatureValid = false,
-                senderKeyChanged = senderKeyChanged,
-                trustStatus = DecryptionTrustStatus.CORRUPT_PAYLOAD
-            )
+        var activeKey = if (idempotencyKey.isNotBlank()) {
+            E2ECryptoManager.deriveMessageKey(masterSecret, idempotencyKey)
+        } else {
+            masterSecret
+        }
+        if (!E2ECryptoManager.verifyHMAC(ivAndCipher, receivedHmac, activeKey)) {
+            // Pinned-key HMAC failed: retry with the served key before declaring
+            // the payload tampered — the peer may have legitimately rotated keys.
+            val servedKey = servedSecret?.let {
+                if (idempotencyKey.isNotBlank()) E2ECryptoManager.deriveMessageKey(it, idempotencyKey) else it
+            }
+            if (servedKey == null || !E2ECryptoManager.verifyHMAC(ivAndCipher, receivedHmac, servedKey)) {
+                return DecryptedResult(
+                    plainText = "[Message integrity verification failed: tampered ciphertext]",
+                    isSignatureValid = false,
+                    senderKeyChanged = senderKeyChanged,
+                    trustStatus = DecryptionTrustStatus.CORRUPT_PAYLOAD
+                )
+            }
+            activeKey = servedKey
         }
 
         val iv = ByteArray(12)
@@ -367,7 +407,7 @@ class CryptoRepository(
         System.arraycopy(ivAndCipher, 12, cipherText, 0, cipherText.size)
 
         return try {
-            val decrypted = E2ECryptoManager.decryptMessage(iv, cipherText, messageKey)
+            val decrypted = E2ECryptoManager.decryptMessage(iv, cipherText, activeKey)
             when {
                 isSelf || signatureValid -> DecryptedResult(
                     plainText = decrypted,
