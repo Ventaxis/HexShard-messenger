@@ -10,6 +10,8 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -52,10 +54,12 @@ class AvatarMetadataGuardTest {
 
     @Test
     fun successfulUploadNeverWritesNonStorageUrlsIntoAuthMetadata() = runBlocking {
-        // Only the storage upload is enqueued: the repository under test resolves
-        // its public URL against the mock base URL (http://localhost), which is not
-        // a https storage URL, so the guarded auth-metadata PUT must not fire.
+        // The repository under test resolves its public URL against the mock base
+        // URL (http://localhost), which is not a https storage URL, so the guarded
+        // auth-metadata PUT must not fire. Exactly two requests are expected:
+        // the storage upload and the profiles PATCH; no /auth/v1/user write.
         server.enqueue(MockResponse().setResponseCode(200).setBody("{\"Key\":\"avatars/x\"}"))
+        server.enqueue(MockResponse().setResponseCode(200).setBody("[{\"id\":\"11111111-1111-1111-1111-111111111111\"}]"))
 
         val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<Context>()
         val repository = com.example.data.repository.ProfileRepository(context)
@@ -66,10 +70,12 @@ class AvatarMetadataGuardTest {
             imageBytes = tinyJpeg()
         )
 
-        assertEquals(1, server.requestCount)
-        assertEquals(
-            "/storage/v1/object/avatars/11111111-1111-1111-1111-111111111111",
-            server.takeRequest().path?.substringBefore("/avatar_")
-        )
+        val recordedPaths = (0 until server.requestCount)
+            .map { server.takeRequest().path.orEmpty().substringBefore("?") }
+        assertEquals(2, recordedPaths.size)
+        assertTrue(recordedPaths[0].startsWith("/storage/v1/object/avatars/11111111-1111-1111-1111-111111111111/avatar_"))
+        assertEquals("/rest/v1/profiles", recordedPaths[1])
+        assertFalse("auth-metadata write must not fire for non-storage URLs",
+            recordedPaths.any { it.startsWith("/auth/v1/user") })
     }
 }
