@@ -94,6 +94,16 @@ object CallManager {
     private var endedResetJob: Job? = null
     private var ringTimeoutJob: Job? = null
 
+    /** Call provenance for the missed-call chat entry (set in beginCall/OFFER). */
+    @Volatile private var callWasIncoming = false
+    @Volatile private var callWasAnswered = false
+
+    /**
+     * Fired at call end for unanswered calls: the UI layer inserts a local
+     * "missed call / no answer" chat entry. Args: peerUid, incoming, answered.
+     */
+    var onCallEvent: ((peerUid: String, incoming: Boolean, answered: Boolean) -> Unit)? = null
+
     //region Lifecycle
 
     fun init(context: Context) {
@@ -322,6 +332,7 @@ object CallManager {
 
                 callId = signal.callId
                 peerUid = signal.fromUid
+                callWasIncoming = true
                 peerName = watchPeers[signal.fromUid] ?: signal.fromUid.take(8)
                 isEnding = false
                 endedResetJob?.cancel()
@@ -387,6 +398,8 @@ object CallManager {
         isEnding = false
         endedResetJob?.cancel()
         ringTimeoutJob?.cancel()
+        callWasIncoming = false
+        callWasAnswered = false
         callId = CallSignaling.newCallId()
         peerUid = peerId
         peerName = name
@@ -568,6 +581,7 @@ object CallManager {
     private fun onPeerConnected() {
         val current = _state.value
         if (current is CallState.Calling || current is CallState.Ringing) {
+            callWasAnswered = true
             _state.value = CallState.Active(peerUid, peerName)
             enableCallAudioRouting()
             Timber.i("Call connected (state=Active)")
@@ -671,6 +685,17 @@ object CallManager {
         isMicMuted.value = false
 
         Timber.i("Call ended (reason=$reason)")
+        // Missed-call bookkeeping: an incoming ring that nobody answered or an
+        // outgoing call nobody picked up leaves a local chat entry.
+        val firedPeer = peerUid
+        if (firedPeer.isNotBlank()) {
+            val preState = _state.value
+            val incoming = callWasIncoming
+            val answered = callWasAnswered
+            val unanswered = (preState is CallState.Ringing) ||
+                (preState is CallState.Calling && !answered)
+            if (unanswered) onCallEvent?.invoke(firedPeer, incoming, answered)
+        }
         _state.value = CallState.Ended(reason)
         scheduleEndedReset()
     }

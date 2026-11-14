@@ -68,6 +68,13 @@ class MainActivity : ComponentActivity() {
                     CallManager.updateWatchlist(chats)
                 }
 
+                // Unanswered calls land as local chat entries
+                androidx.compose.runtime.LaunchedEffect(Unit) {
+                    CallManager.onCallEvent = { peerUid, incoming, answered ->
+                        viewModel.onCallEnded(peerUid, incoming, answered)
+                    }
+                }
+
                 CompositionLocalProvider(
                     LocalAppLanguage provides currentLang,
                     LocalStrings provides strings

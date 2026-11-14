@@ -82,6 +82,27 @@ class TrustAndGatePolicyTest {
         assertFalse(CryptoTrustPolicy.canHeal("integrity_error", newContentIsGood = false))
     }
 
+    // --- 2026-11-14: outbound encryption follows the published key ---
+
+    @Test
+    fun outboundEncryptionPrefersServedKeyOverStalePin() {
+        val served = ByteArray(32) { 1 }
+        val pinned = ByteArray(32) { 2 }
+        // Re-login rotated the peer's keys: the pin is stale and must lose.
+        assertEquals(served, CryptoTrustPolicy.outboundKey(served, pinned))
+    }
+
+    @Test
+    fun outboundEncryptionFallsBackToPinWhenNothingServed() {
+        val pinned = ByteArray(32) { 2 }
+        assertEquals(pinned, CryptoTrustPolicy.outboundKey(null, pinned))
+    }
+
+    @Test
+    fun outboundEncryptionYieldsNullWithoutAnyKey() {
+        assertEquals(null, CryptoTrustPolicy.outboundKey(null, null))
+    }
+
     // --- SEC-001: call signaling gates ---
 
     @Test

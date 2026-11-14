@@ -263,6 +263,36 @@ open class ChatRepository(
     open suspend fun populateInitialDataIfNeeded(accountId: String) =
         conversationRepository.populateInitialDataIfNeeded(accountId)
 
+    /**
+     * Local-only record of an unanswered call. Not synced to the server: the
+     * entry lives in the chat that dialed the peer.
+     */
+    suspend fun insertLocalCallEntry(peerUid: String, incoming: Boolean, isRussian: Boolean) =
+        withContext(Dispatchers.IO) {
+            val accountId = getCurrentUserId()
+            if (accountId.isBlank() || peerUid.isBlank()) return@withContext
+            val chat = chatDao.getChatByRecipientId(peerUid, accountId) ?: return@withContext
+            val now = System.currentTimeMillis()
+            val text = when {
+                incoming -> if (isRussian) "📞 Пропущенный звонок" else "📞 Missed call"
+                else -> if (isRussian) "📞 Не дозвонился" else "📞 No answer"
+            }
+            val timeStr = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(now))
+            chatDao.insertMessage(MessageEntity(
+                accountId = accountId,
+                chatId = chat.id,
+                sender = peerUid,
+                text = text,
+                time = timeStr,
+                timestamp = now,
+                isMe = !incoming,
+                type = "call",
+                status = "read",
+                conversationId = chat.conversationId,
+                signatureValid = true
+            ))
+        }
+
     /** Re-pin the peer key after the user accepted a rotation (review SEC-002). */
     suspend fun acceptRotatedKeys(peerId: String) = withContext(Dispatchers.IO) {
         userRepository.acceptRotatedKeys(peerId)

@@ -320,7 +320,7 @@ object SupabaseAuthService {
                         put("device_name", "Android Device")
                         put("last_seen_at", java.time.Instant.now().toString())
                     }
-                    val devReq = SupabaseHttp.request("$baseUrl/rest/v1/devices", accessToken, anonKey)
+                    val devReq = SupabaseHttp.request("$baseUrl/rest/v1/devices?on_conflict=account_id", accessToken, anonKey)
                         .header("Prefer", "resolution=merge-duplicates")
                         .post(devPayload.toString().toRequestBody(SupabaseHttp.JSON_MEDIA))
                         .build()
@@ -577,7 +577,7 @@ object SupabaseAuthService {
                     put("device_name", "Android Device")
                     put("last_seen_at", java.time.Instant.now().toString())
                 }
-                val devReq = SupabaseHttp.request("$baseUrl/rest/v1/devices", accessToken, anonKey)
+                val devReq = SupabaseHttp.request("$baseUrl/rest/v1/devices?on_conflict=account_id", accessToken, anonKey)
                     .header("Prefer", "resolution=merge-duplicates")
                     .post(devPayload.toString().toRequestBody(SupabaseHttp.JSON_MEDIA))
                     .build()

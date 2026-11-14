@@ -112,6 +112,15 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    /** Unanswered calls leave a local chat entry (owner request 2026-11-14). */
+    fun onCallEnded(peerUid: String, incoming: Boolean, answered: Boolean) {
+        if (answered) return
+        viewModelScope.launch {
+            val isRussian = LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN
+            repository.insertLocalCallEntry(peerUid, incoming, isRussian)
+        }
+    }
+
     private fun rejectAiChatDeletion() {
         _aiErrorState.value = AiUiError.Custom(
             if (LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN)

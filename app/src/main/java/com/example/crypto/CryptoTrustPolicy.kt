@@ -26,6 +26,15 @@ object CryptoTrustPolicy {
     }
 
     /**
+     * SEC-fix 2026-11-14: OUTBOUND encryption must follow the recipient's
+     * currently published key. A stale local pin encrypts to a key the
+     * recipient no longer owns (re-login regenerates the Keystore pair) — the
+     * message could then NEVER be decrypted (permanent tampered ciphertext).
+     * Inbound trust stays gated by the recipient-side rotation banner.
+     */
+    fun outboundKey(served: ByteArray?, pinned: ByteArray?): ByteArray? = served ?: pinned
+
+    /**
      * Whether a previously persisted row may be overwritten by a successful
      * re-decryption during sync healing. Failed rows and unaccepted rotations are
      * healable; healthy rows are never touched by the healing pass.

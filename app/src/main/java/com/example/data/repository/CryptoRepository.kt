@@ -85,10 +85,12 @@ class CryptoRepository(
         val sharedSecret = if (isSelfOrAi) {
             E2ECryptoManager.deriveSelfStorageSecret(currentUserId)
         } else {
-            // TOFU: encrypt to the PINNED key, not whatever the server serves now —
-            // otherwise a substituted key would silently re-encrypt traffic to an attacker
+            // Encryption follows the recipient's PUBLISHED key (see CryptoTrustPolicy
+            // .outboundKey): a stale pin from before the recipient's re-login encrypts
+            // to a key the recipient cannot open any more. Trust for inbound content
+            // is enforced on the recipient side (key_rotated banner + pin checks).
             val trusted = userRepository.getTrustedUserPublicKey(recipientId)
-            val recipientPubKey = trusted?.pinnedKey ?: trusted?.key
+            val recipientPubKey = com.example.crypto.CryptoTrustPolicy.outboundKey(trusted?.key, trusted?.pinnedKey)
             if (recipientPubKey != null) {
                 E2ECryptoManager.deriveSharedSecret(recipientPubKey, currentUserId)
             } else {
