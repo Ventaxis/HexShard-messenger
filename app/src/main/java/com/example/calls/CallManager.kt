@@ -23,7 +23,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
 import org.webrtc.IceCandidate
-import org.webrtc.JavaAudioDeviceModule
+import org.webrtc.audio.JavaAudioDeviceModule
 import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
 import org.webrtc.PeerConnection
@@ -333,7 +333,7 @@ object CallManager {
                 if (signal.candidateSdp.isNullOrBlank()) return
                 val candidate = IceCandidate(signal.sdpMid, signal.sdpMLineIndex, signal.candidateSdp)
                 val pc = peerConnection
-                if (pc != null && pc.remoteDescription() != null) {
+                if (pc != null && pc.remoteDescription != null) {
                     try {
                         pc.addIceCandidate(candidate)
                     } catch (e: Exception) {
@@ -444,7 +444,7 @@ object CallManager {
         }
     }
 
-    private fun createOffer(pc: PeerConnection, constraints: MediaConstraints): SessionDescription? =
+    private suspend fun createOffer(pc: PeerConnection, constraints: MediaConstraints): SessionDescription? =
         suspendCancellableCoroutine { cont ->
             pc.createOffer(sdpObserver(
                 onCreate = { sdp -> if (cont.isActive) cont.resume(sdp) },
@@ -452,7 +452,7 @@ object CallManager {
             ), constraints)
         }
 
-    private fun createAnswer(pc: PeerConnection, constraints: MediaConstraints): SessionDescription? =
+    private suspend fun createAnswer(pc: PeerConnection, constraints: MediaConstraints): SessionDescription? =
         suspendCancellableCoroutine { cont ->
             pc.createAnswer(sdpObserver(
                 onCreate = { sdp -> if (cont.isActive) cont.resume(sdp) },
@@ -460,7 +460,7 @@ object CallManager {
             ), constraints)
         }
 
-    private fun setLocalDescription(pc: PeerConnection, sdp: SessionDescription): SessionDescription? =
+    private suspend fun setLocalDescription(pc: PeerConnection, sdp: SessionDescription): SessionDescription? =
         suspendCancellableCoroutine { cont ->
             pc.setLocalDescription(sdpObserver(
                 onSet = { if (cont.isActive) cont.resume(sdp) },
@@ -468,7 +468,7 @@ object CallManager {
             ), sdp)
         }
 
-    private fun setRemoteDescription(pc: PeerConnection, sdp: SessionDescription): SessionDescription? =
+    private suspend fun setRemoteDescription(pc: PeerConnection, sdp: SessionDescription): SessionDescription? =
         suspendCancellableCoroutine { cont ->
             pc.setRemoteDescription(sdpObserver(
                 onSet = { if (cont.isActive) cont.resume(sdp) },
@@ -493,7 +493,7 @@ object CallManager {
         }
     }
 
-    private inner class PeerConnectionObserver : PeerConnection.Observer {
+    private class PeerConnectionObserver : PeerConnection.Observer {
         override fun onSignalingChange(state: PeerConnection.SignalingState?) {
             Timber.d("Peer signaling state: $state")
         }
