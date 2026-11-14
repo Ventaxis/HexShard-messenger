@@ -14,6 +14,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -60,9 +61,10 @@ object CallManager {
     private const val RING_TIMEOUT_MS = 45_000L
 
     // All state mutations serialize on one thread — public API stays callable from UI.
-    private val scope = CoroutineScope(SupervisorJob() + kotlinx.coroutines.asCoroutineDispatcher(
-        java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "hexshard-calls") }
-    ))
+    private val callDispatcher = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "hexshard-calls")
+    }.asCoroutineDispatcher()
+    private val scope = CoroutineScope(SupervisorJob() + callDispatcher)
 
     private val _state = MutableStateFlow<CallState>(CallState.Idle)
     val state: StateFlow<CallState> = _state.asStateFlow()

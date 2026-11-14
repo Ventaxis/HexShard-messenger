@@ -400,10 +400,11 @@ class CryptoRepository(
         } else {
             masterSecret
         }
+        var servedKey: ByteArray? = null
         if (!E2ECryptoManager.verifyHMAC(ivAndCipher, receivedHmac, activeKey)) {
             // Pinned-key HMAC failed: retry with the served key before declaring
             // the payload tampered — the peer may have legitimately rotated keys.
-            val servedKey = servedSecret?.let {
+            servedKey = servedSecret?.let {
                 if (idempotencyKey.isNotBlank()) E2ECryptoManager.deriveMessageKey(it, idempotencyKey) else it
             }
             if (servedKey == null || !E2ECryptoManager.verifyHMAC(ivAndCipher, receivedHmac, servedKey)) {

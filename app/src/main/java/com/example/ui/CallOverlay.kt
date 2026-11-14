@@ -81,7 +81,7 @@ fun CallOverlay() {
         )
         is CallState.Ended -> CallOverlayContent(
             peerName = "",
-            statusText = localizedEndReason(s.reason, isRussian),
+            statusText = localizedEndReason(s.reason, isRussianLocale()),
             showAccept = false,
             endedOnly = true,
             isMuted = false,

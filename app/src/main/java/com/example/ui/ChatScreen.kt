@@ -246,7 +246,7 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
                                         allChats = chats,
                                         onOpenProfile = { viewModel.openPeerProfile(activeChat) },
                                         onChangeWallpaper = { wallpaperRefresh++ },
-                                        onAcceptPeerKeys = { viewModel.acceptPeerKeys(chat.id) },
+                                        onAcceptPeerKeys = { viewModel.acceptPeerKeys(activeChat.id) },
                                         wallpaperUri = activeWallpaper
                                     )
                                 }
@@ -330,7 +330,7 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
                                 onForwardMessage = { targetId, msg -> viewModel.forwardMessage(targetId, msg) },
                                 allChats = chats,
                                 onChangeWallpaper = { wallpaperRefresh++ },
-                                        onAcceptPeerKeys = { viewModel.acceptPeerKeys(chat.id) },
+                                        onAcceptPeerKeys = { viewModel.acceptPeerKeys(activeChat.id) },
                                 wallpaperUri = activeWallpaper
                             )
                         }
