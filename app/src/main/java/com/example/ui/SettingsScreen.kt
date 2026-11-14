@@ -115,7 +115,9 @@ fun SettingsScreen(
     var showDevBansDialog by remember { mutableStateOf(false) }
     var banUsername by remember { mutableStateOf("") }
     var banBusy by remember { mutableStateOf(false) }
-    var banList by remember { mutableStateOf("") }    fun banStatus(r: org.json.JSONObject?, okRu: String, failRu: String) {
+    var banList by remember { mutableStateOf("") }
+
+    fun banStatus(r: org.json.JSONObject?, okRu: String, failRu: String) {
         devStatus = if (r != null && r.optBoolean("ok")) okRu else failRu + ": " + (r?.optString("__error") ?: r?.optString("error") ?: "")
     }
     var changingNumber by remember { mutableStateOf(false) }
@@ -942,18 +944,18 @@ fun SettingsScreen(
     }
 
     if (showEditProfile) {
-        val devIsRussian = currentLang == AppLanguage.RUSSIAN
+        val isRussian = currentLang == AppLanguage.RUSSIAN
         var editName by remember { mutableStateOf(name) }
         var editUsername by remember { mutableStateOf(username) }
         var editBio by remember { mutableStateOf(bio) }
-        var editDob by remember { mutableStateOf(com.example.util.DateOfBirthFormatter.formatForDisplay(dateOfBirth, devIsRussian)) }
+        var editDob by remember { mutableStateOf(com.example.util.DateOfBirthFormatter.formatForDisplay(dateOfBirth, isRussian)) }
         var isSavingProfile by remember { mutableStateOf(false) }
         var profileSaveError by remember { mutableStateOf<String?>(null) }
 
         if (showDatePickerDialog) {
             BirthDateWheelPickerDialog(
                 initialDateStr = editDob,
-                devIsRussian = devIsRussian,
+                isRussian = isRussian,
                 onDismissRequest = { showDatePickerDialog = false },
                 onDateSelected = { selectedDate ->
                     editDob = selectedDate
@@ -1041,7 +1043,7 @@ fun SettingsScreen(
                     OutlinedTextField(
                         value = editDob,
                         onValueChange = { input ->
-                            editDob = com.example.util.DateOfBirthFormatter.autoFormatTyping(input, devIsRussian)
+                            editDob = com.example.util.DateOfBirthFormatter.autoFormatTyping(input, isRussian)
                         },
                         label = { Text(strings.dateOfBirth) },
                         singleLine = true,
@@ -1062,7 +1064,7 @@ fun SettingsScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                val formattedPreview = com.example.util.DateOfBirthFormatter.formatForDisplay(editDob, devIsRussian)
+                                val formattedPreview = com.example.util.DateOfBirthFormatter.formatForDisplay(editDob, isRussian)
                                 Text(
                                     text = if (formattedPreview.isNotBlank()) formattedPreview else strings.birthDateHint,
                                     color = if (formattedPreview.isNotBlank()) HexShardTealLight else HexTextSecondary.copy(alpha = 0.7f),
@@ -1140,14 +1142,14 @@ fun SettingsScreen(
                         val trimmedName = editName.trim()
                         val trimmedUsername = editUsername.trim().removePrefix("@")
                         if (trimmedUsername.length < 3) {
-                            profileSaveError = if (devIsRussian) "Имя пользователя должно быть не менее 3 символов" else "Username must be at least 3 characters"
+                            profileSaveError = if (isRussian) "Имя пользователя должно быть не менее 3 символов" else "Username must be at least 3 characters"
                             return@TextButton
                         }
                         val trimmedDob = editDob.trim()
                         val canonicalDob = if (trimmedDob.isNotBlank()) {
                             val iso = com.example.util.DateOfBirthFormatter.toCanonicalIso(trimmedDob)
                             if (iso == null) {
-                                profileSaveError = if (devIsRussian) "Некорректная дата рождения (например: 13.04.1998)" else "Invalid date of birth (e.g. 13.04.1998)"
+                                profileSaveError = if (isRussian) "Некорректная дата рождения (например: 13.04.1998)" else "Invalid date of birth (e.g. 13.04.1998)"
                                 return@TextButton
                             }
                             iso
@@ -1178,7 +1180,7 @@ fun SettingsScreen(
                                         dateOfBirth = updated?.dateOfBirth ?: canonicalDob
                                         isSavingProfile = false
                                         showEditProfile = false
-                                        Toast.makeText(context, if (devIsRussian) "Профиль сохранён" else "Profile saved", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, if (isRussian) "Профиль сохранён" else "Profile saved", Toast.LENGTH_SHORT).show()
                                     }
                                     result.isFailure -> {
                                         isSavingProfile = false
@@ -1197,7 +1199,7 @@ fun SettingsScreen(
                                 com.example.data.SecurePrefsManager.getPrefs(context).edit().putString("username", trimmedUsername).apply()
                                 isSavingProfile = false
                                 showEditProfile = false
-                                Toast.makeText(context, if (devIsRussian) "Профиль сохранён локально" else "Profile saved locally", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, if (isRussian) "Профиль сохранён локально" else "Profile saved locally", Toast.LENGTH_SHORT).show()
                             }
                         }
                     }
@@ -1868,10 +1870,10 @@ fun SettingsScreen(
                     HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = HexDarkBorderSubtle)
 
                     // Date of Birth
-                    val devIsRussianLang = currentLang == AppLanguage.RUSSIAN
+                    val isRussianLang = currentLang == AppLanguage.RUSSIAN
                     ProfileInfoRow(
                         label = strings.dateOfBirth,
-                        value = com.example.util.DateOfBirthFormatter.formatForDisplay(dateOfBirth, devIsRussianLang).ifBlank { strings.notSpecified },
+                        value = com.example.util.DateOfBirthFormatter.formatForDisplay(dateOfBirth, isRussianLang).ifBlank { strings.notSpecified },
                         onClick = { showEditProfile = true }
                     )
 
