@@ -320,6 +320,7 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
                                 onDownloadVoice = { url, key -> viewModel.downloadVoiceMessage(url, key) },
                                 onDownloadMedia = { url, key -> viewModel.downloadMediaMessage(url, key) },
                                 onRetryMessage = { msgId, chatId, text -> viewModel.retryMessage(msgId, chatId, text) },
+                                onOpenProfile = { viewModel.openPeerProfile(activeChat) },
                                 onSendLocation = { viewModel.sendLocationMessage(context) },
                                 selectedAiModel = selectedAiModel,
                                 onSwitchAiModel = { model -> viewModel.switchToAiChat(model) },
@@ -2074,7 +2075,17 @@ fun MessageBubble(
                             .padding(horizontal = 14.dp, vertical = 10.dp)
                     ) {
                     Column {
-                        if (message.type == "voice" && message.audioUrl != null) {
+                        if (message.type == "call") {
+                            // System-style centered entry: no bubble, no icons.
+                            Text(
+                                text = message.text,
+                                color = com.example.ui.theme.HexTextSecondary,
+                                fontSize = 12.sp,
+                                fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
+                            )
+                        } else if (message.type == "voice" && message.audioUrl != null) {
                             VoiceMessagePayload(
                                 audioUrl = message.audioUrl,
                                 duration = message.duration ?: 0,
@@ -3280,7 +3291,10 @@ fun MediaPayload(
     }
 
     if (showViewer && mediaFile != null && type == "image") {
-        androidx.compose.ui.window.Dialog(onDismissRequest = { showViewer = false }) {
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { showViewer = false },
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+        ) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
