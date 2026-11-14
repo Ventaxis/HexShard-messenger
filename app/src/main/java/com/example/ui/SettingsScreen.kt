@@ -2062,14 +2062,14 @@ fun SettingsScreen(
                                     val r = com.example.network.DevModeClient.action(context, "test_avatar", devPhraseInput)
                                     devStatus = if (r != null && r.optBoolean("ok")) "Аватарка: ок, ${r.optInt("uploaded_bytes")} Б, удалена" else "Аватарка: ошибка ${r?.optString("__error") ?: r?.optString("error") ?: ""}"
                                 }
-                            }) { Text("Аватарка", fontSize = 12.sp) }
+                            }) { Text(if (devIsRu) "Аватарка" else "Avatar", fontSize = 12.sp) }
                             OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = {
                                 scope.launch {
                                     val ok = com.example.calls.CallManager.signalSelfCheck(context)
                                     devStatus = if (ok) "Сигнал звонка: топик открыт" else "Сигнал звонка: не удалось"
                                 }
-                            }) { Text("Сигнал звонка", fontSize = 12.sp) }
-                            OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = { showDevBansDialog = true }) { Text("Баны", fontSize = 12.sp) }
+                            }) { Text(if (devIsRu) "Сигнал звонка" else "Call signal", fontSize = 12.sp) }
+                            OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = { showDevBansDialog = true }) { Text(if (devIsRu) "Баны" else "Bans", fontSize = 12.sp) }
                         }
                         devStatus?.let {
                             Spacer(Modifier.height(8.dp))
@@ -2265,7 +2265,7 @@ fun SettingsScreen(
                         OutlinedTextField(
                             value = banUsername, onValueChange = { banUsername = it },
                             singleLine = true, enabled = !banBusy,
-                            label = { Text("@username") }
+                            label = { Text(if (devIsRu) "@юзернейм" else "@username") }
                         )
                         Spacer(Modifier.height(8.dp))
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -2284,7 +2284,7 @@ fun SettingsScreen(
                                         }
                                     }
                                 }
-                            ) { Text("Бан 7д", fontSize = 12.sp) }
+                            ) { Text(if (devIsRu) "Бан 7д" else "Ban 7d", fontSize = 12.sp) }
                             OutlinedButton(
                                 modifier = Modifier.fillMaxWidth(),
                                 enabled = !banBusy && banUsername.isNotBlank(),
@@ -2299,7 +2299,7 @@ fun SettingsScreen(
                                         }
                                     }
                                 }
-                            ) { Text("Разбан", fontSize = 12.sp) }
+                            ) { Text(if (devIsRu) "Разбан" else "Unban", fontSize = 12.sp) }
                             OutlinedButton(
                                 modifier = Modifier.fillMaxWidth(),
                                 enabled = !banBusy,
@@ -2320,7 +2320,7 @@ fun SettingsScreen(
                                         }
                                     }
                                 }
-                            ) { Text("Список", fontSize = 12.sp) }
+                            ) { Text(if (devIsRu) "Список" else "List", fontSize = 12.sp) }
                         }
                         if (banList.isNotBlank()) {
                             Spacer(Modifier.height(8.dp))
@@ -2328,7 +2328,7 @@ fun SettingsScreen(
                         }
                     }
                 },
-                confirmButton = { TextButton(onClick = { showDevBansDialog = false }) { Text("Закрыть") } }
+                confirmButton = { TextButton(onClick = { showDevBansDialog = false }) { Text(if (devIsRu) "Закрыть" else "Close") } }
             )
         }
         if (showDevPhraseDialog) {
@@ -2380,7 +2380,7 @@ fun SettingsScreen(
                         }
                     ) { Text(if (devIsRu) "Открыть" else "Unlock") }
                 },
-                dismissButton = { TextButton(onClick = { showDevPhraseDialog = false }) { Text("Закрыть") } }
+                dismissButton = { TextButton(onClick = { showDevPhraseDialog = false }) { Text(if (devIsRu) "Закрыть" else "Close") } }
             )
         }
         if (showClaimHexShardDialog) {

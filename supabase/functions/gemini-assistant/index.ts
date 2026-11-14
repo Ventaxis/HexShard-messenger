@@ -52,7 +52,6 @@ export const REQUEST_COOLDOWN_MS = 1200;
 export const MAX_DAILY_REQUESTS_PER_USER = 500;
 
 const memoryRateLimit = new Map<string, number>();
-const dailyQuotaMap = new Map<string, { date: string; count: number }>();
 
 const TAVILY_API_KEY = Deno.env.get("TAVILY_API_KEY") ?? "";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
@@ -264,19 +263,28 @@ export async function handler(req: Request): Promise<Response> {
     }
     memoryRateLimit.set(user.id, now);
 
-    // Daily quota
-    const todayStr = new Date().toISOString().slice(0, 10);
-    const userQuota = dailyQuotaMap.get(user.id);
-    if (userQuota && userQuota.date === todayStr) {
-      if (userQuota.count >= MAX_DAILY_REQUESTS_PER_USER) {
-        return new Response(
-          JSON.stringify({ error: "Daily AI quota exceeded", code: "AI_QUOTA_EXCEEDED", message: "Daily AI message quota reached. Please try again tomorrow.", retry_after_seconds: 3600 }),
-          { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+    // Durable daily quota: atomic consume RPC in Postgres survives isolate
+    // restarts (the in-memory map silently reset the 500/day cap).
+    let usedToday: number | null = null;
+    let quotaDurable = false;
+    try {
+      const admin = getServiceClient();
+      const { data, error } = await admin.rpc("ai_daily_quota_consume", {
+        p_account_id: user.id,
+        p_limit: MAX_DAILY_REQUESTS_PER_USER,
+      });
+      if (!error && typeof data === "number") {
+        usedToday = data;
+        quotaDurable = true;
       }
-      userQuota.count++;
-    } else {
-      dailyQuotaMap.set(user.id, { date: todayStr, count: 1 });
+    } catch {
+      // fail-open below keeps AI working when the DB hiccups
+    }
+    if (quotaDurable && usedToday !== null && usedToday > MAX_DAILY_REQUESTS_PER_USER) {
+      return new Response(
+        JSON.stringify({ error: "Daily AI quota exceeded", code: "AI_QUOTA_EXCEEDED", message: "Daily AI message quota reached. Please try again tomorrow.", retry_after_seconds: 3600 }),
+        { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
     // Durable cooldown via rate_limits table (best-effort)
