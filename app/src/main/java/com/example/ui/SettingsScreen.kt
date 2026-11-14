@@ -109,12 +109,12 @@ fun SettingsScreen(
     val devIsRu = LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN
     var devTapStamps by remember { mutableStateOf(listOf<Long>()) }
     var showDevPhraseDialog by rememberSaveable { mutableStateOf(false) }
-    var devPhraseInput by remember { mutableStateOf("") }
+    var devPhraseInput by rememberSaveable { mutableStateOf("") }
     var devPhraseBusy by remember { mutableStateOf(false) }
     var devUnlockedUntil by remember { mutableStateOf(0L) }
     var devStatus by remember { mutableStateOf<String?>(null) }
     var showDevBansDialog by rememberSaveable { mutableStateOf(false) }
-    var banUsername by remember { mutableStateOf("") }
+    var banUsername by rememberSaveable { mutableStateOf("") }
     var banBusy by remember { mutableStateOf(false) }
     var banList by rememberSaveable { mutableStateOf("") }
 

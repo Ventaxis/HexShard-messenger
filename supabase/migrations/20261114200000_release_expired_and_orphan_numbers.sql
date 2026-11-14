@@ -23,18 +23,11 @@ BEGIN
     END IF;
     PERFORM pg_advisory_xact_lock(hashtext('hex_reserve_' || v_user_id::text));
     -- Global sweep: expired reservations of ANY user are reclaimable, otherwise
-    -- abandoned ones squat their number forever (review F2).
+    -- abandoned ones squat their number forever (review F2). Orphan cleanup
+    -- (accounts deleted) lives in cleanup_hex_numbers() — see below.
     UPDATE public.hex_numbers
     SET status = 'available', owner_id = NULL, account_id = NULL, reserved_at = NULL, expires_at = NULL, updated_at = now()
     WHERE status = 'reserved' AND expires_at < now();
-    -- Orphan cleanup: rows whose account no longer exists (ON DELETE SET NULL).
-    UPDATE public.hex_numbers
-    SET status = 'available', owner_id = NULL, account_id = NULL, reserved_at = NULL, expires_at = NULL, updated_at = now()
-    WHERE status <> 'available'
-      AND (owner_id IS NULL OR account_id IS NULL
-           OR owner_id NOT IN (SELECT id FROM auth.users)
-           OR account_id NOT IN (SELECT id FROM auth.users));
-
     SELECT raw_number, formatted INTO v_existing_raw, v_existing_formatted
     FROM public.hex_numbers
     WHERE (owner_id = v_user_id OR account_id = v_user_id) AND status = 'active' LIMIT 1;
@@ -137,3 +130,25 @@ BEGIN
     RETURN jsonb_build_object('raw_number', v_selected_raw, 'formatted', v_selected_formatted,
         'expires_at', v_expires_at, 'status', 'reserved');
 END; $$;
+
+-- Review wave-2: orphan/expired cleanup must NOT run inside every reserve call
+-- (CPU amplification + NOT IN over auth.users on every request). Split into a
+-- dedicated SECURITY DEFINER function (service-role only), invoked by a
+-- scheduled job or after account deletion.
+CREATE OR REPLACE FUNCTION public.cleanup_hex_numbers()
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+BEGIN
+    UPDATE public.hex_numbers
+    SET status = 'available', owner_id = NULL, account_id = NULL, reserved_at = NULL, expires_at = NULL, updated_at = now()
+    WHERE status = 'reserved' AND expires_at < now();
+    UPDATE public.hex_numbers
+    SET status = 'available', owner_id = NULL, account_id = NULL, reserved_at = NULL, expires_at = NULL, updated_at = now()
+    WHERE status <> 'available'
+      AND (NOT EXISTS (SELECT 1 FROM auth.users u WHERE u.id = hex_numbers.owner_id)
+        OR NOT EXISTS (SELECT 1 FROM auth.users u WHERE u.id = hex_numbers.account_id));
+END $$;
+
+REVOKE ALL ON FUNCTION public.cleanup_hex_numbers() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.cleanup_hex_numbers() TO service_role;
+
+CREATE INDEX IF NOT EXISTS hex_numbers_reserved_exp ON public.hex_numbers (expires_at) WHERE status = 'reserved';

@@ -103,6 +103,15 @@ object CallManager {
      * "missed call / no answer" chat entry. Args: peerUid, incoming, answered.
      */
     var onCallEvent: ((peerUid: String, incoming: Boolean, answered: Boolean) -> Unit)? = null
+        set(value) {
+            field = value
+            // Buffer one event while the Activity is being recreated, flush on set.
+            pendingCallEvent?.let { pending ->
+                pendingCallEvent = null
+                value?.invoke(pending.first, pending.second, pending.third)
+            }
+        }
+    private var pendingCallEvent: Triple<String, Boolean, Boolean>? = null
 
     //region Lifecycle
 
@@ -314,6 +323,8 @@ object CallManager {
             CallSignalingManager.signals.collect { signal ->
                 try {
                     handleSignal(signal)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     Timber.w(e, "Signal handling failed — continuing")
                 }
@@ -664,66 +675,64 @@ object CallManager {
 
     private val endCallLock = Any()
 
-    private fun endCall(reason: String, sendBye: Boolean) = synchronized(endCallLock) {
-        // Review F4: observers run on WebRTC threads while user actions run on the
-        // single dispatcher — the whole teardown must be serialized or both sides
-        // pass the guard and double-dispose the native peer connection.
-        if (isEnding && _state.value is CallState.Ended) return@synchronized
-        isEnding = true
+    private fun endCall(reason: String, sendBye: Boolean) {
+        // Review F4 + wave-2 deadlock: guard, provenance capture and state writes
+        // happen under the lock; native close()/dispose() run OUTSIDE it —
+        // libwebrtc dispose() synchronously waits for pending signaling callbacks,
+        // which would deadlock if a callback thread were waiting on this lock.
+        var pc: PeerConnection? = null
+        var track: AudioTrack? = null
+        var source: AudioSource? = null
+        var ringtoneSnapshot: Ringtone? = null
+        synchronized(endCallLock) {
+            if (isEnding && _state.value is CallState.Ended) return
+            isEnding = true
 
-        val byeUid = peerUid
-        val byeCallId = callId
-        if (sendBye && byeUid.isNotBlank() && byeCallId.isNotBlank()) {
-            val myUid = appContext?.let { SecurePrefsManager.getUserId(it) } ?: ""
-            CallSignalingManager.sendSignal(byeUid, CallSignaling.byePayload(myUid, byeCallId))
-        }
+            val byeUid = peerUid
+            val byeCallId = callId
+            if (sendBye && byeUid.isNotBlank() && byeCallId.isNotBlank()) {
+                val myUid = appContext?.let { SecurePrefsManager.getUserId(it) } ?: ""
+                CallSignalingManager.sendSignal(byeUid, CallSignaling.byePayload(myUid, byeCallId))
+            }
+            ringTimeoutJob?.cancel()
 
-        ringTimeoutJob?.cancel()
-        stopRingtone()
-        resetAudioRouting()
-
-        try {
-            peerConnection?.close()
-        } catch (_: Exception) {
-        }
-        try {
-            peerConnection?.dispose()
-        } catch (_: Exception) {
-        }
-        peerConnection = null
-        try {
-            localAudioTrack?.dispose()
-        } catch (_: Exception) {
-        }
-        localAudioTrack = null
-        try {
-            audioSource?.dispose()
-        } catch (_: Exception) {
-        }
-        audioSource = null
-        pendingRemoteOffer = null
-        synchronized(bufferedCandidates) { bufferedCandidates.clear() }
-        callId = ""
-        peerName = ""
-        isMicMuted.value = false
-
-        Timber.i("Call ended (reason=$reason)")
-        // Missed-call bookkeeping (review ERR-1): capture provenance BEFORE the
-        // fields are cleared, and only for calls that actually reached the peer —
-        // a signaling failure never delivered the call, so no chat entry.
-        val firedPeer = peerUid
-        val firedIncoming = callWasIncoming
-        val firedAnswered = callWasAnswered
-        if (firedPeer.isNotBlank()) {
+            // Missed-call bookkeeping (review ERR-1): provenance is captured BEFORE
+            // fields are cleared, and only for calls that reached the peer.
             val preState = _state.value
-            val unanswered = (preState is CallState.Ringing) ||
-                (preState is CallState.Calling && !firedAnswered && reason == "call_ended")
-            if (unanswered) onCallEvent?.invoke(firedPeer, firedIncoming, firedAnswered)
+            val firedPeer = peerUid
+            val firedIncoming = callWasIncoming
+            val firedAnswered = callWasAnswered
+
+            pc = peerConnection; peerConnection = null
+            track = localAudioTrack; localAudioTrack = null
+            source = audioSource; audioSource = null
+            ringtoneSnapshot = ringtone; ringtone = null
+            pendingRemoteOffer = null
+            synchronized(bufferedCandidates) { bufferedCandidates.clear() }
+            callId = ""
+            peerName = ""
+            isMicMuted.value = false
+
+            Timber.i("Call ended (reason=$reason)")
+            if (firedPeer.isNotBlank()) {
+                val unanswered = (preState is CallState.Ringing) ||
+                    (preState is CallState.Calling && !firedAnswered && reason == "call_ended")
+                if (unanswered) {
+                val handler = onCallEvent
+                if (handler != null) handler(firedPeer, firedIncoming, firedAnswered)
+                else pendingCallEvent = Triple(firedPeer, firedIncoming, firedAnswered)
+            }
+            }
+            peerUid = ""
+            _state.value = CallState.Ended(reason)
+            scheduleEndedReset()
         }
-        peerUid = ""
-        peerName = ""
-        _state.value = CallState.Ended(reason)
-        scheduleEndedReset()
+        try { ringtoneSnapshot?.stop() } catch (_: Exception) {}
+        resetAudioRouting()
+        try { pc?.close() } catch (_: Exception) {}
+        try { pc?.dispose() } catch (_: Exception) {}
+        try { track?.dispose() } catch (_: Exception) {}
+        try { source?.dispose() } catch (_: Exception) {}
     }
 
     /** Briefly shows the ended reason, then returns to Idle for next call. */

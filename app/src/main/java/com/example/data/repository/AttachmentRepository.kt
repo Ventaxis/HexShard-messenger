@@ -408,24 +408,24 @@ class AttachmentRepository(
                 val sharedSecret: ByteArray = if (isSelf) {
                     E2ECryptoManager.deriveSelfStorageSecret(currentUserId)
                 } else {
-                    // Mirror message decryption: verify against the PINNED sender key,
-                    // not whatever the server serves now. Attachments encrypted under
-                    // the served key still decrypt via the fallbacks below.
+                    // Mirror message decryption (CryptoRepository.decryptInboundMessage):
+                    // the PRIMARY secret derives from the PINNED sender key — the server
+                    // is untrusted for identity decisions, and attachments uploaded
+                    // BEFORE a peer rotation were encrypted under it.
                     val trustedSender = userRepository.getTrustedUserPublicKey(senderId)
                         ?: return@withContext null
-                    // Align with messages (CryptoTrustPolicy.outboundKey): served-first.
-                    val senderPubKey = com.example.crypto.CryptoTrustPolicy.outboundKey(
-                        trustedSender.key, trustedSender.pinnedKey
-                    ) ?: return@withContext null
-                    val pinnedSecret = E2ECryptoManager.deriveSharedSecret(senderPubKey, currentUserId)
-                    // TOFU rotation fallback: attachments sent after the peer rotated
-                    // keys decrypt only under the served key — retry before giving up.
+                    val pinnedSecret = (trustedSender.pinnedKey ?: trustedSender.key)?.let { pubKey ->
+                        runCatching { E2ECryptoManager.deriveSharedSecret(pubKey, currentUserId) }.getOrNull()
+                    }
+                    // TOFU rotation fallback: attachments uploaded AFTER the peer rotated
+                    // were encrypted under the SERVED key — derive it too so the retry
+                    // below can decrypt them when the pinned attempt fails.
                     if (trustedSender.keyChanged && trustedSender.key != null) {
                         servedSecret = runCatching {
                             E2ECryptoManager.deriveSharedSecret(trustedSender.key, currentUserId)
                         }.getOrNull()?.takeIf { !it.contentEquals(pinnedSecret) }
                     }
-                    pinnedSecret
+                    pinnedSecret ?: servedSecret ?: return@withContext null
                 }
 
                 val primaryKey = if (idempotencyKey.isNotBlank()) {
@@ -440,20 +440,11 @@ class AttachmentRepository(
                     decryptedOk = decryptAttachmentWithKey(tempEncFile, tempDecFile, primaryKey)
                 } catch (decEx: Exception) {
                     tempDecFile.delete()
-                    Timber.w(decEx, "Primary key decryption failed, attempting legacy sharedSecret fallback")
+                    Timber.w(decEx, "Primary key decryption failed, attempting fallbacks")
                 }
 
-                // Fallback for legacy attachments encrypted directly with sharedSecret
-                if (!decryptedOk && primaryKey !== sharedSecret) {
-                    try {
-                        decryptedOk = decryptAttachmentWithKey(tempEncFile, tempDecFile, sharedSecret)
-                    } catch (fallbackEx: Exception) {
-                        tempDecFile.delete()
-                        Timber.e(fallbackEx, "Attachment decryption fallback failed")
-                    }
-                }
-
-                // Fallback for attachments encrypted under the served (rotated) key
+                // TOFU rotation fallback: attachments uploaded after the peer rotated
+                // keys decrypt only under the served key — retry before legacy.
                 if (!decryptedOk && servedSecret != null) {
                     val servedKey = if (idempotencyKey.isNotBlank()) {
                         E2ECryptoManager.deriveMessageKey(servedSecret, idempotencyKey)
@@ -465,6 +456,16 @@ class AttachmentRepository(
                     } catch (rotationEx: Exception) {
                         tempDecFile.delete()
                         Timber.w(rotationEx, "Served-key attachment decryption failed")
+                    }
+                }
+
+                // Fallback for legacy attachments encrypted directly with sharedSecret
+                if (!decryptedOk && primaryKey !== sharedSecret) {
+                    try {
+                        decryptedOk = decryptAttachmentWithKey(tempEncFile, tempDecFile, sharedSecret)
+                    } catch (fallbackEx: Exception) {
+                        tempDecFile.delete()
+                        Timber.e(fallbackEx, "Attachment decryption fallback failed")
                     }
                 }
 
