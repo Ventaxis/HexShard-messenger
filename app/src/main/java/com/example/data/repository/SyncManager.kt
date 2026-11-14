@@ -2,6 +2,7 @@ package com.example.data.repository
 
 import android.content.Context
 import com.example.data.SecurePrefsManager
+import com.example.util.TextSanitizer
 import com.example.data.database.ChatDao
 import com.example.data.database.ChatEntity
 import com.example.data.database.MessageEntity
@@ -338,7 +339,9 @@ class SyncManager(
                     accountId = currentUserId
                 )
             }
-            if (record.editedAt == null && existingMsg.status != "integrity_error") {
+            if (record.editedAt == null &&
+                !com.example.crypto.CryptoTrustPolicy.canHeal(existingMsg.status, newContentIsGood = true)
+            ) {
                 // Not edited, already present and healthy — nothing to do.
                 // Failed-decryption rows fall through so a later sync pass with
                 // restored/rotated keys can re-decrypt and heal them: the server
@@ -351,11 +354,7 @@ class SyncManager(
         // do not advance the cursor so the next sync pass can retry)
         val content = resolveMessageContent(record, currentUserId, ctx) ?: return@withContext false
 
-        val messageStatus = when {
-            content.isDecryptionError || !content.signatureValid -> "integrity_error"
-            content.isMe -> "sent"
-            else -> "delivered"
-        }
+        val messageStatus = com.example.crypto.CryptoTrustPolicy.messageStatusFor(content.trustStatus, content.isMe)
 
         // Phases 3+4: chat resolution and persistence, serialized under syncMutex
         syncMutex.withLock {
@@ -394,7 +393,8 @@ class SyncManager(
         val resolvedDuration: Int?,
         val resolvedType: String,
         val signatureValid: Boolean,
-        val isDecryptionError: Boolean
+        val isDecryptionError: Boolean,
+        val trustStatus: DecryptionTrustStatus
     )
 
     /**
@@ -485,6 +485,7 @@ class SyncManager(
         var resolvedType = record.type
         var signatureValid = true
         var isDecryptionError = false
+        var trustStatus = DecryptionTrustStatus.VERIFIED
 
         if (record.isAiConversation) {
             if (record.recipient.startsWith("ai_") || record.recipient == "ai_assistant") {
@@ -523,6 +524,7 @@ class SyncManager(
                                 decryptedResult.trustStatus == DecryptionTrustStatus.DECRYPTION_FAILED
             resolvedText = decryptedResult.plainText
             signatureValid = decryptedResult.isSignatureValid
+            trustStatus = decryptedResult.trustStatus
 
             // MISSING_KEY is transient (peer key not cached, network blip): do NOT persist
             // a stub row — the next sync pass will re-fetch the key and decrypt properly.
@@ -574,7 +576,8 @@ class SyncManager(
             resolvedDuration = resolvedDuration,
             resolvedType = resolvedType,
             signatureValid = signatureValid,
-            isDecryptionError = isDecryptionError
+            isDecryptionError = isDecryptionError,
+            trustStatus = trustStatus
         )
     }
 
@@ -596,7 +599,7 @@ class SyncManager(
                     name = "Saved Messages",
                     ava = "🔖",
                     status = "",
-                    preview = if (content.isDecryptionError) "⚠️ Corrupted message" else com.example.util.TextSanitizer.stripMarkdown(content.resolvedText),
+                    preview = if (content.isDecryptionError) "⚠️ Corrupted message" else TextSanitizer.stripMarkdown(content.resolvedText),
                     time = record.timeStr,
                     recipientId = "self",
                     conversationId = "self_$currentUserId",
@@ -607,7 +610,7 @@ class SyncManager(
                     name = "HexShard AI",
                     ava = "HX",
                     status = "online",
-                    preview = com.example.util.TextSanitizer.stripMarkdown(content.resolvedText),
+                    preview = TextSanitizer.stripMarkdown(content.resolvedText),
                     time = record.timeStr,
                     recipientId = "ai_assistant",
                     conversationId = "ai_$currentUserId",
@@ -618,7 +621,7 @@ class SyncManager(
                     name = record.peerId,
                     ava = record.peerId.take(2).uppercase(),
                     status = "offline",
-                    preview = if (content.isDecryptionError) "⚠️ Corrupted message" else com.example.util.TextSanitizer.stripMarkdown(content.resolvedText),
+                    preview = if (content.isDecryptionError) "⚠️ Corrupted message" else TextSanitizer.stripMarkdown(content.resolvedText),
                     time = record.timeStr,
                     recipientId = record.peerId,
                     conversationId = record.conversationId,
@@ -651,11 +654,11 @@ class SyncManager(
             // Healing: a row persisted as a decryption failure is overwritten when a
             // later pass decrypts it successfully (keys restored, rotation accepted).
             // A failed pass must never replace readable content with a stub.
-            val healFailedRow = existing.status == "integrity_error" && !content.isDecryptionError
+            val healFailedRow = com.example.crypto.CryptoTrustPolicy.canHeal(existing.status, !content.isDecryptionError)
             if (healFailedRow || (record.editedAt != null && !content.isDecryptionError)) {
-                chatDao.updateMessageText(existing.id, content.resolvedText, System.currentTimeMillis(), currentUserId)
+                chatDao.updateMessageText(existing.id, content.resolvedText, existing.timestamp, currentUserId)
                 chatDao.updateMessageStatus(existing.id, messageStatus, currentUserId)
-                conversationRepository.updateChatPreview(existing.chatId, com.example.util.TextSanitizer.stripMarkdown(content.resolvedText), record.timeStr, System.currentTimeMillis())
+                conversationRepository.updateChatPreview(existing.chatId, TextSanitizer.stripMarkdown(content.resolvedText), record.timeStr, System.currentTimeMillis())
             }
             return true
         }
@@ -696,7 +699,7 @@ class SyncManager(
                 "voice" -> "🎤 Voice message"
                 "image" -> "📷 Photo"
                 "location" -> "📍 Location"
-                else -> if (content.isDecryptionError) "⚠️ Corrupted message" else com.example.util.TextSanitizer.stripMarkdown(content.resolvedText)
+                else -> if (content.isDecryptionError) "⚠️ Corrupted message" else TextSanitizer.stripMarkdown(content.resolvedText)
             }
             chatDao.updateChatPreview(resolvedChatId, previewText, record.timeStr, System.currentTimeMillis(), currentUserId)
             if (token.isNotBlank() && !content.isMe && !content.isDecryptionError && content.signatureValid && !record.isAiConversation) {

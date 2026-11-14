@@ -83,6 +83,23 @@ object CallSignaling {
         )
     )
 
+    // --- SEC-001 signaling gates (pure, unit-tested) ---
+
+    /** Offers ring only for accepted DIRECT contacts — no full-screen spoofing. */
+    fun offerAllowed(knownContacts: Set<String>, fromUid: String): Boolean =
+        fromUid.isNotBlank() && knownContacts.contains(fromUid)
+
+    /** A hangup is honored only when it names the current call. */
+    fun byeMatches(expectedCallId: String, signalCallId: String): Boolean =
+        expectedCallId.isNotBlank() && signalCallId.isNotBlank() && signalCallId == expectedCallId
+
+    /** Broadcast frames outside our joined topics are dropped (topic confusion). */
+    fun broadcastFromJoinedTopic(topic: String, joinedTopics: Set<String>): Boolean =
+        topic.isNotBlank() && topic in joinedTopics
+
+    /** Unpredictable call id — a timestamp would let third parties forge hangs. */
+    fun newCallId(): String = java.util.UUID.randomUUID().toString()
+
     /** Phoenix channel join frame for the call topic (broadcast-only config). */
     fun joinEnvelope(topic: String, ref: String, accessToken: String): Map<String, Any?> = linkedMapOf(
         "topic" to topic,

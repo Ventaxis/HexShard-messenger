@@ -45,10 +45,10 @@ import com.example.ui.theme.HexShardTeal
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
-private val CallOverlayBg = Color(0xFF0B1117)
-private val CallButtonBg = Color(0xFF1E2733)
-private val CallAcceptGreen = Color(0xFF03A062)
-private val CallDeclineRed = Color(0xFFEF4444)
+private val CallOverlayBg = com.example.ui.theme.HexDarkBg
+private val CallButtonBg = com.example.ui.theme.HexDarkSurfaceHover
+private val CallAcceptGreen = com.example.ui.theme.HexShardTeal
+private val CallDeclineRed = com.example.ui.theme.HexDanger
 
 @Composable
 fun CallOverlay() {
@@ -81,7 +81,7 @@ fun CallOverlay() {
         )
         is CallState.Ended -> CallOverlayContent(
             peerName = "",
-            statusText = s.reason,
+            statusText = localizedEndReason(s.reason, isRussian),
             showAccept = false,
             endedOnly = true,
             isMuted = false,
@@ -156,7 +156,7 @@ private fun CallOverlayContent(
             Spacer(modifier = Modifier.height(10.dp))
             Text(
                 text = statusText,
-                color = Color(0xFF9AA7B8),
+                color = com.example.ui.theme.HexTextSecondary,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Medium,
                 maxLines = 1
@@ -308,4 +308,22 @@ private fun callInitials(peerName: String): String {
         words.size >= 2 -> (words[0].first().toString() + words[1].first().toString()).uppercase()
         else -> words[0].take(2).uppercase()
     }
+}
+
+
+/** Review standards: CallState.Ended carries stable keys; text resolves in the UI layer. */
+private fun localizedEndReason(key: String, isRussian: Boolean): String = when (key) {
+    "busy" -> if (isRussian) "Линия занята" else "Line busy"
+    "audio_init_failed" -> if (isRussian) "Не удалось инициализировать аудио" else "Audio initialization failed"
+    "mic_denied" -> if (isRussian) "Нет доступа к микрофону" else "Microphone access denied"
+    "peer_unavailable" -> if (isRussian) "Абонент недоступен" else "Peer unavailable"
+    "signaling_failed" -> if (isRussian) "Нет связи с сигналингом" else "Signaling unavailable"
+    "connection_setup_failed" -> if (isRussian) "Не удалось установить соединение" else "Connection setup failed"
+    "incoming_stale" -> if (isRussian) "Входящий звонок устарел" else "Incoming call expired"
+    "declined" -> if (isRussian) "Звонок отклонён" else "Call declined"
+    "call_cancelled" -> if (isRussian) "Звонок отменён" else "Call cancelled"
+    "connection_lost" -> if (isRussian) "Соединение потеряно" else "Connection lost"
+    "missed_call" -> if (isRussian) "Пропущенный звонок" else "Missed call"
+    "call_ended" -> if (isRussian) "Звонок завершён" else "Call ended"
+    else -> if (isRussian) "Звонок завершён" else "Call ended"
 }

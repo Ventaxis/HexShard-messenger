@@ -112,6 +112,24 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    private fun rejectAiChatDeletion() {
+        _aiErrorState.value = AiUiError.Custom(
+            if (LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN)
+                "Чат с ИИ удалить нельзя."
+            else "The AI chat cannot be deleted."
+        )
+    }
+
+    /** Review SEC-002: re-pin the peer key after explicit user acceptance. */
+    fun acceptPeerKeys(chatId: Int) {
+        viewModelScope.launch {
+            val chat = repository.getChatById(chatId) ?: return@launch
+            if (chat.recipientId.isBlank()) return@launch
+            repository.acceptRotatedKeys(chat.recipientId)
+            repository.refreshAccount()
+        }
+    }
+
     fun dismissPeerProfile() {
         _viewingPeerProfile.value = null
     }
@@ -265,11 +283,7 @@ class ChatViewModel @Inject constructor(
             val chat = repository.getChatById(chatId)
             if (chat != null && chat.isAiAssistant) {
                 // The AI assistant is a system chat: never deletable.
-                _aiErrorState.value = AiUiError.Custom(
-                    if (LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN)
-                        "Чат с ИИ удалить нельзя."
-                    else "The AI chat cannot be deleted."
-                )
+                rejectAiChatDeletion()
                 return@launch
             }
             if (_selectedChatId.value == chatId) {
@@ -285,11 +299,7 @@ class ChatViewModel @Inject constructor(
             val chat = repository.getChatById(chatId) ?: return@launch
             if (chat.isAiAssistant && mode != "clear") {
                 // The AI assistant is a system chat: deletion forbidden, clearing OK.
-                _aiErrorState.value = AiUiError.Custom(
-                    if (LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN)
-                        "Чат с ИИ удалить нельзя."
-                    else "The AI chat cannot be deleted."
-                )
+                rejectAiChatDeletion()
                 return@launch
             }
             val ok = when (mode) {

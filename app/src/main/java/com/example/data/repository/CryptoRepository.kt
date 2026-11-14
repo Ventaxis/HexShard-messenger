@@ -14,6 +14,8 @@ data class EncryptedMessagePayload(
 
 enum class DecryptionTrustStatus {
     VERIFIED,
+    /** Decrypted/verified under the SERVED key while the pinned one differs — flagged until the user accepts the rotation. */
+    KEY_ROTATED,
     UNVERIFIED_LEGACY,
     INVALID_SIGNATURE,
     MISSING_KEY,
@@ -174,6 +176,9 @@ class CryptoRepository(
         // TOFU-guarded sender keys: prefer the PINNED key when the server presents
         // a different one, and let the caller warn the user about the rotation.
         var senderKeyChanged = false
+        // True when the signature only verified under the SERVED signing key — the
+        // result must not silently persist as plainly verified (review SEC-002).
+        var signatureUsedServedKey = false
         var sharedSecret: ByteArray? = null
         var servedSecret: ByteArray? = null
         if (isSelf) {
@@ -249,6 +254,7 @@ class CryptoRepository(
                     // but the message no longer renders as a withheld security alert.
                     if (!signatureValid && trustedSign?.keyChanged == true && trustedSign.key != null) {
                         signatureValid = E2ECryptoManager.verifySignature(canonicalEnvelope, sigBytes, trustedSign.key)
+                        signatureUsedServedKey = signatureValid
                     }
                 } else {
                     Timber.w("Sender signing key unavailable for verification: $senderId")
@@ -263,12 +269,13 @@ class CryptoRepository(
         if (isV3) {
             return decryptV3Payload(
                 combinedBytes, masterSecret, servedSecret, conversationId, idempotencyKey,
-                envelopeSenderId, envelopeRecipientId, isSelf, signatureValid, senderKeyChanged
+                envelopeSenderId, envelopeRecipientId, isSelf, signatureValid, senderKeyChanged,
+                signatureUsedServedKey
             )
         }
         return decryptV2Payload(
             combinedBytes, masterSecret, servedSecret, idempotencyKey, isSelf,
-            signatureValid, signaturePresent, senderKeyChanged
+            signatureValid, signaturePresent, senderKeyChanged, signatureUsedServedKey
         )
     }
 
@@ -283,7 +290,8 @@ class CryptoRepository(
         recipientId: String,
         isSelf: Boolean,
         signatureValid: Boolean,
-        senderKeyChanged: Boolean
+        senderKeyChanged: Boolean,
+        signatureUsedServedKey: Boolean
     ): DecryptedResult {
         val body = combinedBytes.copyOfRange(V3_MAGIC.size, combinedBytes.size)
         if (body.size < 44) { // 32 bytes HMAC + 12 bytes IV
@@ -323,12 +331,19 @@ class CryptoRepository(
 
         return try {
             val decrypted = E2ECryptoManager.decryptMessage(iv, cipherText, encKey, aad)
+            // SEC-002: content that needed the SERVED key (decrypt or signature) is
+            // flagged for rotation instead of passing as plain VERIFIED trust.
+            val trust = if (activeSecret === servedSecret || signatureUsedServedKey) {
+                DecryptionTrustStatus.KEY_ROTATED
+            } else {
+                DecryptionTrustStatus.VERIFIED
+            }
             when {
                 isSelf || signatureValid -> DecryptedResult(
                     plainText = decrypted,
                     isSignatureValid = true,
                     senderKeyChanged = senderKeyChanged,
-                    trustStatus = DecryptionTrustStatus.VERIFIED
+                    trustStatus = trust
                 )
                 else -> {
                     // v3 contract: signature is mandatory. A stripped signature means
@@ -361,7 +376,8 @@ class CryptoRepository(
         isSelf: Boolean,
         signatureValid: Boolean,
         signaturePresent: Boolean,
-        senderKeyChanged: Boolean
+        senderKeyChanged: Boolean,
+        signatureUsedServedKey: Boolean
     ): DecryptedResult {
         if (combinedBytes.size < 44) { // 32 bytes HMAC + 12 bytes IV
             return DecryptedResult(
@@ -408,12 +424,17 @@ class CryptoRepository(
 
         return try {
             val decrypted = E2ECryptoManager.decryptMessage(iv, cipherText, activeKey)
+            val trust = if (activeKey === servedKey || signatureUsedServedKey) {
+                DecryptionTrustStatus.KEY_ROTATED
+            } else {
+                DecryptionTrustStatus.VERIFIED
+            }
             when {
                 isSelf || signatureValid -> DecryptedResult(
                     plainText = decrypted,
                     isSignatureValid = true,
                     senderKeyChanged = senderKeyChanged,
-                    trustStatus = DecryptionTrustStatus.VERIFIED
+                    trustStatus = trust
                 )
                 !signaturePresent -> {
                     // Legacy v2 message without signature: shown, explicitly unverified

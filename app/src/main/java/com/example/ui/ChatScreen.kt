@@ -246,6 +246,7 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
                                         allChats = chats,
                                         onOpenProfile = { viewModel.openPeerProfile(activeChat) },
                                         onChangeWallpaper = { wallpaperRefresh++ },
+                                        onAcceptPeerKeys = { viewModel.acceptPeerKeys(chat.id) },
                                         wallpaperUri = activeWallpaper
                                     )
                                 }
@@ -329,6 +330,7 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
                                 onForwardMessage = { targetId, msg -> viewModel.forwardMessage(targetId, msg) },
                                 allChats = chats,
                                 onChangeWallpaper = { wallpaperRefresh++ },
+                                        onAcceptPeerKeys = { viewModel.acceptPeerKeys(chat.id) },
                                 wallpaperUri = activeWallpaper
                             )
                         }
@@ -1198,6 +1200,7 @@ fun ChatArea(
     allChats: List<ChatEntity> = emptyList(),
     onOpenProfile: () -> Unit = {},
     onChangeWallpaper: () -> Unit = {},
+    onAcceptPeerKeys: () -> Unit = {},
     wallpaperUri: String? = null
 ) {
     var replyingToMessage by remember { mutableStateOf<MessageEntity?>(null) }
@@ -1445,7 +1448,8 @@ fun ChatArea(
 
     // Quick action items icons
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        if (canCallRecipient) {
+        // Real calls are 1:1 — group chats have no single peer to dial.
+        if (canCallRecipient && chat.getConversationType() != ConversationType.GROUP) {
             IconButton(onClick = { micPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO) }) {
                 Icon(
                     Icons.Default.PhoneInTalk,
@@ -1542,6 +1546,29 @@ fun ChatArea(
 
                         }
                     }
+                }
+            }
+        }
+
+        // SEC-002: rotation banner — served-key content is flagged until accepted.
+        val hasRotatedKeys = !isSelfChat && !isAiChat && messages.any { it.status == "key_rotated" }
+        if (hasRotatedKeys) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFFFF9800).copy(alpha = 0.12f))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (isRussian) "Ключ собеседника изменился. Подтвердите, если это он." else "Peer key changed. Confirm it is them.",
+                    color = Color(0xFFFF9800),
+                    fontSize = 12.sp,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(onClick = onAcceptPeerKeys) {
+                    Text(if (isRussian) "Принять" else "Accept", color = Color(0xFFFF9800), fontSize = 12.sp)
                 }
             }
         }
@@ -2245,7 +2272,7 @@ fun MessageBubble(
                         modifier = Modifier.padding(horizontal = 4.dp)
                     )
                 }
-                if (!message.isMe && (!message.signatureValid || message.status == "integrity_error")) {
+                if (!message.isMe && (!message.signatureValid || message.status == "integrity_error" || message.status == "key_rotated")) {
                     Spacer(modifier = Modifier.width(4.dp))
                     Icon(
                         imageVector = Icons.Default.Warning,

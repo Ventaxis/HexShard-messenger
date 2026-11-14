@@ -120,7 +120,9 @@ object CallSignalingManager {
 
     /** Opens the signaling WebSocket if it is not alive yet. */
     fun ensureConnection() {
-        if (webSocket != null) return
+        synchronized(this) {
+            if (webSocket != null) return
+        }
         val context = appContext ?: return
         val uid = SecurePrefsManager.getUserId(context)
         val token = SecurePrefsManager.getSupabaseAccessToken(context)
@@ -340,6 +342,12 @@ object CallSignalingManager {
      * (`payload = {data: {event, payload}}`) — both shapes are decoded here.
      */
     private fun parseBroadcast(json: JSONObject) {
+        // SEC-001: drop frames for topics we never joined (topic confusion).
+        if (!CallSignaling.broadcastFromJoinedTopic(
+                json.optString("topic"),
+                _joinedTopics.value
+            )
+        ) return
         val payload = json.optJSONObject("payload") ?: return
         val data = payload.optJSONObject("data")
         val layer = listOfNotNull(payload, data)

@@ -2144,13 +2144,13 @@ fun SettingsScreen(
             UpdateCenterDialog(onDismiss = { showUpdateCenter = false })
         }
         if (showChangeNumberConfirm) {
-            val currentLang = LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN
+            val isRu = LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN
             androidx.compose.material3.AlertDialog(
                 onDismissRequest = { if (!changingNumber) showChangeNumberConfirm = false },
-                title = { Text(if (currentLang) "Сменить номер?" else "Change number?", color = HexTextPrimary) },
+                title = { Text(if (isRu) "Сменить номер?" else "Change number?", color = HexTextPrimary) },
                 text = {
                     Text(
-                        if (currentLang)
+                        if (isRu)
                             "Текущий номер $privateVirtualNumber будет освобождён и станет доступен другим. Новый номер выбирается сразу после этого. Чаты и сообщения останутся."
                         else "Your current number $privateVirtualNumber will be released and become available to others. You will pick the new number right after. Chats and messages stay.",
                         color = HexTextSecondary
@@ -2175,11 +2175,11 @@ fun SettingsScreen(
                             }
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = HexShardTeal)
-                    ) { Text(if (currentLang) "Освободить и выбрать новый" else "Release and pick new") }
+                    ) { Text(if (isRu) "Освободить и выбрать новый" else "Release and pick new") }
                 },
                 dismissButton = {
                     TextButton(enabled = !changingNumber, onClick = { showChangeNumberConfirm = false }) {
-                        Text(if (currentLang) "Отмена" else "Cancel")
+                        Text(if (isRu) "Отмена" else "Cancel")
                     }
                 }
             )

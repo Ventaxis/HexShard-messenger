@@ -433,7 +433,7 @@ class MessageRepository(
                     messageId = chatDao.insertMessage(message)
                     outboxRowId = 0L
                 }
-                conversationRepository.updateChatPreview(chatId, text, timeStr, message.timestamp)
+                conversationRepository.updateChatPreview(chatId, com.example.util.TextSanitizer.stripMarkdown(text), timeStr, message.timestamp)
 
                 if (isMe && idempotencyKey.isNotEmpty()) {
                     backgroundScope.launch {
@@ -539,7 +539,7 @@ class MessageRepository(
                 messageId = chatDao.insertMessage(message)
                 outboxRowId = 0L
             }
-            conversationRepository.updateChatPreview(chatId, text, timeStr, message.timestamp)
+            conversationRepository.updateChatPreview(chatId, com.example.util.TextSanitizer.stripMarkdown(text), timeStr, message.timestamp)
 
             // ALL user-initiated messages are enqueued into durable outbox (direct, saved, and AI user prompts)
             if (isMe && idempotencyKey.isNotEmpty()) {

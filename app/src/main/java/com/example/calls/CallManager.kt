@@ -57,8 +57,12 @@ object CallManager {
     private const val AUDIO_TRACK_ID = "hexshard_call_audio"
     private const val JOIN_TIMEOUT_MS = 10_000L
     private const val ENDED_STATE_RESET_MS = 2_500L
+    private const val RING_TIMEOUT_MS = 45_000L
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // All state mutations serialize on one thread — public API stays callable from UI.
+    private val scope = CoroutineScope(SupervisorJob() + kotlinx.coroutines.asCoroutineDispatcher(
+        java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "hexshard-calls") }
+    ))
 
     private val _state = MutableStateFlow<CallState>(CallState.Idle)
     val state: StateFlow<CallState> = _state.asStateFlow()
@@ -86,6 +90,7 @@ object CallManager {
 
     private var ringtone: Ringtone? = null
     private var endedResetJob: Job? = null
+    private var ringTimeoutJob: Job? = null
 
     //region Lifecycle
 
@@ -123,14 +128,14 @@ object CallManager {
         scope.launch {
             val current = _state.value
             if (current !is CallState.Idle && current !is CallState.Ended) {
-                _state.value = CallState.Ended("Занято")
+                _state.value = CallState.Ended("busy")
                 scheduleEndedReset()
                 return@launch
             }
 
             val context = appContext
             if (context == null || !ensureFactory()) {
-                _state.value = CallState.Ended("Не удалось инициализировать аудио")
+                _state.value = CallState.Ended("audio_init_failed")
                 scheduleEndedReset()
                 return@launch
             }
@@ -138,14 +143,14 @@ object CallManager {
             if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
                 != android.content.pm.PackageManager.PERMISSION_GRANTED
             ) {
-                _state.value = CallState.Ended("Нет доступа к микрофону")
+                _state.value = CallState.Ended("mic_denied")
                 scheduleEndedReset()
                 return@launch
             }
 
             val myUid = SecurePrefsManager.getUserId(context)
             if (myUid.isBlank() || peerId.isBlank()) {
-                _state.value = CallState.Ended("Абонент недоступен")
+                _state.value = CallState.Ended("peer_unavailable")
                 scheduleEndedReset()
                 return@launch
             }
@@ -157,12 +162,12 @@ object CallManager {
             CallSignalingManager.ensureConnection()
             val topic = CallSignaling.topicFor(myUid, peerId)
             if (!CallSignalingManager.awaitTopicJoined(topic, JOIN_TIMEOUT_MS)) {
-                endCall("Не удалось подключиться к сигналингу", sendBye = false)
+                endCall("signaling_failed", sendBye = false)
                 return@launch
             }
 
             val pc = createPeerConnection() ?: run {
-                endCall("Не удалось инициализировать аудио", sendBye = false)
+                endCall("audio_init_failed", sendBye = false)
                 return@launch
             }
             attachLocalAudio(pc)
@@ -171,11 +176,11 @@ object CallManager {
                 mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
             }
             val offer = createOffer(pc, offerConstraints) ?: run {
-                endCall("Не удалось создать соединение", sendBye = false)
+                endCall("connection_setup_failed", sendBye = false)
                 return@launch
             }
             if (setLocalDescription(pc, offer) == null) {
-                endCall("Не удалось создать соединение", sendBye = false)
+                endCall("connection_setup_failed", sendBye = false)
                 return@launch
             }
 
@@ -196,30 +201,30 @@ object CallManager {
 
             val context = appContext
             if (context == null || !ensureFactory()) {
-                endCall("Не удалось инициализировать аудио", sendBye = false)
+                endCall("audio_init_failed", sendBye = false)
                 return@launch
             }
             val myUid = SecurePrefsManager.getUserId(context)
             if (myUid.isBlank()) {
-                endCall("Абонент недоступен", sendBye = false)
+                endCall("peer_unavailable", sendBye = false)
                 return@launch
             }
 
             // Remote offer already buffered while ringing; reuse it directly
             val remoteOffer = pendingRemoteOffer ?: run {
-                endCall("Входящий звонок устарел", sendBye = false)
+                endCall("incoming_stale", sendBye = false)
                 return@launch
             }
 
             _state.value = CallState.Calling(current.peerId, current.peerName)
             val pc = createPeerConnection() ?: run {
-                endCall("Не удалось инициализировать аудио", sendBye = false)
+                endCall("audio_init_failed", sendBye = false)
                 return@launch
             }
             attachLocalAudio(pc)
 
             if (setRemoteDescription(pc, remoteOffer) == null) {
-                endCall("Не удалось создать соединение", sendBye = false)
+                endCall("connection_setup_failed", sendBye = false)
                 return@launch
             }
             flushBufferedCandidates(pc)
@@ -228,11 +233,11 @@ object CallManager {
                 mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
             }
             val answer = createAnswer(pc, answerConstraints) ?: run {
-                endCall("Не удалось создать соединение", sendBye = false)
+                endCall("connection_setup_failed", sendBye = false)
                 return@launch
             }
             if (setLocalDescription(pc, answer) == null) {
-                endCall("Не удалось создать соединение", sendBye = false)
+                endCall("connection_setup_failed", sendBye = false)
                 return@launch
             }
 
@@ -245,7 +250,7 @@ object CallManager {
         scope.launch {
             if (_state.value !is CallState.Ringing) return@launch
             stopRingtone()
-            endCall("Звонок отклонён", sendBye = true)
+            endCall("declined", sendBye = true)
         }
     }
 
@@ -256,7 +261,7 @@ object CallManager {
     fun hangUp() {
         scope.launch {
             if (_state.value is CallState.Idle) return@launch
-            endCall("Звонок завершён", sendBye = true)
+            endCall("call_ended", sendBye = true)
         }
     }
 
@@ -306,6 +311,12 @@ object CallManager {
                     return // Cannot answer without mic; overlay will not be shown
                 }
                 if (signal.sdp.isNullOrBlank() || signal.callId.isBlank()) return
+                // SEC-001: ring only for accepted DIRECT contacts — a spoofed
+                // offer from a stranger is dropped before the overlay appears.
+                if (!CallSignaling.offerAllowed(watchPeers.keys, signal.fromUid)) {
+                    Timber.w("Dropping call offer from unknown peer")
+                    return
+                }
 
                 callId = signal.callId
                 peerUid = signal.fromUid
@@ -317,6 +328,13 @@ object CallManager {
 
                 _state.value = CallState.Ringing(peerUid, peerName, fromSignal = true)
                 startRingtone()
+                // CODE-004: an unanswered ring must not hold the screen forever.
+                ringTimeoutJob = scope.launch {
+                    delay(RING_TIMEOUT_MS)
+                    if (_state.value is CallState.Ringing) {
+                        endCall("missed_call", sendBye = false)
+                    }
+                }
             }
             CallSignaling.KIND_ANSWER -> {
                 if (_state.value is CallState.Calling && signal.fromUid == peerUid && signal.callId == callId) {
@@ -346,9 +364,12 @@ object CallManager {
             }
             CallSignaling.KIND_BYE -> {
                 if (signal.fromUid != peerUid) return
+                // SEC-001: a forged bye from a topic eavesdropper must not kill an
+                // active call — require the current call id.
+                if (!CallSignaling.byeMatches(callId, signal.callId)) return
                 when (_state.value) {
-                    is CallState.Ringing -> endCall("Звонок отменён", sendBye = false)
-                    is CallState.Calling, is CallState.Active -> endCall("Вызов завершён", sendBye = false)
+                    is CallState.Ringing -> endCall("call_cancelled", sendBye = false)
+                    is CallState.Calling, is CallState.Active -> endCall("call_ended", sendBye = false)
                     else -> Unit
                 }
             }
@@ -363,7 +384,8 @@ object CallManager {
     private fun beginCall(peerId: String, name: String) {
         isEnding = false
         endedResetJob?.cancel()
-        callId = System.currentTimeMillis().toString()
+        ringTimeoutJob?.cancel()
+        callId = CallSignaling.newCallId()
         peerUid = peerId
         peerName = name
         pendingRemoteOffer = null
@@ -531,10 +553,10 @@ object CallManager {
             when (newState) {
                 PeerConnection.PeerConnectionState.CONNECTED -> onPeerConnected()
                 PeerConnection.PeerConnectionState.FAILED -> {
-                    if (!isEnding) endCall("Соединение потеряно", sendBye = true)
+                    if (!isEnding) endCall("connection_lost", sendBye = true)
                 }
                 PeerConnection.PeerConnectionState.CLOSED -> {
-                    if (!isEnding) endCall("Звонок завершён", sendBye = false)
+                    if (!isEnding) endCall("call_ended", sendBye = false)
                 }
                 else -> Unit
             }
@@ -616,6 +638,7 @@ object CallManager {
             CallSignalingManager.sendSignal(byeUid, CallSignaling.byePayload(myUid, byeCallId))
         }
 
+        ringTimeoutJob?.cancel()
         stopRingtone()
         resetAudioRouting()
 

@@ -263,6 +263,11 @@ open class ChatRepository(
     open suspend fun populateInitialDataIfNeeded(accountId: String) =
         conversationRepository.populateInitialDataIfNeeded(accountId)
 
+    /** Re-pin the peer key after the user accepted a rotation (review SEC-002). */
+    suspend fun acceptRotatedKeys(peerId: String) = withContext(Dispatchers.IO) {
+        userRepository.acceptRotatedKeys(peerId)
+    }
+
     suspend fun resolveUser(identifier: String): Pair<String, String>? =
         userRepository.resolveUser(identifier)
 

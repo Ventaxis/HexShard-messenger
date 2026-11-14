@@ -365,7 +365,7 @@ class UserRepository(
                     val uid = obj.optString("id", clean)
                     val uname = obj.optString("username", clean)
                     val dname = obj.optString("display_name", uname).ifBlank { uname }
-                    val ava = obj.optString("avatar_url", obj.optString("avatar_url", "")).takeIf { it.isNotBlank() }
+                    val ava = obj.optString("avatar_url", "").takeIf { it.isNotBlank() }
                     val fullAva = if (ava != null && !ava.startsWith("http") && !ava.startsWith("data:")) {
                         "$baseUrl/storage/v1/object/public/avatars/$ava"
                     } else ava
