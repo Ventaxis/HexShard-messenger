@@ -232,6 +232,13 @@ object CallSignalingManager {
         }
     }
 
+    /** Dev self-check support: add a topic to the desired set; joinMissingTopics joins it. */
+    fun ensureTopic(topic: String) {
+        desiredTopics = desiredTopics + topic
+        ensureConnection()
+        joinMissingTopics()
+    }
+
     /** Suspends until [topic] reports a successful phx_join or times out. */
     suspend fun awaitTopicJoined(topic: String, timeoutMs: Long = JOIN_TIMEOUT_MS): Boolean =
         withTimeoutOrNull(timeoutMs) {

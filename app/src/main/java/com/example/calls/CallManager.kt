@@ -142,8 +142,9 @@ object CallManager {
         val uid = SecurePrefsManager.getUserId(context)
         if (uid.isBlank()) return false
         CallSignalingManager.refreshAccessToken()
-        CallSignalingManager.ensureConnection()
-        return CallSignalingManager.awaitTopicJoined(CallSignaling.topicFor(uid, uid), JOIN_TIMEOUT_MS)
+        val topic = CallSignaling.topicFor(uid, uid)
+        CallSignalingManager.ensureTopic(topic)
+        return CallSignalingManager.awaitTopicJoined(topic, JOIN_TIMEOUT_MS)
     }
 
     //region Outgoing call

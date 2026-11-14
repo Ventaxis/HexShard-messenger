@@ -365,7 +365,11 @@ class UserRepository(
                     val uid = obj.optString("id", clean)
                     val uname = obj.optString("username", clean)
                     val dname = obj.optString("display_name", uname).ifBlank { uname }
-                    val ava = obj.optString("avatar_url", "").takeIf { it.isNotBlank() }
+                    // Legacy profiles keep the storage path in avatar_path with an
+                    // empty avatar_url — fall back and build the public URL.
+                    val ava = (obj.optString("avatar_url", "").ifBlank {
+                        obj.optString("avatar_path", "")
+                    }).takeIf { it.isNotBlank() }
                     val fullAva = if (ava != null && !ava.startsWith("http") && !ava.startsWith("data:")) {
                         "$baseUrl/storage/v1/object/public/avatars/$ava"
                     } else ava

@@ -2065,20 +2065,20 @@ fun SettingsScreen(
                             color = HexTextSecondary, fontSize = 11.sp
                         )
                         Spacer(Modifier.height(8.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(onClick = {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = {
                                 scope.launch {
                                     val r = com.example.network.DevModeClient.action(context, "test_avatar", devPhraseInput)
                                     devStatus = if (r != null && r.optBoolean("ok")) "Аватарка: ок, ${r.optInt("uploaded_bytes")} Б, удалена" else "Аватарка: ошибка ${r?.optString("__error") ?: r?.optString("error") ?: ""}"
                                 }
                             }) { Text("Аватарка", fontSize = 12.sp) }
-                            OutlinedButton(onClick = {
+                            OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = {
                                 scope.launch {
                                     val ok = com.example.calls.CallManager.signalSelfCheck(context)
                                     devStatus = if (ok) "Сигнал звонка: топик открыт" else "Сигнал звонка: не удалось"
                                 }
                             }) { Text("Сигнал звонка", fontSize = 12.sp) }
-                            OutlinedButton(onClick = { showDevBansDialog = true }) { Text("Баны", fontSize = 12.sp) }
+                            OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = { showDevBansDialog = true }) { Text("Баны", fontSize = 12.sp) }
                         }
                         devStatus?.let {
                             Spacer(Modifier.height(8.dp))
@@ -2264,8 +2264,9 @@ fun SettingsScreen(
                             label = { Text("@username") }
                         )
                         Spacer(Modifier.height(8.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Button(
+                                modifier = Modifier.fillMaxWidth(),
                                 enabled = !banBusy && banUsername.isNotBlank(),
                                 colors = ButtonDefaults.buttonColors(containerColor = com.example.ui.theme.HexDanger),
                                 onClick = {
@@ -2278,6 +2279,7 @@ fun SettingsScreen(
                                 }
                             ) { Text("Бан 7д", fontSize = 12.sp) }
                             OutlinedButton(
+                                modifier = Modifier.fillMaxWidth(),
                                 enabled = !banBusy && banUsername.isNotBlank(),
                                 onClick = {
                                     banBusy = true
@@ -2289,6 +2291,7 @@ fun SettingsScreen(
                                 }
                             ) { Text("Разбан", fontSize = 12.sp) }
                             OutlinedButton(
+                                modifier = Modifier.fillMaxWidth(),
                                 enabled = !banBusy,
                                 onClick = {
                                     banBusy = true
