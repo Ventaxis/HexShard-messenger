@@ -108,6 +108,9 @@ object CallSignaling {
         "ref" to ref,
         "payload" to linkedMapOf(
             "config" to linkedMapOf(
+                // SEC-001: private channel — authorization is RLS-checked server-side
+                // against realtime.messages for the uid pair (migration 20261114120000).
+                "private" to true,
                 "broadcast" to linkedMapOf("self" to false),
                 "presence" to linkedMapOf("key" to "")
             ),
