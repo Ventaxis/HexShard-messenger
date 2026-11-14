@@ -32,7 +32,7 @@ object CryptoTrustPolicy {
      * message could then NEVER be decrypted (permanent tampered ciphertext).
      * Inbound trust stays gated by the recipient-side rotation banner.
      */
-    fun outboundKey(served: ByteArray?, pinned: ByteArray?): ByteArray? = served ?: pinned
+    fun <T> outboundKey(served: T?, pinned: T?): T? = served ?: pinned
 
     /**
      * Whether a previously persisted row may be overwritten by a successful
