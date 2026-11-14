@@ -105,6 +105,19 @@ fun SettingsScreen(
     var qrStatusMessage by remember { mutableStateOf<String?>(null) }
     var showClaimHexShardDialog by remember { mutableStateOf(false) }
     var showChangeNumberConfirm by remember { mutableStateOf(false) }
+    val devIsRu = LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN
+    var devTapStamps by remember { mutableStateOf(listOf<Long>()) }
+    var showDevPhraseDialog by remember { mutableStateOf(false) }
+    var devPhraseInput by remember { mutableStateOf("") }
+    var devPhraseBusy by remember { mutableStateOf(false) }
+    var devUnlockedUntil by remember { mutableStateOf(0L) }
+    var devStatus by remember { mutableStateOf<String?>(null) }
+    var showDevBansDialog by remember { mutableStateOf(false) }
+    var banUsername by remember { mutableStateOf("") }
+    var banBusy by remember { mutableStateOf(false) }
+    var banList by remember { mutableStateOf("") }    fun banStatus(r: org.json.JSONObject?, okRu: String, failRu: String) {
+        devStatus = if (r != null && r.optBoolean("ok")) okRu else failRu + ": " + (r?.optString("__error") ?: r?.optString("error") ?: "")
+    }
     var changingNumber by remember { mutableStateOf(false) }
     var showUpdateCenter by remember { mutableStateOf(false) }
     var showDatePickerDialog by remember { mutableStateOf(false) }
@@ -929,18 +942,18 @@ fun SettingsScreen(
     }
 
     if (showEditProfile) {
-        val isRussian = currentLang == AppLanguage.RUSSIAN
+        val devIsRussian = currentLang == AppLanguage.RUSSIAN
         var editName by remember { mutableStateOf(name) }
         var editUsername by remember { mutableStateOf(username) }
         var editBio by remember { mutableStateOf(bio) }
-        var editDob by remember { mutableStateOf(com.example.util.DateOfBirthFormatter.formatForDisplay(dateOfBirth, isRussian)) }
+        var editDob by remember { mutableStateOf(com.example.util.DateOfBirthFormatter.formatForDisplay(dateOfBirth, devIsRussian)) }
         var isSavingProfile by remember { mutableStateOf(false) }
         var profileSaveError by remember { mutableStateOf<String?>(null) }
 
         if (showDatePickerDialog) {
             BirthDateWheelPickerDialog(
                 initialDateStr = editDob,
-                isRussian = isRussian,
+                devIsRussian = devIsRussian,
                 onDismissRequest = { showDatePickerDialog = false },
                 onDateSelected = { selectedDate ->
                     editDob = selectedDate
@@ -1028,7 +1041,7 @@ fun SettingsScreen(
                     OutlinedTextField(
                         value = editDob,
                         onValueChange = { input ->
-                            editDob = com.example.util.DateOfBirthFormatter.autoFormatTyping(input, isRussian)
+                            editDob = com.example.util.DateOfBirthFormatter.autoFormatTyping(input, devIsRussian)
                         },
                         label = { Text(strings.dateOfBirth) },
                         singleLine = true,
@@ -1049,7 +1062,7 @@ fun SettingsScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                val formattedPreview = com.example.util.DateOfBirthFormatter.formatForDisplay(editDob, isRussian)
+                                val formattedPreview = com.example.util.DateOfBirthFormatter.formatForDisplay(editDob, devIsRussian)
                                 Text(
                                     text = if (formattedPreview.isNotBlank()) formattedPreview else strings.birthDateHint,
                                     color = if (formattedPreview.isNotBlank()) HexShardTealLight else HexTextSecondary.copy(alpha = 0.7f),
@@ -1127,14 +1140,14 @@ fun SettingsScreen(
                         val trimmedName = editName.trim()
                         val trimmedUsername = editUsername.trim().removePrefix("@")
                         if (trimmedUsername.length < 3) {
-                            profileSaveError = if (isRussian) "Имя пользователя должно быть не менее 3 символов" else "Username must be at least 3 characters"
+                            profileSaveError = if (devIsRussian) "Имя пользователя должно быть не менее 3 символов" else "Username must be at least 3 characters"
                             return@TextButton
                         }
                         val trimmedDob = editDob.trim()
                         val canonicalDob = if (trimmedDob.isNotBlank()) {
                             val iso = com.example.util.DateOfBirthFormatter.toCanonicalIso(trimmedDob)
                             if (iso == null) {
-                                profileSaveError = if (isRussian) "Некорректная дата рождения (например: 13.04.1998)" else "Invalid date of birth (e.g. 13.04.1998)"
+                                profileSaveError = if (devIsRussian) "Некорректная дата рождения (например: 13.04.1998)" else "Invalid date of birth (e.g. 13.04.1998)"
                                 return@TextButton
                             }
                             iso
@@ -1165,7 +1178,7 @@ fun SettingsScreen(
                                         dateOfBirth = updated?.dateOfBirth ?: canonicalDob
                                         isSavingProfile = false
                                         showEditProfile = false
-                                        Toast.makeText(context, if (isRussian) "Профиль сохранён" else "Profile saved", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, if (devIsRussian) "Профиль сохранён" else "Profile saved", Toast.LENGTH_SHORT).show()
                                     }
                                     result.isFailure -> {
                                         isSavingProfile = false
@@ -1184,7 +1197,7 @@ fun SettingsScreen(
                                 com.example.data.SecurePrefsManager.getPrefs(context).edit().putString("username", trimmedUsername).apply()
                                 isSavingProfile = false
                                 showEditProfile = false
-                                Toast.makeText(context, if (isRussian) "Профиль сохранён локально" else "Profile saved locally", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, if (devIsRussian) "Профиль сохранён локально" else "Profile saved locally", Toast.LENGTH_SHORT).show()
                             }
                         }
                     }
@@ -1855,10 +1868,10 @@ fun SettingsScreen(
                     HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = HexDarkBorderSubtle)
 
                     // Date of Birth
-                    val isRussianLang = currentLang == AppLanguage.RUSSIAN
+                    val devIsRussianLang = currentLang == AppLanguage.RUSSIAN
                     ProfileInfoRow(
                         label = strings.dateOfBirth,
-                        value = com.example.util.DateOfBirthFormatter.formatForDisplay(dateOfBirth, isRussianLang).ifBlank { strings.notSpecified },
+                        value = com.example.util.DateOfBirthFormatter.formatForDisplay(dateOfBirth, devIsRussianLang).ifBlank { strings.notSpecified },
                         onClick = { showEditProfile = true }
                     )
 
@@ -2016,8 +2029,60 @@ fun SettingsScreen(
                         icon = Icons.Default.SystemUpdate,
                         title = if (currentLang == AppLanguage.RUSSIAN) "Обновления и исправления" else "Updates and fixes",
                         subtitle = "${if (currentLang == AppLanguage.RUSSIAN) "Версия" else "Version"} ${BuildConfig.VERSION_NAME}",
-                        onClick = { showUpdateCenter = true }
+                        onClick = {
+                            // 7 taps within 15 s unlock the developer phrase dialog.
+                            val now = System.currentTimeMillis()
+                            devTapStamps = devTapStamps.filter { now - it < 15_000 } + now
+                            if (devTapStamps.size >= 7) {
+                                devTapStamps = emptyList()
+                                showDevPhraseDialog = true
+                            } else {
+                                showUpdateCenter = true
+                            }
+                        }
                     )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Developer panel: only after server-verified phrase (1 hour TTL).
+            val devUnlockEffective = devUnlockedUntil > System.currentTimeMillis() ||
+                com.example.data.SecurePrefsManager.getPrefs(context).getLong("dev_unlocked_until", 0L) > System.currentTimeMillis()
+            if (devUnlockEffective) {
+                Spacer(modifier = Modifier.height(12.dp))
+                HexSectionHeader(title = if (devIsRu) "Разработчик" else "Developer")
+                HexCard(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    containerColor = HexDarkSurface,
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            if (devIsRu) "Записи тестов не сохраняются на сервере" else "Test artifacts are not kept on the server",
+                            color = HexTextSecondary, fontSize = 11.sp
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(onClick = {
+                                scope.launch {
+                                    val r = com.example.network.DevModeClient.action(context, "test_avatar", devPhraseInput)
+                                    devStatus = if (r != null && r.optBoolean("ok")) "Аватарка: ок, ${r.optInt("uploaded_bytes")} Б, удалена" else "Аватарка: ошибка ${r?.optString("__error") ?: r?.optString("error") ?: ""}"
+                                }
+                            }) { Text("Аватарка", fontSize = 12.sp) }
+                            OutlinedButton(onClick = {
+                                scope.launch {
+                                    val ok = com.example.calls.CallManager.signalSelfCheck(context)
+                                    devStatus = if (ok) "Сигнал звонка: топик открыт" else "Сигнал звонка: не удалось"
+                                }
+                            }) { Text("Сигнал звонка", fontSize = 12.sp) }
+                            OutlinedButton(onClick = { showDevBansDialog = true }) { Text("Баны", fontSize = 12.sp) }
+                        }
+                        devStatus?.let {
+                            Spacer(Modifier.height(8.dp))
+                            Text(it, color = HexTextSecondary, fontSize = 12.sp)
+                        }
+                    }
                 }
             }
 
@@ -2144,13 +2209,12 @@ fun SettingsScreen(
             UpdateCenterDialog(onDismiss = { showUpdateCenter = false })
         }
         if (showChangeNumberConfirm) {
-            val isRu = LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN
             androidx.compose.material3.AlertDialog(
                 onDismissRequest = { if (!changingNumber) showChangeNumberConfirm = false },
-                title = { Text(if (isRu) "Сменить номер?" else "Change number?", color = HexTextPrimary) },
+                title = { Text(if (devIsRu) "Сменить номер?" else "Change number?", color = HexTextPrimary) },
                 text = {
                     Text(
-                        if (isRu)
+                        if (devIsRu)
                             "Текущий номер $privateVirtualNumber будет освобождён и станет доступен другим. Новый номер выбирается сразу после этого. Чаты и сообщения останутся."
                         else "Your current number $privateVirtualNumber will be released and become available to others. You will pick the new number right after. Chats and messages stay.",
                         color = HexTextSecondary
@@ -2175,13 +2239,126 @@ fun SettingsScreen(
                             }
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = HexShardTeal)
-                    ) { Text(if (isRu) "Освободить и выбрать новый" else "Release and pick new") }
+                    ) { Text(if (devIsRu) "Освободить и выбрать новый" else "Release and pick new") }
                 },
                 dismissButton = {
                     TextButton(enabled = !changingNumber, onClick = { showChangeNumberConfirm = false }) {
-                        Text(if (isRu) "Отмена" else "Cancel")
+                        Text(if (devIsRu) "Отмена" else "Cancel")
                     }
                 }
+            )
+        }
+        // Developer mode: phrase verified SERVER-side on every call; the phrase
+        // itself lives only in memory on this device (never persisted).
+        if (showDevBansDialog) {
+            AlertDialog(
+                onDismissRequest = { if (!banBusy) showDevBansDialog = false },
+                title = { Text(if (devIsRu) "Баны" else "Bans", color = HexTextPrimary) },
+                text = {
+                    Column {
+                        OutlinedTextField(
+                            value = banUsername, onValueChange = { banUsername = it },
+                            singleLine = true, enabled = !banBusy,
+                            label = { Text("@username") }
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                enabled = !banBusy && banUsername.isNotBlank(),
+                                colors = ButtonDefaults.buttonColors(containerColor = com.example.ui.theme.HexDanger),
+                                onClick = {
+                                    banBusy = true
+                                    scope.launch {
+                                        val r = com.example.network.DevModeClient.action(context, "ban", devPhraseInput, org.json.JSONObject().put("username", banUsername).put("days", 7))
+                                        banBusy = false
+                                        banStatus(r, "Забанен на 7 дней", "Бан не удался")
+                                    }
+                                }
+                            ) { Text("Бан 7д", fontSize = 12.sp) }
+                            OutlinedButton(
+                                enabled = !banBusy && banUsername.isNotBlank(),
+                                onClick = {
+                                    banBusy = true
+                                    scope.launch {
+                                        val r = com.example.network.DevModeClient.action(context, "unban", devPhraseInput, org.json.JSONObject().put("username", banUsername))
+                                        banBusy = false
+                                        banStatus(r, "Разбанен", "Разбан не удался")
+                                    }
+                                }
+                            ) { Text("Разбан", fontSize = 12.sp) }
+                            OutlinedButton(
+                                enabled = !banBusy,
+                                onClick = {
+                                    banBusy = true
+                                    scope.launch {
+                                        val r = com.example.network.DevModeClient.action(context, "list_banned", devPhraseInput)
+                                        banBusy = false
+                                        val arr = r?.optJSONArray("banned")
+                                        banList = arr?.let { a ->
+                                            (0 until a.length()).joinToString("\n") { i ->
+                                                val o = a.getJSONObject(i)
+                                                "@" + o.optString("username", o.optString("id")) + " до " + o.optString("banned_until")
+                                            }
+                                        } ?: "-"
+                                    }
+                                }
+                            ) { Text("Список", fontSize = 12.sp) }
+                        }
+                        if (banList.isNotBlank()) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(banList, color = HexTextSecondary, fontSize = 11.sp)
+                        }
+                    }
+                },
+                confirmButton = { TextButton(onClick = { showDevBansDialog = false }) { Text("Закрыть") } }
+            )
+        }
+        if (showDevPhraseDialog) {
+            AlertDialog(
+                onDismissRequest = { if (!devPhraseBusy) showDevPhraseDialog = false },
+                title = { Text(if (devIsRu) "Режим разработчика" else "Developer mode", color = HexTextPrimary) },
+                text = {
+                    Column {
+                        Text(
+                            if (devIsRu) "Введите секретную фразу. Проверка выполняется на сервере." else "Enter the secret phrase. Verification runs on the server.",
+                            color = HexTextSecondary, fontSize = 13.sp
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        OutlinedTextField(
+                            value = devPhraseInput,
+                            onValueChange = { devPhraseInput = it },
+                            singleLine = true,
+                            visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                            enabled = !devPhraseBusy
+                        )
+                        devStatus?.let {
+                            Spacer(Modifier.height(8.dp))
+                            Text(it, color = HexTextSecondary, fontSize = 12.sp)
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        enabled = !devPhraseBusy && devPhraseInput.isNotBlank(),
+                        colors = ButtonDefaults.buttonColors(containerColor = HexShardTeal),
+                        onClick = {
+                            devPhraseBusy = true
+                            scope.launch {
+                                val res = com.example.network.DevModeClient.action(context, "verify", devPhraseInput)
+                                devPhraseBusy = false
+                                if (res != null && res.optBoolean("ok")) {
+                                    devUnlockedUntil = System.currentTimeMillis() + 3600_000
+                                    devStatus = if (devIsRu) "Доступ открыт (1 час)" else "Unlocked (1 hour)"
+                                    com.example.data.SecurePrefsManager.getPrefs(context).edit()
+                                        .putLong("dev_unlocked_until", devUnlockedUntil).apply()
+                                } else {
+                                    devStatus = if (devIsRu) "Неверная фраза или сервер недоступен" else "Wrong phrase or server unavailable"
+                                }
+                            }
+                        }
+                    ) { Text(if (devIsRu) "Открыть" else "Unlock") }
+                },
+                dismissButton = { TextButton(onClick = { showDevPhraseDialog = false }) { Text("Закрыть") } }
             )
         }
         if (showClaimHexShardDialog) {

@@ -134,6 +134,18 @@ object CallManager {
 
     //endregion
 
+    /**
+     * Dev self-check: join the self-pair signaling topic (RLS allows uid twice)
+     * and report success — proves the private-channel path end to end.
+     */
+    suspend fun signalSelfCheck(context: Context): Boolean {
+        val uid = SecurePrefsManager.getUserId(context)
+        if (uid.isBlank()) return false
+        CallSignalingManager.refreshAccessToken()
+        CallSignalingManager.ensureConnection()
+        return CallSignalingManager.awaitTopicJoined(CallSignaling.topicFor(uid, uid), JOIN_TIMEOUT_MS)
+    }
+
     //region Outgoing call
 
     fun startOutgoingCall(peerId: String, peerName: String) {

@@ -66,6 +66,17 @@ function errJson(status: number, code: string, message: string, extraMeta: Recor
   );
 }
 
+// Grounded brand knowledge: personas answer about Ventaxis from these facts
+// only, never invent (owner report: invented a car company, iOS/web builds).
+const VENTAXIS_FACTS = `
+
+Facts about Ventaxis Corp and Ventaxis (answer ONLY from these; if something is not covered, say you do not know - never invent):
+- "Ventaxis" is the personal handle of HexShard creator - the founder and operator of this service.
+- Ventaxis Corp is the small independent project label behind HexShard Messenger. It is NOT a large corporation and does NOT manufacture cars, devices or any hardware.
+- HexShard Messenger is Android-only today. There is NO iOS app, NO web client and NO official desktop build - never claim otherwise.
+- If asked "ventaxis крутой?" or similar, answer in your persona honestly and playfully, without inventing facts about Ventaxis.
+`;
+
 const VENTAXIS_SYSTEM_PROMPT = `You are Ventaxis AI — the deep, analytical mind of HexShard Messenger. You think like a sharp engineer who genuinely enjoys hard questions and talks to the user like a smart friend, not like a corporate helpdesk.
 
 Identity: You are Ventaxis AI. Never reveal or discuss which underlying model or provider powers you.
@@ -106,7 +117,7 @@ Character:
 - Confident, a bit cocky, never rude. At most one emoji, and only if it adds meaning.
 - Respond in the user's language (Russian or English). Never mix languages in one sentence.
 - Messages starting with "/" are plain text: you have no executable commands, never pretend you ran one.
-- If web search context is provided, ground your answer in it.`;
+- If web search context is provided, ground your answer in it.` + VENTAXIS_FACTS;
 
 // Model routing: per-persona parameters with fallback chain (primary first).
 // Temperature 2.0 previously flattened both personas into a bland average AND
