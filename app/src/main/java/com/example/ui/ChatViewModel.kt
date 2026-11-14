@@ -101,9 +101,13 @@ class ChatViewModel @Inject constructor(
         viewModelScope.launch {
             val peerId = chat.recipientId.ifBlank { chat.name }
             val profile = repository.fetchPeerProfile(peerId)
-                // Chats created before recipient ids existed carry only a display name:
-                // resolve it to a real account before giving up.
+                // Chats created before recipient ids existed carry only a display
+                // name ("oo"): resolve it, then fall through to global search so a
+                // partial match on username/display name still opens the profile.
                 ?: repository.resolveUser(chat.name)?.first?.let { repository.fetchPeerProfile(it) }
+                ?: repository.searchUsers(chat.name).firstOrNull()?.let {
+                    repository.fetchPeerProfile(it.userId)
+                }
             if (profile != null) {
                 _viewingPeerProfile.value = profile
             } else {

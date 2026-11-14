@@ -2031,17 +2031,7 @@ fun SettingsScreen(
                         icon = Icons.Default.SystemUpdate,
                         title = if (currentLang == AppLanguage.RUSSIAN) "Обновления и исправления" else "Updates and fixes",
                         subtitle = "${if (currentLang == AppLanguage.RUSSIAN) "Версия" else "Version"} ${BuildConfig.VERSION_NAME}",
-                        onClick = {
-                            // 7 taps within 15 s unlock the developer phrase dialog.
-                            val now = System.currentTimeMillis()
-                            devTapStamps = devTapStamps.filter { now - it < 15_000 } + now
-                            if (devTapStamps.size >= 7) {
-                                devTapStamps = emptyList()
-                                showDevPhraseDialog = true
-                            } else {
-                                showUpdateCenter = true
-                            }
-                        }
+                        onClick = { showUpdateCenter = true }
                     )
                 }
             }
@@ -2150,7 +2140,20 @@ fun SettingsScreen(
                     lineHeight = 17.sp
                 )
                 Spacer(modifier = Modifier.height(14.dp))
-                Text(strings.version, fontSize = 12.sp, color = HexTextTertiary)
+                Text(
+                    strings.version,
+                    fontSize = 12.sp,
+                    color = HexTextTertiary,
+                    modifier = Modifier.clickable {
+                        // Classic easter egg: 7 taps on the bottom version line.
+                        val now = System.currentTimeMillis()
+                        devTapStamps = devTapStamps.filter { now - it < 15_000 } + now
+                        if (devTapStamps.size >= 7) {
+                            devTapStamps = emptyList()
+                            showDevPhraseDialog = true
+                        }
+                    }
+                )
                 Text(
                     text = strings.developer,
                     fontSize = 12.sp,
