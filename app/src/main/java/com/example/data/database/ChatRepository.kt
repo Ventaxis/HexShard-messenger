@@ -273,9 +273,11 @@ open class ChatRepository(
             if (accountId.isBlank() || peerUid.isBlank()) return@withContext
             val chat = chatDao.getChatByRecipientId(peerUid, accountId) ?: return@withContext
             val now = System.currentTimeMillis()
+            // No emoji: the SansSerif typography renders emoji as tofu boxes on
+            // some devices, and this text is both bubble and chat-list preview.
             val text = when {
-                incoming -> if (isRussian) "📞 Пропущенный звонок" else "📞 Missed call"
-                else -> if (isRussian) "📞 Не дозвонился" else "📞 No answer"
+                incoming -> if (isRussian) "Пропущенный звонок" else "Missed call"
+                else -> if (isRussian) "Не дозвонился" else "No answer"
             }
             val timeStr = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(now))
             chatDao.insertMessage(MessageEntity(

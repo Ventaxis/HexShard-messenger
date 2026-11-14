@@ -446,7 +446,13 @@ class ChatViewModel @Inject constructor(
                 val msgId = repository.sendMessage(
                     chatId = cid,
                     sender = "me",
-                    text = if (type == "image") "📷 Photo" else "🎥 Video",
+                    // Plain words, no emoji: the SansSerif typography renders emoji
+                    // as tofu on some devices, and this text is stored/synced.
+                    text = if (type == "image") {
+                        if (LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN) "Фото" else "Photo"
+                    } else {
+                        if (LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN) "Видео" else "Video"
+                    },
                     isMe = true,
                     isAttachment = false,
                     timeStr = timeStr,
@@ -515,7 +521,7 @@ class ChatViewModel @Inject constructor(
                 val msgId = repository.sendMessage(
                     chatId = cid,
                     sender = "me",
-                    text = "🎤 Voice message",
+                    text = if (LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN) "Голосовое сообщение" else "Voice message",
                     isMe = true,
                     isAttachment = false,
                     timeStr = timeStr,

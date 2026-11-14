@@ -2140,11 +2140,38 @@ fun MessageBubble(
                                 onDownloadMedia = { url -> onDownloadMedia(url, message.idempotencyKey) }
                             )
                         } else {
-                            if (message.isAttachment) {
-                                AttachmentPayload(isDark = isDark)
+                            // Media rows whose URL never made it into the encrypted
+                            // envelope (senders before v1.16.1) render as a labeled
+                            // stub card; their raw "📷 Photo" text is suppressed —
+                            // emoji turn to tofu under the SansSerif typography.
+                            val mediaStubType = when (message.type) {
+                                "image", "video", "voice" -> message.type
+                                else -> null
+                            }
+                            val isMediaStub = mediaStubType != null &&
+                                message.isAttachment && message.audioUrl == null
+                            if (isMediaStub) {
+                                AttachmentPayload(
+                                    label = when (mediaStubType) {
+                                        "image" -> strings.photo
+                                        "video" -> strings.video
+                                        else -> strings.voiceMessage
+                                    },
+                                    subtitle = strings.mediaUnavailable,
+                                    isDark = isDark
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                            } else if (message.isAttachment) {
+                                AttachmentPayload(
+                                    label = strings.attachment,
+                                    subtitle = message.text.takeIf { it.isNotBlank() && it != "Attachment" }.orEmpty(),
+                                    isDark = isDark
+                                )
                                 Spacer(modifier = Modifier.height(4.dp))
                             }
-                            if (message.text.isNotBlank() && (!message.isAttachment || message.text != "Attachment")) {
+                            if (message.text.isNotBlank() && !isMediaStub &&
+                                (!message.isAttachment || message.text != "Attachment")
+                            ) {
                                 val rawText = message.text
                                 val displayText = when {
                                     message.idempotencyKey.startsWith("init_saved_msg_") -> strings.welcomeSavedMessages
@@ -2338,8 +2365,9 @@ fun MessageBubble(
 }
 
 @Composable
-fun AttachmentPayload(isDark: Boolean) {
-    // Elegant attachment banner frame
+fun AttachmentPayload(label: String, subtitle: String, isDark: Boolean) {
+    // Elegant attachment banner frame — real data only (vector icon + label),
+    // never a hardcoded mockup: a leaked placeholder looked like a fake PDF card.
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -2357,18 +2385,20 @@ fun AttachmentPayload(isDark: Boolean) {
             Spacer(modifier = Modifier.width(8.dp))
             Column {
                 Text(
-                    text = "HexShard_mockups.pdf",
+                    text = label,
                     color = if (isDark) Color.White else Color.Black,
                     fontWeight = FontWeight.Medium,
                     fontSize = 12.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Text(
-                    text = "4.2 MB • PDF Document",
-                    color = if (isDark) DarkTxtSec else LightTxtSec,
-                    fontSize = 10.sp
-                )
+                if (subtitle.isNotBlank()) {
+                    Text(
+                        text = subtitle,
+                        color = if (isDark) DarkTxtSec else LightTxtSec,
+                        fontSize = 10.sp
+                    )
+                }
             }
         }
     }

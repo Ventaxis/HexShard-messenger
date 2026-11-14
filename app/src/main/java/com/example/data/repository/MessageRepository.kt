@@ -364,13 +364,13 @@ class MessageRepository(
                 else -> null
             }
 
-            val payloadToEncrypt = if (isAttachment && audioUrl != null) {
-                JSONObject().apply {
-                    put("text", text)
-                    put("audioUrl", audioUrl)
-                    put("type", type)
-                    if (duration != null) put("duration", duration)
-                }.toString()
+            // Media URL must travel INSIDE the encrypted payload: the server row keeps
+            // only the bare type flag, and the receiver parses audioUrl/type/duration
+            // from the decrypted JSON (SyncManager.resolveMessageContent). Media and
+            // voice senders pass isAttachment=false, so the old isAttachment gate
+            // dropped the URL entirely and the peer rendered a broken attachment card.
+            val payloadToEncrypt = if (audioUrl != null) {
+                com.example.util.MediaMessagePayload.encode(text, audioUrl, type, duration)
             } else {
                 text
             }

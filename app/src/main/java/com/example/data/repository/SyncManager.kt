@@ -695,11 +695,17 @@ class SyncManager(
         )
         val rowId = chatDao.insertMessageIfNotExists(msg)
         return if (rowId > 0) {
+            // Previews are plain localized words: emoji in persisted strings render
+            // as tofu boxes under the app's SansSerif typography on some devices.
+            val isRu = com.example.ui.LocalizationManager.currentLanguage.value == com.example.ui.AppLanguage.RUSSIAN
             val previewText = when (content.resolvedType) {
-                "voice" -> "🎤 Voice message"
-                "image" -> "📷 Photo"
-                "location" -> "📍 Location"
-                else -> if (content.isDecryptionError) "⚠️ Corrupted message" else TextSanitizer.stripMarkdown(content.resolvedText)
+                "voice" -> if (isRu) "Голосовое сообщение" else "Voice message"
+                "image" -> if (isRu) "Фото" else "Photo"
+                "video" -> if (isRu) "Видео" else "Video"
+                "location" -> if (isRu) "Геолокация" else "Location"
+                else -> if (content.isDecryptionError) {
+                    if (isRu) "Повреждённое сообщение" else "Corrupted message"
+                } else TextSanitizer.stripMarkdown(content.resolvedText)
             }
             chatDao.updateChatPreview(resolvedChatId, previewText, record.timeStr, System.currentTimeMillis(), currentUserId)
             if (token.isNotBlank() && !content.isMe && !content.isDecryptionError && content.signatureValid && !record.isAiConversation) {
