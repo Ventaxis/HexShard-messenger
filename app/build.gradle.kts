@@ -4,9 +4,11 @@ plugins {
   alias(libs.plugins.google.devtools.ksp)
   alias(libs.plugins.roborazzi)
   alias(libs.plugins.secrets)
-  // FCM push: legacy apply — Gradle 9 config-cache ignores cross-project version inheritance.
-  apply(plugin = "com.google.gms.google-services")
 }
+
+// FCM push: legacy apply — Gradle 9 config-cache ignores cross-project
+// plugin version inheritance from the root build file.
+apply(plugin = "com.google.gms.google-services")
 
 android {
   namespace = "com.example"
