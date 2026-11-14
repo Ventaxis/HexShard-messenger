@@ -130,7 +130,7 @@ class UserRepository(
     }
 
     /** Re-pins the current server key for a peer after the user acknowledged a rotation. */
-    fun acceptRotatedKeys(peerId: String) {
+    suspend fun acceptRotatedKeys(peerId: String) {
         val ctx = context ?: return
         val accountId = getCurrentUserId()
         if (accountId.isBlank()) return
