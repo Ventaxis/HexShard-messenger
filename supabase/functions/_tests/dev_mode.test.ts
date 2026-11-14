@@ -157,7 +157,7 @@ Deno.test("test_avatar uploads and then deletes (nothing persists)", async () =>
 Deno.test("failed phrases count toward the rate limit", async () => {
   stubFetch((url) => {
     if (url.includes("/auth/v1/user")) return new Response(JSON.stringify(authOk), { status: 200 });
-    if (url.includes("/rest/v1/dev_audit")) return new Response("{}", { status: 201, headers: { "content-range": "*/30" } });
+    if (url.includes("/rest/v1/rpc/dev_rate_limit")) return new Response("false", { status: 200 });
     return undefined;
   });
   const r = await handler(req("verify", "wrong-phrase"));
@@ -173,20 +173,14 @@ Deno.test("unknown action returns 400", async () => {
 });
 
 Deno.test("every action is rate limited after the hourly cap", async () => {
-  let auditCount = 0;
-  stubFetch((url, method, body) => {
+  stubFetch((url) => {
     if (url.includes("/auth/v1/user")) return new Response(JSON.stringify(authOk), { status: 200 });
-    if (url.includes("/rest/v1/dev_audit")) {
-      if (method === "POST") { auditCount++; return new Response("{}", { status: 201 }); }
-      // head-count query answers the cap for this test
-      return new Response(JSON.stringify({}), { status: 200, headers: { "content-range": `*/${30}` } });
-    }
+    if (url.includes("/rest/v1/rpc/dev_rate_limit")) return new Response("false", { status: 200 });
     return undefined;
   });
   const r = await handler(req("verify", "correct-horse-battery"));
   assertEquals(r.status, 429);
   assertEquals((await r.json()).code, "DEV_RATE_LIMITED");
-  void auditCount;
 });
 
 globalThis.fetch = originalFetch;

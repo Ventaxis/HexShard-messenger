@@ -67,15 +67,18 @@ function serviceClient() {
   return createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
 }
 
-async function rateLimited(uid: string): Promise<boolean> {
+async function rateLimited(uid: string, action: string): Promise<boolean> {
+  // Review wave-2: count-then-insert was TOCTOU-prone across isolates and
+  // failed open when dev_audit was unreachable. One atomic SECURITY DEFINER
+  // RPC checks + inserts under an advisory lock; a DB error fails CLOSED.
   const admin = serviceClient();
-  const since = new Date(Date.now() - 3600_000).toISOString();
-  const { count } = await admin
-    .from("dev_audit")
-    .select("id", { count: "exact", head: true })
-    .eq("account_id", uid)
-    .gte("created_at", since);
-  return (count ?? 0) >= DEV_RATE_LIMIT_PER_HOUR;
+  const { data, error } = await admin.rpc("dev_rate_limit", {
+    p_account_id: uid,
+    p_action: action,
+    p_details: {},
+  });
+  if (error) return true;
+  return data === false;
 }
 
 async function audit(uid: string, action: string, details: Record<string, unknown>): Promise<void> {
@@ -180,11 +183,10 @@ export async function handler(req: Request): Promise<Response> {
   // Review F1 (HIGH): the limiter MUST run before phrase verification —
   // otherwise failed attempts are never throttled and SECRET_WORD can be
   // brute-forced online. verify_failed rows count toward the same cap.
-  if (await rateLimited(user.uid)) {
+  if (await rateLimited(user.uid, action)) {
     return errJson(429, "DEV_RATE_LIMITED", "Too many developer actions this hour");
   }
   if (!(await verifyPhrase(phrase))) {
-    await audit(user.uid, "verify_failed", { action });
     return errJson(403, "DEV_BAD_PHRASE", "Invalid developer phrase");
   }
 
