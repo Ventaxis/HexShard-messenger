@@ -3243,6 +3243,8 @@ fun MediaPayload(
 ) {
     var mediaFile by remember { mutableStateOf<java.io.File?>(null) }
     var isLoading by remember { mutableStateOf(true) }
+    var showViewer by remember { mutableStateOf(false) }
+    var saveStatus by remember { mutableStateOf<String?>(null) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
@@ -3258,10 +3260,56 @@ fun MediaPayload(
         isLoading = false
     }
 
+    // Owner report 2026-11-14: vertical photos were cropped into a fixed
+    // 200dp box. Decode the real dimensions and let the bubble keep the
+    // image's own aspect ratio (clamped so extreme panoramas stay usable).
+    val imageAspect: Float? = remember(mediaFile) {
+        mediaFile?.let { file ->
+            val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            android.graphics.BitmapFactory.decodeFile(file.absolutePath, opts)
+            if (opts.outWidth > 0 && opts.outHeight > 0) {
+                (opts.outWidth.toFloat() / opts.outHeight.toFloat())
+            } else null
+        }
+    }
+    val bubbleHeight = when {
+        type != "image" -> 200.dp
+        imageAspect != null && imageAspect >= 1f -> (320.dp / imageAspect).coerceIn(120.dp, 320.dp)
+        imageAspect != null -> (420.dp * imageAspect).coerceIn(200.dp, 420.dp)
+        else -> 200.dp
+    }
+
+    if (showViewer && mediaFile != null && type == "image") {
+        androidx.compose.ui.window.Dialog(onDismissRequest = { showViewer = false }) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black)
+                    .clickable { showViewer = false },
+                contentAlignment = Alignment.Center
+            ) {
+                coil.compose.AsyncImage(
+                    model = mediaFile,
+                    contentDescription = "Full screen image",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Fit
+                )
+                Text(
+                    text = if (saveStatus != null) saveStatus!! else if (isDark) "Тапни, чтобы закрыть" else "Tap to close",
+                    color = Color.White.copy(alpha = 0.7f),
+                    fontSize = 12.sp,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 24.dp)
+                )
+            }
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(200.dp)
+            .height(bubbleHeight)
             .clip(RoundedCornerShape(8.dp))
             .background(Color.Black.copy(alpha = 0.1f)),
         contentAlignment = Alignment.Center
@@ -3273,7 +3321,9 @@ fun MediaPayload(
                 coil.compose.AsyncImage(
                     model = mediaFile,
                     contentDescription = "Image",
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clickable { showViewer = true },
                     contentScale = androidx.compose.ui.layout.ContentScale.Crop
                 )
             } else {
@@ -3318,6 +3368,28 @@ fun MediaPayload(
                     )
                 }
             }
+            // Save button: MediaStore on API 29+ (no permission), app dir fallback.
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
+                    .size(34.dp)
+                    .background(Color.Black.copy(alpha = 0.55f), CircleShape)
+                    .clickable {
+                        val file = mediaFile ?: return@clickable
+                        coroutineScope.launch {
+                            saveStatus = saveMediaToGallery(context, file, type)
+                        }
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Download,
+                    contentDescription = if (saveStatus != null) saveStatus else "Save media",
+                    tint = Color.White,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
         } else {
             Icon(
                 imageVector = Icons.Default.BrokenImage,
@@ -3325,6 +3397,42 @@ fun MediaPayload(
                 tint = txtColor
             )
         }
+    }
+}
+
+/** Saves a decrypted media file to the device gallery (MediaStore) with a
+ *  fallback to the app's external files dir. Returns a short user-facing status. */
+fun saveMediaToGallery(context: android.content.Context, file: java.io.File, type: String): String {
+    return try {
+        val isImage = type == "image"
+        val collection = if (android.os.Build.VERSION.SDK_INT >= 29) {
+            if (isImage) android.provider.MediaStore.Images.Media.getContentUri(
+                android.provider.MediaStore.VOLUME_EXTERNAL_PRIMARY
+            ) else android.provider.MediaStore.Video.Media.getContentUri(
+                android.provider.MediaStore.VOLUME_EXTERNAL_PRIMARY
+            )
+        } else {
+            if (isImage) android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            else android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        }
+        val values = android.content.ContentValues().apply {
+            put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, "HexShard_${System.currentTimeMillis()}.${if (isImage) "jpg" else "mp4"}")
+            put(android.provider.MediaStore.MediaColumns.MIME_TYPE, if (isImage) "image/jpeg" else "video/mp4")
+        }
+        val uri = context.contentResolver.insert(collection, values)
+        if (uri != null) {
+            context.contentResolver.openOutputStream(uri)?.use { out ->
+                file.inputStream().use { it.copyTo(out) }
+            }
+            "Сохранено в галерею"
+        } else {
+            val dir = java.io.File(context.getExternalFilesDir(null), "media").apply { mkdirs() }
+            file.copyTo(java.io.File(dir, file.name), overwrite = true)
+            "Сохранено в папку приложения"
+        }
+    } catch (e: Exception) {
+        timber.log.Timber.e(e, "Failed to save media")
+        "Не удалось сохранить"
     }
 }
 
