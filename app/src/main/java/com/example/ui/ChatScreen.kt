@@ -1241,6 +1241,18 @@ fun ChatArea(
     val canCallRecipient = canInitiateCall(chat)
     val displayName = if (isSelfChat) strings.savedMessages else if (isAiChat) "Hexagon AI" else chat.name
     val displayAva = if (isSelfChat) (if (isRussian) "ИЗ" else "SM") else if (isAiChat) (if (isHexagonActive) "HX" else "VX") else chat.ava
+
+    // 1:1 audio call: RECORD_AUDIO is requested BEFORE dialing, then the WebRTC
+    // flow is started through the call engine (CallManager).
+    val micPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            com.example.calls.CallManager.startOutgoingCall(chat.recipientId, displayName)
+        } else {
+            Toast.makeText(context, if (isRussian) "Нет доступа к микрофону" else "Microphone access denied", Toast.LENGTH_SHORT).show()
+        }
+    }
     val statusText = if (isTyping) {
         strings.typing
     } else if (isSelfChat) {
@@ -1433,6 +1445,16 @@ fun ChatArea(
 
     // Quick action items icons
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (canCallRecipient) {
+            IconButton(onClick = { micPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO) }) {
+                Icon(
+                    Icons.Default.PhoneInTalk,
+                    contentDescription = if (isRussian) "Аудиозвонок" else "Audio call",
+                    tint = txtSec,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
         Box {
             IconButton(onClick = { showWallpaperMenu = true }) {
                 Icon(Icons.Default.Wallpaper, contentDescription = if (isRussian) "Обои чата" else "Chat wallpaper", tint = txtSec, modifier = Modifier.size(20.dp))

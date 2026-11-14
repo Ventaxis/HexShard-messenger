@@ -41,3 +41,7 @@
 -repackageclasses com.ventaxiscorp.hexshard.obf
 -allowaccessmodification
 
+
+# WebRTC native/reflective bindings (io.getstream:stream-webrtc-android)
+-keep class org.webrtc.** { *; }
+-dontwarn org.webrtc.**

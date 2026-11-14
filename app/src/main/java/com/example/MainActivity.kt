@@ -21,7 +21,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import com.example.calls.CallManager
 import com.example.ui.AppNavigator
+import com.example.ui.CallOverlay
 import com.example.ui.ChatViewModel
 import com.example.ui.LocalAppLanguage
 import com.example.ui.LocalStrings
@@ -47,6 +49,9 @@ class MainActivity : ComponentActivity() {
             // Initialize Localization (defaults to English, persists user language choice)
             LocalizationManager.init(this)
 
+            // Initialize the WebRTC call engine (factory + signaling bootstrap)
+            CallManager.init(applicationContext)
+
             // Enable edge to edge drawing (safe statusBars and navigationBars)
             enableEdgeToEdge()
             androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -55,6 +60,13 @@ class MainActivity : ComponentActivity() {
             setContent {
                 val currentLang by LocalizationManager.currentLanguage.collectAsState()
                 val strings = LocalizationManager.getStrings(currentLang)
+
+                // Keep one signaling topic per direct contact joined so incoming
+                // calls ring no matter which screen the user is on
+                val chats by viewModel.chats.collectAsState()
+                androidx.compose.runtime.LaunchedEffect(chats) {
+                    CallManager.updateWatchlist(chats)
+                }
 
                 CompositionLocalProvider(
                     LocalAppLanguage provides currentLang,
@@ -65,6 +77,10 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.fillMaxSize()
                         ) {
                             AppNavigator(viewModel = viewModel)
+
+                            // Fullscreen call overlay rendered above all app content
+                            // (also while the user is inside a chat)
+                            CallOverlay()
 
                             val currentPendingProfile by viewModel.pendingProfileConfirmation.collectAsState()
                             currentPendingProfile?.let { p ->

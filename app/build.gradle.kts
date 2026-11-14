@@ -103,6 +103,8 @@ dependencies {
   implementation(libs.sqlcipher)
   implementation(libs.sqlite)
   implementation(libs.security.crypto)
+  // WebRTC peer-to-peer audio/video calls (Maven Central fork of google-webrtc)
+  implementation("io.getstream:stream-webrtc-android:1.1.3")
   implementation(libs.zxing.core)
   implementation(libs.play.services.location)
   implementation(libs.coil.compose)
