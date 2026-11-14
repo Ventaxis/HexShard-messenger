@@ -177,12 +177,15 @@ export async function handler(req: Request): Promise<Response> {
   const phrase = String(body.phrase ?? "");
   const params = (body.params as Record<string, unknown>) ?? {};
 
+  // Review F1 (HIGH): the limiter MUST run before phrase verification —
+  // otherwise failed attempts are never throttled and SECRET_WORD can be
+  // brute-forced online. verify_failed rows count toward the same cap.
+  if (await rateLimited(user.uid)) {
+    return errJson(429, "DEV_RATE_LIMITED", "Too many developer actions this hour");
+  }
   if (!(await verifyPhrase(phrase))) {
     await audit(user.uid, "verify_failed", { action });
     return errJson(403, "DEV_BAD_PHRASE", "Invalid developer phrase");
-  }
-  if (await rateLimited(user.uid)) {
-    return errJson(429, "DEV_RATE_LIMITED", "Too many developer actions this hour");
   }
 
   switch (action) {

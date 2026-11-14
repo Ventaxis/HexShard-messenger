@@ -15,8 +15,8 @@ android {
     applicationId = "com.ventaxiscorp.hexshard"
     minSdk = 24
     targetSdk = 36
-    versionCode = 20
-    versionName = "1.13.2"
+    versionCode = 21
+    versionName = "1.13.3"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

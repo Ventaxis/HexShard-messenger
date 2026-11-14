@@ -107,15 +107,15 @@ fun SettingsScreen(
     var showChangeNumberConfirm by remember { mutableStateOf(false) }
     val devIsRu = LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN
     var devTapStamps by remember { mutableStateOf(listOf<Long>()) }
-    var showDevPhraseDialog by remember { mutableStateOf(false) }
+    var showDevPhraseDialog by rememberSaveable { mutableStateOf(false) }
     var devPhraseInput by remember { mutableStateOf("") }
     var devPhraseBusy by remember { mutableStateOf(false) }
     var devUnlockedUntil by remember { mutableStateOf(0L) }
     var devStatus by remember { mutableStateOf<String?>(null) }
-    var showDevBansDialog by remember { mutableStateOf(false) }
+    var showDevBansDialog by rememberSaveable { mutableStateOf(false) }
     var banUsername by remember { mutableStateOf("") }
     var banBusy by remember { mutableStateOf(false) }
-    var banList by remember { mutableStateOf("") }
+    var banList by rememberSaveable { mutableStateOf("") }
 
     fun banStatus(r: org.json.JSONObject?, okRu: String, failRu: String) {
         devStatus = if (r != null && r.optBoolean("ok")) okRu else failRu + ": " + (r?.optString("__error") ?: r?.optString("error") ?: "")
@@ -2260,7 +2260,7 @@ fun SettingsScreen(
                 onDismissRequest = { if (!banBusy) showDevBansDialog = false },
                 title = { Text(if (devIsRu) "Баны" else "Bans", color = HexTextPrimary) },
                 text = {
-                    Column {
+                    Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
                         OutlinedTextField(
                             value = banUsername, onValueChange = { banUsername = it },
                             singleLine = true, enabled = !banBusy,
@@ -2275,9 +2275,12 @@ fun SettingsScreen(
                                 onClick = {
                                     banBusy = true
                                     scope.launch {
-                                        val r = com.example.network.DevModeClient.action(context, "ban", devPhraseInput, org.json.JSONObject().put("username", banUsername).put("days", 7))
-                                        banBusy = false
-                                        banStatus(r, "Забанен на 7 дней", "Бан не удался")
+                                        try {
+                                            val r = com.example.network.DevModeClient.action(context, "ban", devPhraseInput, org.json.JSONObject().put("username", banUsername).put("days", 7))
+                                            banStatus(r, "Забанен на 7 дней", "Бан не удался")
+                                        } finally {
+                                            banBusy = false
+                                        }
                                     }
                                 }
                             ) { Text("Бан 7д", fontSize = 12.sp) }
@@ -2287,9 +2290,12 @@ fun SettingsScreen(
                                 onClick = {
                                     banBusy = true
                                     scope.launch {
-                                        val r = com.example.network.DevModeClient.action(context, "unban", devPhraseInput, org.json.JSONObject().put("username", banUsername))
-                                        banBusy = false
-                                        banStatus(r, "Разбанен", "Разбан не удался")
+                                        try {
+                                            val r = com.example.network.DevModeClient.action(context, "unban", devPhraseInput, org.json.JSONObject().put("username", banUsername))
+                                            banStatus(r, "Разбанен", "Разбан не удался")
+                                        } finally {
+                                            banBusy = false
+                                        }
                                     }
                                 }
                             ) { Text("Разбан", fontSize = 12.sp) }
@@ -2300,7 +2306,6 @@ fun SettingsScreen(
                                     banBusy = true
                                     scope.launch {
                                         val r = com.example.network.DevModeClient.action(context, "list_banned", devPhraseInput)
-                                        banBusy = false
                                         val arr = r?.optJSONArray("banned")
                                         banList = arr?.let { a ->
                                             (0 until a.length()).joinToString("\n") { i ->
@@ -2308,6 +2313,8 @@ fun SettingsScreen(
                                                 "@" + o.optString("username", o.optString("id")) + " до " + o.optString("banned_until")
                                             }
                                         } ?: "-"
+                                    } finally {
+                                        banBusy = false
                                     }
                                 }
                             ) { Text("Список", fontSize = 12.sp) }
@@ -2335,6 +2342,7 @@ fun SettingsScreen(
                         OutlinedTextField(
                             value = devPhraseInput,
                             onValueChange = { devPhraseInput = it },
+                            label = { Text(if (devIsRu) "Секретная фраза" else "Secret phrase") },
                             singleLine = true,
                             visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
                             enabled = !devPhraseBusy
@@ -2352,15 +2360,18 @@ fun SettingsScreen(
                         onClick = {
                             devPhraseBusy = true
                             scope.launch {
-                                val res = com.example.network.DevModeClient.action(context, "verify", devPhraseInput)
-                                devPhraseBusy = false
-                                if (res != null && res.optBoolean("ok")) {
-                                    devUnlockedUntil = System.currentTimeMillis() + 3600_000
-                                    devStatus = if (devIsRu) "Доступ открыт (1 час)" else "Unlocked (1 hour)"
-                                    com.example.data.SecurePrefsManager.getPrefs(context).edit()
-                                        .putLong("dev_unlocked_until", devUnlockedUntil).apply()
-                                } else {
-                                    devStatus = if (devIsRu) "Неверная фраза или сервер недоступен" else "Wrong phrase or server unavailable"
+                                try {
+                                    val res = com.example.network.DevModeClient.action(context, "verify", devPhraseInput)
+                                    if (res != null && res.optBoolean("ok")) {
+                                        devUnlockedUntil = System.currentTimeMillis() + 3600_000
+                                        devStatus = if (devIsRu) "Доступ открыт (1 час)" else "Unlocked (1 hour)"
+                                        com.example.data.SecurePrefsManager.getPrefs(context).edit()
+                                            .putLong("dev_unlocked_until", devUnlockedUntil).apply()
+                                    } else {
+                                        devStatus = if (devIsRu) "Неверная фраза или сервер недоступен" else "Wrong phrase or server unavailable"
+                                    }
+                                } finally {
+                                    devPhraseBusy = false
                                 }
                             }
                         }

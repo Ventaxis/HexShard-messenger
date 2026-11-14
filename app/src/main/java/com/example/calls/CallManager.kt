@@ -311,7 +311,13 @@ object CallManager {
 
     private fun startSignalCollection() {
         scope.launch {
-            CallSignalingManager.signals.collect { signal -> handleSignal(signal) }
+            CallSignalingManager.signals.collect { signal ->
+                try {
+                    handleSignal(signal)
+                } catch (e: Exception) {
+                    Timber.w(e, "Signal handling failed — continuing")
+                }
+            }
         }
     }
 
@@ -358,7 +364,7 @@ object CallManager {
                 ringTimeoutJob = scope.launch {
                     delay(RING_TIMEOUT_MS)
                     if (_state.value is CallState.Ringing) {
-                        endCall("missed_call", sendBye = false)
+                        endCall("missed_call", sendBye = true)
                     }
                 }
             }
@@ -656,8 +662,13 @@ object CallManager {
 
     //region Teardown
 
-    private fun endCall(reason: String, sendBye: Boolean) {
-        if (isEnding && _state.value is CallState.Ended) return
+    private val endCallLock = Any()
+
+    private fun endCall(reason: String, sendBye: Boolean) = synchronized(endCallLock) {
+        // Review F4: observers run on WebRTC threads while user actions run on the
+        // single dispatcher — the whole teardown must be serialized or both sides
+        // pass the guard and double-dispose the native peer connection.
+        if (isEnding && _state.value is CallState.Ended) return@synchronized
         isEnding = true
 
         val byeUid = peerUid
@@ -693,22 +704,24 @@ object CallManager {
         pendingRemoteOffer = null
         synchronized(bufferedCandidates) { bufferedCandidates.clear() }
         callId = ""
-        peerUid = ""
         peerName = ""
         isMicMuted.value = false
 
         Timber.i("Call ended (reason=$reason)")
-        // Missed-call bookkeeping: an incoming ring that nobody answered or an
-        // outgoing call nobody picked up leaves a local chat entry.
+        // Missed-call bookkeeping (review ERR-1): capture provenance BEFORE the
+        // fields are cleared, and only for calls that actually reached the peer —
+        // a signaling failure never delivered the call, so no chat entry.
         val firedPeer = peerUid
+        val firedIncoming = callWasIncoming
+        val firedAnswered = callWasAnswered
         if (firedPeer.isNotBlank()) {
             val preState = _state.value
-            val incoming = callWasIncoming
-            val answered = callWasAnswered
             val unanswered = (preState is CallState.Ringing) ||
-                (preState is CallState.Calling && !answered)
-            if (unanswered) onCallEvent?.invoke(firedPeer, incoming, answered)
+                (preState is CallState.Calling && !firedAnswered && reason == "call_ended")
+            if (unanswered) onCallEvent?.invoke(firedPeer, firedIncoming, firedAnswered)
         }
+        peerUid = ""
+        peerName = ""
         _state.value = CallState.Ended(reason)
         scheduleEndedReset()
     }

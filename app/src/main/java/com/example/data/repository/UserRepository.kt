@@ -135,10 +135,14 @@ class UserRepository(
         val accountId = getCurrentUserId()
         if (accountId.isBlank()) return
         try {
-            val ecdh = publicKeyCache[peerId]
-            val sign = signingKeyCache[peerId]
-            if (ecdh != null) PeerKeyTrustStore.forceRepinEcdhKey(ctx, accountId, peerId, ecdh.key.encoded)
-            if (sign != null) PeerKeyTrustStore.forceRepinSigningKey(ctx, accountId, peerId, sign.key.encoded)
+            // Review F5 (HIGH): caches are process-local and empty after restart —
+            // re-pin must fetch the SERVED keys from the server, not silently no-op.
+            publicKeyCache.remove(peerId)
+            signingKeyCache.remove(peerId)
+            val ecdh = getOrFetchUserPublicKey(peerId)
+            val sign = getOrFetchUserSigningKey(peerId)
+            if (ecdh != null) PeerKeyTrustStore.forceRepinEcdhKey(ctx, accountId, peerId, ecdh.encoded)
+            if (sign != null) PeerKeyTrustStore.forceRepinSigningKey(ctx, accountId, peerId, sign.encoded)
         } catch (e: Exception) {
             Timber.w(e, "Failed to accept rotated peer keys")
         }

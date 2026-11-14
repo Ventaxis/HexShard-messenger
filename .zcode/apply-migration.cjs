@@ -1,7 +1,9 @@
 // Usage: node .zcode/apply-migration.cjs <sql-file-path> [--rollback]
 // Runs the SQL file against production via the Management API. Values never printed.
 const fs = require('fs');
-for (const line of fs.readFileSync('C:/Users/макс/Desktop/secrets/HexShard/.env', 'utf8').split(/\r?\n/)) {
+// Path comes from env when set — the absolute local topology is not committed.
+const secretsPath = process.env.HEXSHARD_SECRETS_PATH || 'C:/Users/макс/Desktop/secrets/HexShard/.env';
+for (const line of fs.readFileSync(secretsPath, 'utf8').split(/\r?\n/)) {
   const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
   if (match) process.env[match[1]] = match[2].trim().replace(/^["']|["']$/g, '');
 }

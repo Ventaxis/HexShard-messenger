@@ -154,6 +154,17 @@ Deno.test("test_avatar uploads and then deletes (nothing persists)", async () =>
   assertEquals(j.deleted, true);
 });
 
+Deno.test("failed phrases count toward the rate limit", async () => {
+  stubFetch((url) => {
+    if (url.includes("/auth/v1/user")) return new Response(JSON.stringify(authOk), { status: 200 });
+    if (url.includes("/rest/v1/dev_audit")) return new Response("{}", { status: 201, headers: { "content-range": "*/30" } });
+    return undefined;
+  });
+  const r = await handler(req("verify", "wrong-phrase"));
+  assertEquals(r.status, 429);
+  assertEquals((await r.json()).code, "DEV_RATE_LIMITED");
+});
+
 Deno.test("unknown action returns 400", async () => {
   stubFetch((url) => url.includes("/auth/v1/user") ? new Response(JSON.stringify(authOk), { status: 200 }) : undefined);
   const r = await handler(req("launch_missiles", "correct-horse-battery"));

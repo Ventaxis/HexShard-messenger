@@ -32,6 +32,12 @@ import com.example.ui.theme.MyApplicationTheme
 
 class MainActivity : ComponentActivity() {
 
+    override fun onDestroy() {
+        // Review LEAK-3: the singleton must not retain a destroyed Activity/VM graph.
+        com.example.calls.CallManager.onCallEvent = null
+        super.onDestroy()
+    }
+
     private val viewModel: ChatViewModel by lazy {
         val appComponent = (application as HexShardApplication).appComponent
         ViewModelProvider(this, object : ViewModelProvider.Factory {
