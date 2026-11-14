@@ -377,7 +377,11 @@ class UserRepository(
                     val fullAva = if (ava != null && !ava.startsWith("http") && !ava.startsWith("data:")) {
                         "$baseUrl/storage/v1/object/public/avatars/$ava"
                     } else ava
-                    val bgPath = obj.optString("profile_background_path", "").takeIf { it.isNotBlank() && it != "null" }
+                    // Background lives in the public profile-backgrounds bucket — build
+                    // the full URL, a bare path cannot be loaded by Coil.
+                    val bgPath = obj.optString("profile_background_path", "")
+                        .takeIf { it.isNotBlank() && it != "null" }
+                        ?.let { if (it.startsWith("http")) it else "$baseUrl/storage/v1/object/public/profile-backgrounds/$it" }
                     val bgType = obj.optString("profile_background_type", "").takeIf { it.isNotBlank() && it != "null" }
                     val bio = obj.optString("bio", "")
                     val dob = obj.optString("date_of_birth", "")

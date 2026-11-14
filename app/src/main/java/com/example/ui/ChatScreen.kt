@@ -150,6 +150,10 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
         viewModel.onAccountChanged()
     }
 
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        com.example.data.PeerAvatarStore.init(context)
+    }
+
     // System back must navigate up (close the open chat first), not exit the app.
     val selectedIdForBack by viewModel.selectedChatId.collectAsStateWithLifecycle()
     androidx.activity.compose.BackHandler(enabled = selectedIdForBack != null) {
@@ -164,6 +168,10 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
             val isWide = maxWidth > 640.dp
             
             val chats by viewModel.chats.collectAsStateWithLifecycle()
+            val peerAvatars by com.example.data.PeerAvatarStore.urls.collectAsStateWithLifecycle()
+            androidx.compose.runtime.LaunchedEffect(chats) {
+                viewModel.refreshPeerAvatars(chats, context)
+            }
             val selectedId by viewModel.selectedChatId.collectAsStateWithLifecycle()
             var wallpaperRefresh by remember { mutableIntStateOf(0) }
             val activeWallpaperChat = chats.find { it.id == selectedId }
@@ -812,6 +820,9 @@ fun ChatListItem(
         isAiChat -> SolidColor(HexShardTeal)
         else -> SolidColor(HexShardTeal)
     }
+    // Owner request: real avatars in the chat list (initials only as fallback).
+    val peerAvatars by com.example.data.PeerAvatarStore.urls.collectAsStateWithLifecycle()
+    val peerAvatarUrl = peerAvatars[chat.recipientId]
     
     Box {
         Row(
@@ -837,7 +848,16 @@ fun ChatListItem(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(modifier = Modifier.size(44.dp)) {
-                Box(
+                if (peerAvatarUrl != null) {
+                    coil.compose.AsyncImage(
+                        model = peerAvatarUrl,
+                        contentDescription = chat.name,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(CircleShape),
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                    )
+                } else Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(
@@ -1386,7 +1406,19 @@ fun ChatArea(
 
                     // Compact Avatar
                     Box(modifier = Modifier.size(38.dp).clickable(enabled = !isSelfChat && !isAiChat, onClick = onOpenProfile)) {
-        Box(
+        // Owner request: real avatar in the chat header (initials fallback).
+        val peerAvatars by com.example.data.PeerAvatarStore.urls.collectAsStateWithLifecycle()
+        val headerAvatarUrl = peerAvatars[chat.recipientId]
+        if (headerAvatarUrl != null) {
+            coil.compose.AsyncImage(
+                model = headerAvatarUrl,
+                contentDescription = chat.name,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(CircleShape),
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop
+            )
+        } else Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(

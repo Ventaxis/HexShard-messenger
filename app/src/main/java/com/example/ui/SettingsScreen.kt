@@ -2371,7 +2371,13 @@ fun SettingsScreen(
                                         com.example.data.SecurePrefsManager.getPrefs(context).edit()
                                             .putLong("dev_unlocked_until", devUnlockedUntil).apply()
                                     } else {
-                                        devStatus = if (devIsRu) "Неверная фраза или сервер недоступен" else "Wrong phrase or server unavailable"
+                                        val code = res?.optInt("__status", 0) ?: 0
+                                    devStatus = when {
+                                        res != null && res.optBoolean("ok") -> if (devIsRu) "Доступ открыт (1 час)" else "Unlocked (1 hour)"
+                                        code == 403 -> if (devIsRu) "Фраза не совпала. Проверь раскладку клавиатуры и лишние пробелы в секретe." else "Phrase mismatch. Check keyboard layout and extra spaces in the secret."
+                                        code == 503 -> if (devIsRu) "На сервере не задан SECRET_WORD" else "SECRET_WORD is not set on the server"
+                                        else -> if (devIsRu) "Сервер недоступен (код $code)" else "Server unreachable (code $code)"
+                                    }
                                     }
                                 } finally {
                                     devPhraseBusy = false

@@ -89,11 +89,35 @@ class ChatViewModel @Inject constructor(
     private val _viewingPeerProfile = MutableStateFlow<com.example.data.repository.UserRepository.PeerProfileInfo?>(null)
     val viewingPeerProfile: StateFlow<com.example.data.repository.UserRepository.PeerProfileInfo?> = _viewingPeerProfile.asStateFlow()
 
+    /** Real avatar URLs for peers, shown in chat list, header and overlay. */
+    val peerAvatars = com.example.data.PeerAvatarStore.urls
+
     private val _chatCreateError = MutableStateFlow<String?>(null)
     val chatCreateError: StateFlow<String?> = _chatCreateError.asStateFlow()
 
     fun dismissChatCreateError() {
         _chatCreateError.value = null
+    }
+
+    /** Owner request: avatars visible everywhere and immediately. Resolves the
+     *  peer profile once and caches the URL for every UI surface. */
+    fun refreshPeerAvatars(chats: List<ChatEntity>, appContext: android.content.Context) {
+        viewModelScope.launch {
+            for (chat in chats.filter { !it.isSavedMessages && !it.isAiAssistant && it.recipientId.isNotBlank() }) {
+                if (com.example.data.PeerAvatarStore.get(chat.recipientId) != null) continue
+                val profile = resolvePeerProfile(chat) ?: continue
+                profile.avatarUrl?.let {
+                    com.example.data.PeerAvatarStore.put(appContext, chat.recipientId, it)
+                }
+            }
+        }
+    }
+
+    private suspend fun resolvePeerProfile(chat: ChatEntity): com.example.data.repository.UserRepository.PeerProfileInfo? {
+        val peerId = chat.recipientId.ifBlank { chat.name }
+        return repository.fetchPeerProfile(peerId)
+            ?: repository.resolveUser(chat.name)?.first?.let { repository.fetchPeerProfile(it) }
+            ?: repository.searchUsers(chat.name).firstOrNull()?.let { repository.fetchPeerProfile(it.userId) }
     }
 
     fun openPeerProfile(chat: ChatEntity) {
@@ -109,6 +133,7 @@ class ChatViewModel @Inject constructor(
                     repository.fetchPeerProfile(it.userId)
                 }
             if (profile != null) {
+                profile.avatarUrl?.let { url -> repository.context?.let { com.example.data.PeerAvatarStore.put(it, chat.recipientId, url) } }
                 _viewingPeerProfile.value = profile
             } else {
                 _chatCreateError.value = "Не удалось загрузить профиль. Проверьте соединение и попробуйте снова."
