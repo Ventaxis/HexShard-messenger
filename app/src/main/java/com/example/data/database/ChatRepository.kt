@@ -19,7 +19,7 @@ import java.security.PublicKey
 
 open class ChatRepository(
     private val chatDao: ChatDao,
-    private val context: Context? = null
+    val context: Context? = null
 ) {
     val userRepository = UserRepository(context)
     val cryptoRepository = CryptoRepository(userRepository)

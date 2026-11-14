@@ -219,6 +219,8 @@ object CallManager {
             }
 
             CallSignalingManager.sendSignal(peerId, CallSignaling.offerPayload(myUid, callId, offer.description))
+            // Content-free ping so a closed app can show the incoming call.
+            PushManager.sendPing(appContext ?: return@launch, peerId, "call", peerName)
             Timber.i("Outgoing call started (state=Calling)")
         }
     }

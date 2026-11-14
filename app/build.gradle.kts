@@ -4,7 +4,7 @@ plugins {
   alias(libs.plugins.google.devtools.ksp)
   alias(libs.plugins.roborazzi)
   alias(libs.plugins.secrets)
-  // id("com.google.gms.google-services")
+  id("com.google.gms.google-services")
 }
 
 android {
@@ -15,8 +15,8 @@ android {
     applicationId = "com.ventaxiscorp.hexshard"
     minSdk = 24
     targetSdk = 36
-    versionCode = 23
-    versionName = "1.14.0"
+    versionCode = 24
+    versionName = "1.15.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -105,6 +105,7 @@ dependencies {
   implementation(libs.security.crypto)
   // WebRTC peer-to-peer audio/video calls (Maven Central fork of google-webrtc)
   implementation("io.getstream:stream-webrtc-android:1.1.3")
+  implementation("com.google.firebase:firebase-messaging:24.1.0")
   implementation(libs.zxing.core)
   implementation(libs.play.services.location)
   implementation(libs.coil.compose)

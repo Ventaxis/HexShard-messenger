@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "953777551847",
+    "project_id": "hexshard-messenger",
+    "storage_bucket": "hexshard-messenger.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:953777551847:android:45622d68d90f464e1fe542",
+        "android_client_info": {
+          "package_name": "com.ventaxiscorp.hexshard"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDo95J6xGhpreH6p43d3RGda9fVU4Hi77U"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

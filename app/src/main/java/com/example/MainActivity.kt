@@ -80,6 +80,9 @@ class MainActivity : ComponentActivity() {
                         viewModel.onCallEnded(peerUid, incoming, answered)
                     }
                 }
+                androidx.compose.runtime.LaunchedEffect(Unit) {
+                    viewModel.uploadPushToken(applicationContext)
+                }
 
                 CompositionLocalProvider(
                     LocalAppLanguage provides currentLang,

@@ -558,6 +558,24 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    private fun applicationContext(): android.content.Context {
+        // ChatRepository carries the application context (Hilt-less VM wiring).
+        return repository.context ?: throw IllegalStateException("ChatRepository context is null")
+    }
+
+    fun uploadPushToken(appContext: android.content.Context) {
+        com.google.firebase.messaging.FirebaseMessaging.getInstance().token
+            .addOnCompleteListener { task ->
+                if (!task.isSuccessful) return@addOnCompleteListener
+                val scope = kotlinx.coroutines.CoroutineScope(
+                    kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+                )
+                scope.launch {
+                    com.example.push.PushManager.uploadToken(appContext, task.result)
+                }
+            }
+    }
+
     fun sendMessage(text: String, isAttachment: Boolean = false) {
         val cid = _selectedChatId.value ?: return
         val trimmed = text.trim()
@@ -613,6 +631,16 @@ class ChatViewModel @Inject constructor(
                 
                 _isSending.value = false
                 if (msgId != -1L) {
+                    // Content-free push ping: Firebase only learns "ping", the
+                    // body travels end-to-end encrypted through Supabase.
+                    if (!isSelfChat && !isAiChat && finalRecipientId.isNotBlank()) {
+                        com.example.push.PushManager.sendPing(
+                            context = applicationContext(),
+                            recipientUid = finalRecipientId,
+                            kind = "message",
+                            fromName = chat.name
+                        )
+                    }
                     if (isSelfChat) {
                         repository.updateMessageStatus(msgId.toInt(), "delivered")
                     } else if (isAiChat) {
