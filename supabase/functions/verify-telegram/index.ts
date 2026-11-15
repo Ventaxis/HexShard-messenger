@@ -2,6 +2,12 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import { getAuthenticatedUser, getServiceClient } from "../_shared/supabaseClient.ts";
 
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] ?? c)
+  );
+}
+
 async function sha256Hex(text: string): Promise<string> {
   const encoder = new TextEncoder();
   const data = encoder.encode(text);
@@ -27,7 +33,7 @@ function whenCodeStatus(code?: string): number {
   }
 }
 
-serve(async (req: Request) => {
+export async function handler(req: Request): Promise<Response> {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
@@ -160,7 +166,9 @@ serve(async (req: Request) => {
     }
 
     // Owner report 2026-11-15: the user could never tell whether the code they
-    // typed actually linked the account. Fire-and-forget bot confirmation.
+    // typed actually linked the account. Bot confirmation must outlive the HTTP
+    // response (EdgeRuntime.waitUntil) so a slow Telegram API never delays the
+    // app's verification result — and its status is checked, not swallowed.
     try {
       const botToken = (
         Deno.env.get("TELEGRAM_BOT_TOKEN") ||
@@ -169,16 +177,27 @@ serve(async (req: Request) => {
       )?.trim();
       const tgUserId = rpcResult.telegram_user_id;
       if (botToken && tgUserId) {
-        const tgName = rpcResult.telegram_username ? ` (@${rpcResult.telegram_username})` : "";
-        await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: tgUserId,
-            text: `✅ <b>Аккаунт HexShard привязан${tgName}!</b>\n\nТеперь восстановление входа доступно командой <code>/recover</code>. Проверить статус: /status`,
-            parse_mode: "HTML",
-          }),
-        });
+        const tgName = rpcResult.telegram_username ? ` (@${escapeHtml(rpcResult.telegram_username)})` : "";
+        const notify = (async () => {
+          const resp = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: tgUserId,
+              text: `✅ <b>Аккаунт HexShard привязан${tgName}!</b>\n\nТеперь восстановление входа доступно командой <code>/recover</code>. Проверить статус: /status`,
+              parse_mode: "HTML",
+            }),
+          });
+          if (!resp.ok) {
+            console.error("Link confirmation sendMessage failed:", resp.status, await resp.text());
+          }
+        })();
+        const runtime = (globalThis as any).EdgeRuntime;
+        if (runtime?.waitUntil) {
+          runtime.waitUntil(notify);
+        } else {
+          await notify;
+        }
       }
     } catch (_notifyErr) {
       // Never fail the verification because the bot notification hiccupped.
@@ -200,4 +219,9 @@ serve(async (req: Request) => {
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
-});
+}
+
+// Do not bind a port when imported for unit tests; the handler is called directly there.
+if (Deno.env.get("HEXSHARD_SKIP_SERVE") !== "1") {
+  serve(handler);
+}

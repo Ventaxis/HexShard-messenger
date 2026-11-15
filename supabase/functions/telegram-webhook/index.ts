@@ -31,6 +31,19 @@ const CHALLENGE_MINT_WINDOW_MS = 5 * 60 * 1000;
 const CHALLENGE_MINT_LIMIT = 3;
 const challengeMintTimes = new Map<string, number[]>();
 
+// UUID probing rate limit: the already-linked guard answers differently for
+// "linked to you" / "linked to another" / "unlinked", which is a link-state
+// enumeration oracle if unthrottled (appsec review 2026-11-15).
+const UUID_PROBE_WINDOW_MS = 5 * 60 * 1000;
+const UUID_PROBE_LIMIT = 10;
+const uuidProbeTimes = new Map<string, number[]>();
+
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] ?? c)
+  );
+}
+
 export async function handler(req: Request): Promise<Response> {
   // Allow GET for webhook health checks
   if (req.method === "GET") {
@@ -57,11 +70,10 @@ export async function handler(req: Request): Promise<Response> {
       return new Response("Unauthorized", { status: 401 });
     }
   } else {
-    const isTestMode = Deno.env.get("DENO_ENV") === "test" || Deno.env.get("APP_ENV") === "test";
-    if (!isTestMode) {
-      console.warn("Unauthorized webhook request: TELEGRAM_WEBHOOK_SECRET is not configured on server");
-      return new Response("Unauthorized: Webhook secret not configured", { status: 401 });
-    }
+    // Fail-closed even in test environments: a stray APP_ENV=test secret in prod
+    // would otherwise unauthenticate the entire webhook (appsec review 2026-11-15).
+    console.warn("Unauthorized webhook request: TELEGRAM_WEBHOOK_SECRET is not configured on server");
+    return new Response("Unauthorized: Webhook secret not configured", { status: 401 });
   }
 
   // 2. Validate Telegram Bot Token
@@ -214,9 +226,10 @@ export async function handler(req: Request): Promise<Response> {
         .maybeSingle();
       username = profile?.username ?? "";
     } catch (_e) {}
+    const safeUsername = escapeHtml(username);
     await sendTgMessage(
       "📋 <b>Статус привязки</b>\n\n" +
-      `✅ Telegram <b>привязан</b> к аккаунту HexShard${username ? `: <b>@${username}</b>` : ""}\n` +
+      `✅ Telegram <b>привязан</b> к аккаунту HexShard${safeUsername ? `: <b>@${safeUsername}</b>` : ""}\n` +
       `🆔 Telegram ID: <code>${telegramUserId}</code>\n\n` +
       "Коды приходят <b>только</b> при привязке аккаунта — повторная отправка ID новый код не выдаст.\n\n" +
       "<i>Linked and verified. Codes are only sent during linking.</i>",
@@ -276,6 +289,12 @@ export async function handler(req: Request): Promise<Response> {
       await sendTgMessage("👌 <b>Отменено</b> — ничего не изменилось.");
     }
     await answerCallback(callbackQuery.id);
+    return new Response("OK", { status: 200 });
+  }
+
+  // Textless private messages (photos, stickers) carry no command — drop silently
+  // instead of answering every sticker with the welcome card.
+  if (!rawText) {
     return new Response("OK", { status: 200 });
   }
 
@@ -390,6 +409,18 @@ export async function handler(req: Request): Promise<Response> {
   // to mint a fresh code every time, so «коды приходят постоянно» and the user could
   // never tell whether linking succeeded. The verified link is authoritative.
   if (isUuidTest(tokenParam)) {
+    const nowMs = Date.now();
+    const probes = (uuidProbeTimes.get(String(telegramUserId)) ?? [])
+      .filter((t) => nowMs - t < UUID_PROBE_WINDOW_MS);
+    if (probes.length >= UUID_PROBE_LIMIT) {
+      await sendTgMessage(
+        "⏳ <b>Слишком много запросов.</b> Пожалуйста, подождите несколько минут."
+      );
+      return new Response("OK", { status: 200 });
+    }
+    probes.push(nowMs);
+    uuidProbeTimes.set(String(telegramUserId), probes);
+
     const { data: linkByAccount } = await supabase
       .from("telegram_links")
       .select("*")
