@@ -430,6 +430,9 @@ class AttachmentRepository(
                 val isSelf = senderId == "self" || senderId == "me" || senderId == currentUserId || senderId.isBlank() ||
                         senderId == "ai_assistant" || senderId.startsWith("ai_")
                 var servedSecret: ByteArray? = null
+                // Key fingerprints for the DECRYPT diagnostics (outer scope: the
+                // self branch has no peer key, direct chats carry both tails).
+                var keyDiag = "self"
                 val sharedSecret: ByteArray = if (isSelf) {
                     E2ECryptoManager.deriveSelfStorageSecret(currentUserId)
                 } else {
@@ -454,6 +457,8 @@ class AttachmentRepository(
                     pinnedSecret ?: servedSecret ?: return@withContext null.also {
                         DownloadDiagnostics.set("KEY_DERIVE")
                     }
+                    keyDiag = "p=${(trustedSender.pinnedKey ?: trustedSender.key)?.let { keyFp(it) } ?: "null"} " +
+                        "v=${trustedSender.key?.let { keyFp(it) } ?: "null"}"
                 }
 
                 val primaryKey = if (idempotencyKey.isNotBlank()) {
@@ -531,10 +536,7 @@ class AttachmentRepository(
                     // Rich diagnostics: the fingerprint tails are comparable against
                     // the server-stored keys, so one screenshot pins the mismatch.
                     DownloadDiagnostics.set(
-                        "DECRYPT s=${senderId.take(8)} " +
-                            "p=${(trustedSender.pinnedKey ?: trustedSender.key)?.let { keyFp(it) } ?: "null"} " +
-                            "v=${trustedSender.key?.let { keyFp(it) } ?: "null"} " +
-                            "k=${idempotencyKey.take(8)}"
+                        "DECRYPT s=${senderId.take(8)} $keyDiag k=${idempotencyKey.take(8)}"
                     )
                     null
                 }
