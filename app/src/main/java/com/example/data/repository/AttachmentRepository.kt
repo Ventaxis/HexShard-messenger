@@ -454,11 +454,12 @@ class AttachmentRepository(
                             E2ECryptoManager.deriveSharedSecret(trustedSender.key, currentUserId)
                         }.getOrNull()?.takeIf { !it.contentEquals(pinnedSecret) }
                     }
-                    pinnedSecret ?: servedSecret ?: return@withContext null.also {
+                    val resolvedSecret = pinnedSecret ?: servedSecret ?: return@withContext null.also {
                         DownloadDiagnostics.set("KEY_DERIVE")
                     }
                     keyDiag = "p=${(trustedSender.pinnedKey ?: trustedSender.key)?.let { keyFp(it) } ?: "null"} " +
                         "v=${trustedSender.key?.let { keyFp(it) } ?: "null"}"
+                    resolvedSecret
                 }
 
                 val primaryKey = if (idempotencyKey.isNotBlank()) {
