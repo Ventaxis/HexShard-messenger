@@ -3252,7 +3252,13 @@ fun VoiceMessagePayload(
                                     // Complete
                                 }
                             } else {
-                                android.widget.Toast.makeText(context, "Failed to load audio", android.widget.Toast.LENGTH_SHORT).show()
+                                val strings = LocalStrings.current
+                                val reason = com.example.data.repository.AttachmentRepository.DownloadDiagnostics.lastReason
+                                android.widget.Toast.makeText(
+                                    context,
+                                    strings.audioLoadFailed + (reason?.let { " ($it)" } ?: ""),
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
                             }
                         }
                     }
@@ -3318,6 +3324,7 @@ fun MediaPayload(
     var isLoading by remember { mutableStateOf(true) }
     var showViewer by remember { mutableStateOf(false) }
     var saveStatus by remember { mutableStateOf<String?>(null) }
+    var loadError by remember { mutableStateOf<String?>(null) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
@@ -3329,6 +3336,10 @@ fun MediaPayload(
             val tempFile = java.io.File.createTempFile("decrypted_", ext, context.cacheDir)
             tempFile.writeBytes(bytes)
             mediaFile = tempFile
+        } else {
+            // Short failure code (KEY / DECRYPT / HTTP_403...) from the download
+            // path, shown under the broken-image icon for the owner's diagnostics.
+            loadError = com.example.data.repository.AttachmentRepository.DownloadDiagnostics.lastReason
         }
         isLoading = false
     }
@@ -3467,11 +3478,21 @@ fun MediaPayload(
                 )
             }
         } else {
-            Icon(
-                imageVector = Icons.Default.BrokenImage,
-                contentDescription = "Error loading media",
-                tint = txtColor
-            )
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(
+                    imageVector = Icons.Default.BrokenImage,
+                    contentDescription = "Error loading media",
+                    tint = txtColor
+                )
+                val strings = LocalStrings.current
+                Text(
+                    text = strings.mediaLoadFailed + (loadError?.let { " ($it)" } ?: ""),
+                    color = txtColor.copy(alpha = 0.7f),
+                    fontSize = 11.sp,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+            }
         }
     }
 }

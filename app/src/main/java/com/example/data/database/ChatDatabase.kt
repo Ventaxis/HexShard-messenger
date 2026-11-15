@@ -231,6 +231,13 @@ interface ChatDao {
     @Query("UPDATE chats SET preview = :preview, time = :time, timestamp = :timestamp WHERE id = :chatId AND accountId = :accountId")
     suspend fun updateChatPreview(chatId: Int, preview: String, time: String, timestamp: Long, accountId: String)
 
+    /**
+     * Self-heal for chats created by older builds: attachment/outbox crypto keys
+     * off recipientId, so a username stored there breaks media silently.
+     */
+    @Query("UPDATE chats SET recipientId = :recipientId WHERE id = :chatId AND accountId = :accountId")
+    suspend fun updateChatRecipientId(chatId: Int, recipientId: String, accountId: String)
+
     @Query("UPDATE chats SET status = 'offline' WHERE conversationType = 'DIRECT' AND status = 'online'")
     suspend fun resetStaleOnlineStatuses()
 

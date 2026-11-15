@@ -361,12 +361,24 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Peer UID for crypto/attachment/outbox flows: parsed from the deterministic
+     * conversation id, never trusting a possibly stale chat.recipientId (older
+     * builds stored usernames there — media downloads and sends broke silently).
+     */
+    private fun cryptoPeerUid(chat: com.example.data.database.ChatEntity): String {
+        val fallback = chat.recipientId.ifEmpty { chat.name }
+        return com.example.util.ConversationPeerResolver.resolvePeerUid(
+            chat.conversationId, repository.getCurrentUserId(), fallback
+        )
+    }
+
     suspend fun downloadVoiceMessage(url: String, idempotencyKey: String = ""): ByteArray? {
         val cid = _selectedChatId.value ?: return null
         val chat = repository.getChatById(cid) ?: return null
         // Must never throw into a LaunchedEffect — that kills the whole process
         return try {
-            repository.downloadVoiceMessage(url, chat.recipientId.ifEmpty { chat.name }, idempotencyKey)
+            repository.downloadVoiceMessage(url, cryptoPeerUid(chat), idempotencyKey)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -380,7 +392,7 @@ class ChatViewModel @Inject constructor(
         val chat = repository.getChatById(cid) ?: return null
         // Must never throw into a LaunchedEffect — that kills the whole process
         return try {
-            repository.downloadMediaMessage(url, chat.recipientId.ifEmpty { chat.name }, idempotencyKey)
+            repository.downloadMediaMessage(url, cryptoPeerUid(chat), idempotencyKey)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -432,7 +444,7 @@ class ChatViewModel @Inject constructor(
                 // like image/jpeg — the bare "image"/"video" flag was rejected silently.
                 val mediaMime = context.contentResolver.getType(uri)
                     ?: if (type == "image") "image/jpeg" else "video/mp4"
-                val audioUrl = repository.uploadMediaMessage(context, uri, cid, mediaMime, idempotencyKey, chat.recipientId.ifEmpty { chat.name })
+                val audioUrl = repository.uploadMediaMessage(context, uri, cid, mediaMime, idempotencyKey, cryptoPeerUid(chat))
                 if (audioUrl == null) {
                     _aiErrorState.value = AiUiError.Custom(
                         if (LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN)
@@ -460,7 +472,7 @@ class ChatViewModel @Inject constructor(
                     type = type,
                     audioUrl = audioUrl,
                     duration = null,
-                    recipientId = chat.recipientId.ifEmpty { chat.name },
+                    recipientId = cryptoPeerUid(chat),
                     idempotencyKey = idempotencyKey
                 )
                 
@@ -507,7 +519,7 @@ class ChatViewModel @Inject constructor(
                 val timeStr = getFormattedTime()
                 val idempotencyKey = generateIdempotencyKey()
 
-                val audioUrl = repository.uploadVoiceMessage(file, cid, idempotencyKey, chat.recipientId.ifEmpty { chat.name })
+                val audioUrl = repository.uploadVoiceMessage(file, cid, idempotencyKey, cryptoPeerUid(chat))
                 file.delete()
                 
                 if (audioUrl == null) {
@@ -529,7 +541,7 @@ class ChatViewModel @Inject constructor(
                     type = "voice",
                     audioUrl = audioUrl,
                     duration = duration,
-                    recipientId = chat.recipientId.ifEmpty { chat.name },
+                    recipientId = cryptoPeerUid(chat),
                     idempotencyKey = idempotencyKey
                 )
                 
@@ -575,7 +587,7 @@ class ChatViewModel @Inject constructor(
                     type = "location",
                     audioUrl = null,
                     duration = null,
-                    recipientId = chat.recipientId.ifEmpty { chat.name },
+                    recipientId = cryptoPeerUid(chat),
                     idempotencyKey = idempotencyKey
                 )
                 if (msgId != -1L && (isSelfChat || isAiChat)) {
@@ -636,7 +648,7 @@ class ChatViewModel @Inject constructor(
                 }
 
                 val timeStr = getFormattedTime()
-                val recipientId = chat.recipientId.ifEmpty { chat.name }
+                val recipientId = cryptoPeerUid(chat)
                 val idempotencyKey = generateIdempotencyKey(cid, recipientId, trimmed)
                 val isSelfChat = chat.isSavedMessages
                 val isAiChat = chat.isAiAssistant
@@ -797,7 +809,7 @@ class ChatViewModel @Inject constructor(
             val targetChat = repository.getChatById(targetChatId) ?: return@launch
             val timeStr = getFormattedTime()
             val idempotencyKey = generateIdempotencyKey()
-            val targetRecipient = targetChat.recipientId.ifEmpty { targetChat.name }
+            val targetRecipient = cryptoPeerUid(targetChat)
 
             var audioUrl = message.audioUrl
             var duration = message.duration
@@ -810,7 +822,7 @@ class ChatViewModel @Inject constructor(
                     !message.audioUrl.isNullOrBlank()
             if (isMediaType) {
                 val sourceChat = repository.getChatById(message.chatId)
-                val sourcePeer = sourceChat?.recipientId?.ifBlank { sourceChat.name } ?: run {
+                val sourcePeer = sourceChat?.let { cryptoPeerUid(it) } ?: run {
                     timber.log.Timber.w("Forward aborted: source chat ${message.chatId} not found")
                     return@launch
                 }

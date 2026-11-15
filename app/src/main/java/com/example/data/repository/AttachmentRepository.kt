@@ -345,19 +345,21 @@ class AttachmentRepository(
         idempotencyKey: String = "",
         fileExtension: String = "bin"
     ): String? = withContext(Dispatchers.IO) {
-        val ctx = context ?: return@withContext null
+        val ctx = context ?: return@withContext null.also { DownloadDiagnostics.set("CTX") }
         val currentUserId = SecurePrefsManager.getUserId(ctx)
         val accessToken = SecurePrefsManager.getSupabaseAccessToken(ctx)
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(ctx)
         if (accessToken.isBlank() || anonKey.isBlank()) {
             Timber.w("Attachment download aborted: user not authenticated or Supabase not configured")
+            DownloadDiagnostics.set("AUTH")
             return@withContext null
         }
 
         val cleanPath = remotePath.removePrefix("$BUCKET_NAME/").trim().removePrefix("/")
         if (cleanPath.contains("..") || cleanPath.contains("\\")) {
             Timber.w("Path traversal detected in remote attachment path: $remotePath")
+            DownloadDiagnostics.set("PATH")
             return@withContext null
         }
         val safeName = cleanPath.replace(Regex("[^a-zA-Z0-9._-]"), "_")
@@ -379,10 +381,11 @@ class AttachmentRepository(
             val resp = httpClient.newCall(req).execute()
             if (!resp.isSuccessful) {
                 // Drain and close so the connection returns to the pool
+                DownloadDiagnostics.set("HTTP_${resp.code}")
                 resp.close()
                 return@withContext null
             }
-            val respBody = resp.body ?: run { resp.close(); return@withContext null }
+            val respBody = resp.body ?: run { DownloadDiagnostics.set("NET"); resp.close(); return@withContext null }
 
             // Download encrypted stream to temp file
             val tempEncFile = File.createTempFile("down_enc_", ".bin", accountCacheDir)
@@ -413,7 +416,7 @@ class AttachmentRepository(
                     // is untrusted for identity decisions, and attachments uploaded
                     // BEFORE a peer rotation were encrypted under it.
                     val trustedSender = userRepository.getTrustedUserPublicKey(senderId)
-                        ?: return@withContext null
+                        ?: return@withContext null.also { DownloadDiagnostics.set("KEY") }
                     val pinnedSecret = (trustedSender.pinnedKey ?: trustedSender.key)?.let { pubKey ->
                         runCatching { E2ECryptoManager.deriveSharedSecret(pubKey, currentUserId) }.getOrNull()
                     }
@@ -425,7 +428,9 @@ class AttachmentRepository(
                             E2ECryptoManager.deriveSharedSecret(trustedSender.key, currentUserId)
                         }.getOrNull()?.takeIf { !it.contentEquals(pinnedSecret) }
                     }
-                    pinnedSecret ?: servedSecret ?: return@withContext null
+                    pinnedSecret ?: servedSecret ?: return@withContext null.also {
+                        DownloadDiagnostics.set("KEY_DERIVE")
+                    }
                 }
 
                 val primaryKey = if (idempotencyKey.isNotBlank()) {
@@ -481,6 +486,7 @@ class AttachmentRepository(
                         cachedFile.absolutePath
                     }
                 } else {
+                    DownloadDiagnostics.set("DECRYPT")
                     null
                 }
             } finally {
@@ -489,6 +495,7 @@ class AttachmentRepository(
             }
         } catch (e: Exception) {
             Timber.e(e, "Failed to download and decrypt attachment")
+            DownloadDiagnostics.set("IO")
             null
         }
     }
@@ -505,6 +512,18 @@ class AttachmentRepository(
             Timber.e(e, "Failed to read downloaded attachment bytes")
             null
         }
+    }
+
+    /**
+     * Last failure reason of [downloadAttachment], read by the UI after a null
+     * download so the owner sees WHY media did not load (KEY = peer key fetch,
+     * DECRYPT = all key attempts failed, HTTP_xxx, AUTH, IO...).
+     */
+    object DownloadDiagnostics {
+        @Volatile
+        var lastReason: String? = null
+            private set
+        internal fun set(reason: String) { lastReason = reason }
     }
 
     /**

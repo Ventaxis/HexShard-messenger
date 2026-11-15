@@ -144,7 +144,13 @@ class MessageRepository(
         if (token.isNotBlank() && serverId.isNotBlank()) {
             try {
                 val chat = chatDao.getChatById(msg.chatId, accountId)
-                val peerRecipient = chat?.recipientId?.takeIf { it.isNotBlank() } ?: msg.sender
+                // Edits re-encrypt with the peer's key: chats from older builds may
+                // carry a username in recipientId — the conversation id is authoritative.
+                val peerRecipient = chat?.let {
+                    com.example.util.ConversationPeerResolver.resolvePeerUid(
+                        it.conversationId, accountId, it.recipientId.ifBlank { msg.sender }
+                    )
+                } ?: msg.sender
                 val isSaved = chat?.conversationType == com.example.data.ConversationType.SAVED_MESSAGES.name || chat?.conversationId?.startsWith("self_") == true || peerRecipient == "self"
                 val isAi = chat?.conversationType == com.example.data.ConversationType.AI_ASSISTANT.name || chat?.conversationId?.startsWith("ai_") == true || isAiConversation(peerRecipient, conversationId = msg.conversationId)
                 val isSelfOrAi = isSaved || isAi || isSelfConversation(peerRecipient, msg.conversationId)
@@ -358,6 +364,15 @@ class MessageRepository(
                 ?.takeIf { it.isNotBlank() }
                 ?: conversationRepository.computeConversationId(currentUserId, recipientId)
 
+            // Crypto, outbox and server rows key off the peer UID: chats created by
+            // older builds may carry a username in recipientId, which silently broke
+            // peer-key derivation (media downloads, stuck WAITING_FOR_PEER_KEY sends).
+            // The direct conversation id is deterministic — parse the peer from it,
+            // fall back to the stored recipient only when it yields nothing.
+            val cryptoRecipientId = com.example.util.ConversationPeerResolver.resolvePeerUid(
+                conversationId, currentUserId, recipientId
+            )
+
             val resolvedPersona = when {
                 personaId != null -> com.example.data.AiPersona.fromIdOrNull(personaId)?.id
                 isAiChat -> "hexagon"
@@ -379,7 +394,7 @@ class MessageRepository(
             val encryptedPayload = try {
                 cryptoRepository.encryptOutboundMessage(
                     currentUserId = currentUserId,
-                    recipientId = if (isSelfChat) currentUserId else recipientId,
+                    recipientId = if (isSelfChat) currentUserId else cryptoRecipientId,
                     conversationId = conversationId,
                     idempotencyKey = idempotencyKey,
                     plainText = payloadToEncrypt,
@@ -417,7 +432,7 @@ class MessageRepository(
                         conversationId = conversationId,
                         idempotencyKey = idempotencyKey,
                         senderId = currentUserId,
-                        recipientId = recipientId,
+                        recipientId = if (isSelfChat) currentUserId else cryptoRecipientId,
                         payload = "", // Plaintext withheld until peer key is retrieved & verified
                         signature = "",
                         type = type,
@@ -438,11 +453,11 @@ class MessageRepository(
                 if (isMe && idempotencyKey.isNotEmpty()) {
                     backgroundScope.launch {
                         try {
-                            val pubKey = cryptoRepository.userRepository.getOrFetchUserPublicKey(recipientId)
+                            val pubKey = cryptoRepository.userRepository.getOrFetchUserPublicKey(cryptoRecipientId)
                             if (pubKey != null) {
                                 val enc = cryptoRepository.encryptOutboundMessage(
                                     currentUserId = currentUserId,
-                                    recipientId = recipientId,
+                                    recipientId = cryptoRecipientId,
                                     conversationId = conversationId,
                                     idempotencyKey = idempotencyKey,
                                     plainText = payloadToEncrypt,
@@ -454,7 +469,7 @@ class MessageRepository(
                                     idempotencyKey = idempotencyKey,
                                     conversationId = conversationId,
                                     senderId = currentUserId,
-                                    recipientId = recipientId,
+                                    recipientId = cryptoRecipientId,
                                     payloadBase64 = enc.base64Payload,
                                     signatureBase64 = enc.base64Signature,
                                     type = type,
@@ -549,9 +564,9 @@ class MessageRepository(
                             val sendResult = sendRemoteMessage(
                                 idempotencyKey = idempotencyKey,
                                 conversationId = conversationId,
-                                senderId = currentUserId,
-                                recipientId = if (isSelfChat) currentUserId else recipientId,
-                                payloadBase64 = encryptedPayload.base64Payload,
+                    senderId = currentUserId,
+                    recipientId = if (isSelfChat) currentUserId else cryptoRecipientId,
+                    payloadBase64 = encryptedPayload.base64Payload,
                                 signatureBase64 = encryptedPayload.base64Signature,
                                 type = type,
                                 timeStr = timeStr,
@@ -605,11 +620,16 @@ class MessageRepository(
 
         if (existingOutbox != null) {
             chatDao.retryOutboxEntry(existingOutbox.id, currentUserId)
+            // Resolve the peer off the conversation id: entries created by older
+            // builds may carry a username in recipientId (undecryptable payload).
+            val resolvedRecipient = com.example.util.ConversationPeerResolver.resolvePeerUid(
+                existingOutbox.conversationId, currentUserId, existingOutbox.recipientId
+            )
             val sendRes = sendRemoteMessage(
                 idempotencyKey = existingOutbox.idempotencyKey,
                 conversationId = existingOutbox.conversationId,
                 senderId = existingOutbox.senderId,
-                recipientId = existingOutbox.recipientId,
+                recipientId = resolvedRecipient,
                 payloadBase64 = existingOutbox.payload,
                 signatureBase64 = existingOutbox.signature,
                 type = existingOutbox.type,

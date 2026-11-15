@@ -631,6 +631,17 @@ class SyncManager(
             val newChatId = chatDao.insertChat(newChat).toInt()
             chat = chatDao.getChatById(newChatId, currentUserId)
         }
+
+        // Self-heal: chats created by older builds may carry a username (or blank)
+        // in recipientId — attachment/outbox crypto keys off this field and fails
+        // silently. The server-side peer id is authoritative for direct chats.
+        if (chat != null && !record.isSelfMessage && !record.isAiConversation &&
+            chat.recipientId != record.peerId &&
+            com.example.util.ConversationPeerResolver.isUuid(record.peerId)
+        ) {
+            chatDao.updateChatRecipientId(chat.id, record.peerId, currentUserId)
+            chat = chat.copy(recipientId = record.peerId)
+        }
         return chat
     }
 
@@ -787,13 +798,18 @@ class SyncManager(
 
         for (entry in waiting) {
             try {
-                val pubKey = cryptoRepository.userRepository.getOrFetchUserPublicKey(entry.recipientId)
+                // Chats from older builds may carry a username in recipientId —
+                // resolve the real peer uid off the deterministic conversation id.
+                val peerId = com.example.util.ConversationPeerResolver.resolvePeerUid(
+                    entry.conversationId, currentUserId, entry.recipientId
+                )
+                val pubKey = cryptoRepository.userRepository.getOrFetchUserPublicKey(peerId)
                 if (pubKey != null) {
                     val localMsg = chatDao.getMessageByIdempotencyKey(entry.idempotencyKey, currentUserId)
                     if (localMsg != null && localMsg.text.isNotBlank()) {
                         val enc = cryptoRepository.encryptOutboundMessage(
                             currentUserId = currentUserId,
-                            recipientId = entry.recipientId,
+                            recipientId = peerId,
                             conversationId = entry.conversationId,
                             idempotencyKey = entry.idempotencyKey,
                             plainText = localMsg.text,
@@ -890,7 +906,11 @@ class SyncManager(
                             idempotencyKey = entry.idempotencyKey,
                             conversationId = entry.conversationId,
                             senderId = entry.senderId,
-                            recipientId = entry.recipientId,
+                            // Entries from older builds may carry a username in
+                            // recipientId; the conversation id is authoritative.
+                            recipientId = com.example.util.ConversationPeerResolver.resolvePeerUid(
+                                entry.conversationId, currentUserId, entry.recipientId
+                            ),
                             payloadBase64 = entry.payload,
                             signatureBase64 = entry.signature,
                             type = entry.type,
