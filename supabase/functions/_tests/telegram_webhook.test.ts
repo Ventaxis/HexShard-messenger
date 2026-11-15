@@ -30,6 +30,10 @@ function postWithToken(token: string | undefined, body: unknown): Request {
   });
 }
 
+function json(obj: unknown, status = 200): Response {
+  return new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+}
+
 Deno.test("GET health check returns ok", async () => {
   const res = await handler(new Request("https://project.functions.supabase.co/telegram-webhook", { method: "GET" }));
   assertEquals(res.status, 200);
