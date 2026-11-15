@@ -207,11 +207,14 @@ class AttachmentRepository(
         val sharedSecret = if (isSelf) {
             E2ECryptoManager.deriveSelfStorageSecret(currentUserId)
         } else {
-            // TOFU: encrypt to the PINNED key, not whatever the server serves now —
-            // same trust model as message encryption (CryptoRepository), otherwise a
-            // substituted key would silently re-encrypt the attachment to an attacker.
+            // Owner report 2026-11-15 («Не удалось загрузить медиа (DECRYPT)» on the
+            // receiver): attachments encrypted to the PINNED key became undecryptable
+            // whenever the recipient reinstalled (fresh keypair on the server, stale
+            // pin on the sender) — messages kept working because message outbound
+            // selects the SERVED key first. Align attachment upload with
+            // CryptoTrustPolicy.outboundKey: served-first, pin as fallback.
             val trusted = userRepository.getTrustedUserPublicKey(recipientId)
-            val recPubKey = trusted?.pinnedKey ?: trusted?.key
+            val recPubKey = com.example.crypto.CryptoTrustPolicy.outboundKey(trusted?.key, trusted?.pinnedKey)
             if (recPubKey == null) {
                 Timber.w("Recipient public key not found for $logLabel upload")
                 return null
@@ -423,10 +426,11 @@ class AttachmentRepository(
                     val pinnedSecret = (trustedSender.pinnedKey ?: trustedSender.key)?.let { pubKey ->
                         runCatching { E2ECryptoManager.deriveSharedSecret(pubKey, currentUserId) }.getOrNull()
                     }
-                    // TOFU rotation fallback: attachments uploaded AFTER the peer rotated
-                    // were encrypted under the SERVED key — derive it too so the retry
-                    // below can decrypt them when the pinned attempt fails.
-                    if (trustedSender.keyChanged && trustedSender.key != null) {
+                    // Derive the served secret ALWAYS, not only on a flagged rotation:
+                    // senders encrypt attachments served-first (mirroring message
+                    // outbound), so the served-key secret must be in the retry matrix
+                    // even when the receiver sees no pin change.
+                    if (trustedSender.key != null) {
                         servedSecret = runCatching {
                             E2ECryptoManager.deriveSharedSecret(trustedSender.key, currentUserId)
                         }.getOrNull()?.takeIf { !it.contentEquals(pinnedSecret) }
