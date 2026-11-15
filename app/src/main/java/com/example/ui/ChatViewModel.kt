@@ -820,60 +820,66 @@ class ChatViewModel @Inject constructor(
 
     fun forwardMessage(targetChatId: Int, message: com.example.data.database.MessageEntity) {
         viewModelScope.launch {
-            val targetChat = repository.getChatById(targetChatId) ?: return@launch
-            val timeStr = getFormattedTime()
-            val idempotencyKey = generateIdempotencyKey()
-            val targetRecipient = cryptoPeerUid(targetChat)
+            try {
+                val targetChat = repository.getChatById(targetChatId) ?: return@launch
+                val timeStr = getFormattedTime()
+                val idempotencyKey = generateIdempotencyKey()
+                val targetRecipient = cryptoPeerUid(targetChat)
 
-            var audioUrl = message.audioUrl
-            var duration = message.duration
+                var audioUrl = message.audioUrl
+                var duration = message.duration
 
-            // Media re-encryption: the stored file is encrypted for the ORIGINAL chat's
-            // key material with the ORIGINAL idempotency key. A forwarded copy must be
-            // downloaded, decrypted and re-encrypted for the target chat, or neither the
-            // recipient nor the sender will ever be able to decrypt it.
-            val isMediaType = (message.type == "image" || message.type == "video" || message.type == "voice") &&
-                    !message.audioUrl.isNullOrBlank()
-            if (isMediaType) {
-                val sourceChat = repository.getChatById(message.chatId)
-                val sourcePeer = sourceChat?.let { cryptoPeerUid(it) } ?: run {
-                    timber.log.Timber.w("Forward aborted: source chat ${message.chatId} not found")
-                    return@launch
+                // Media re-encryption: the stored file is encrypted for the ORIGINAL chat's
+                // key material with the ORIGINAL idempotency key. A forwarded copy must be
+                // downloaded, decrypted and re-encrypted for the target chat, or neither the
+                // recipient nor the sender will ever be able to decrypt it.
+                val isMediaType = (message.type == "image" || message.type == "video" || message.type == "voice") &&
+                        !message.audioUrl.isNullOrBlank()
+                if (isMediaType) {
+                    val sourceChat = repository.getChatById(message.chatId)
+                    val sourcePeer = sourceChat?.let { cryptoPeerUid(it) } ?: run {
+                        timber.log.Timber.w("Forward aborted: source chat ${message.chatId} not found")
+                        return@launch
+                    }
+                    val bytes = if (message.type == "voice") {
+                        repository.downloadVoiceMessage(message.audioUrl!!, sourcePeer, message.idempotencyKey)
+                    } else {
+                        repository.downloadMediaMessage(message.audioUrl!!, sourcePeer, message.idempotencyKey)
+                    }
+                    if (bytes == null) {
+                        timber.log.Timber.w("Forward aborted: could not decrypt original media ${message.idempotencyKey}")
+                        return@launch
+                    }
+                    audioUrl = if (message.type == "voice") {
+                        repository.uploadVoiceMessageBytes(bytes, targetChatId, idempotencyKey, targetRecipient)
+                    } else {
+                        repository.uploadAttachmentData(bytes, targetChatId, message.type, idempotencyKey, targetRecipient)
+                    }
+                    if (audioUrl == null) {
+                        timber.log.Timber.w("Forward aborted: re-upload failed for ${message.idempotencyKey}")
+                        return@launch
+                    }
                 }
-                val bytes = if (message.type == "voice") {
-                    repository.downloadVoiceMessage(message.audioUrl!!, sourcePeer, message.idempotencyKey)
-                } else {
-                    repository.downloadMediaMessage(message.audioUrl!!, sourcePeer, message.idempotencyKey)
-                }
-                if (bytes == null) {
-                    timber.log.Timber.w("Forward aborted: could not decrypt original media ${message.idempotencyKey}")
-                    return@launch
-                }
-                audioUrl = if (message.type == "voice") {
-                    repository.uploadVoiceMessageBytes(bytes, targetChatId, idempotencyKey, targetRecipient)
-                } else {
-                    repository.uploadAttachmentData(bytes, targetChatId, message.type, idempotencyKey, targetRecipient)
-                }
-                if (audioUrl == null) {
-                    timber.log.Timber.w("Forward aborted: re-upload failed for ${message.idempotencyKey}")
-                    return@launch
-                }
+
+                repository.sendMessage(
+                    chatId = targetChatId,
+                    sender = "me",
+                    text = message.text,
+                    isMe = true,
+                    isAttachment = message.isAttachment,
+                    timeStr = timeStr,
+                    status = "sending",
+                    type = message.type,
+                    audioUrl = audioUrl,
+                    duration = duration,
+                    recipientId = targetRecipient,
+                    idempotencyKey = idempotencyKey
+                )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                timber.log.Timber.e(e, "Forward failed")
             }
-
-            repository.sendMessage(
-                chatId = targetChatId,
-                sender = "me",
-                text = message.text,
-                isMe = true,
-                isAttachment = message.isAttachment,
-                timeStr = timeStr,
-                status = "sending",
-                type = message.type,
-                audioUrl = audioUrl,
-                duration = duration,
-                recipientId = targetRecipient,
-                idempotencyKey = idempotencyKey
-            )
         }
     }
 

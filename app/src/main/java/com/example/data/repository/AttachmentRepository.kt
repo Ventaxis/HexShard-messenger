@@ -48,6 +48,12 @@ class AttachmentRepository(
     private val BUCKET_NAME = "chat-attachments"
     private val secureRandom = SecureRandom()
 
+    /** Short comparable fingerprint of a public key (DER base64 tail) — the
+     *  server-side forensics can recompute the same tail from the stored key,
+     *  so a DECRYPT failure screenshot pins down exactly which key was used. */
+    private fun keyFp(key: java.security.PublicKey): String =
+        java.util.Base64.getEncoder().encodeToString(key.encoded).takeLast(6)
+
     companion object {
         private val ALLOWED_MIME_TYPES = setOf(
             "image/jpeg", "image/png", "image/webp", "image/gif",
@@ -219,7 +225,13 @@ class AttachmentRepository(
                 Timber.w("Recipient public key not found for $logLabel upload")
                 return null
             }
-            E2ECryptoManager.deriveSharedSecret(recPubKey, currentUserId)
+            // runCatching: the self-key guard in deriveSharedSecret throws outside
+            // the enclosing try — a misresolved recipient id must abort the upload
+            // cleanly, not crash the caller (regression review F3/#6, 2026-11-15).
+            runCatching { E2ECryptoManager.deriveSharedSecret(recPubKey, currentUserId) }.getOrElse {
+                Timber.w(it, "Shared secret derivation failed for $logLabel upload")
+                return null
+            }
         }
 
         val fileKey = if (idempotencyKey.isNotBlank()) {
@@ -238,18 +250,22 @@ class AttachmentRepository(
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(fileKey, "AES"), GCMParameterSpec(128, iv))
 
-            source()?.use { input ->
-                if (input == null) {
-                    Timber.w("$logLabel upload aborted: selected file could not be opened")
-                    return null
-                }
+            val input = source()
+            if (input == null) {
+                // A null stream must abort BEFORE the cipher writes anything: an
+                // IV-only temp file would upload with valid metadata and produce
+                // an honest-looking DECRYPT on the receiver (review F2).
+                Timber.w("$logLabel upload aborted: selected file could not be opened")
+                return null
+            }
+            input.use {
                 FileOutputStream(tempEncryptedFile).use { fileOut ->
                     // Write IV first
                     fileOut.write(iv)
                     CipherOutputStream(fileOut, cipher).use { cipherOut ->
                         val buffer = ByteArray(32 * 1024)
                         var bytesRead: Int
-                        while (input.read(buffer).also { bytesRead = it } != -1) {
+                        while (it.read(buffer).also { bytesRead = it } != -1) {
                             cipherOut.write(buffer, 0, bytesRead)
                         }
                     }
@@ -471,7 +487,8 @@ class AttachmentRepository(
                     }
                 }
 
-                // Fallback for legacy attachments encrypted directly with sharedSecret
+                // Legacy fallback: attachments encrypted directly with the raw
+                // sharedSecret (pre-KDF uploads) — pinned secret first...
                 if (!decryptedOk && primaryKey !== sharedSecret) {
                     try {
                         decryptedOk = decryptAttachmentWithKey(tempEncFile, tempDecFile, sharedSecret)
@@ -481,19 +498,44 @@ class AttachmentRepository(
                     }
                 }
 
+                // ...then raw SERVED secret — legacy uploads encrypted under the
+                // key that was served at upload time, even if the pin changed later
+                // (appsec review F1, 2026-11-15).
+                if (!decryptedOk && servedSecret != null) {
+                    try {
+                        decryptedOk = decryptAttachmentWithKey(tempEncFile, tempDecFile, servedSecret)
+                    } catch (servedRawEx: Exception) {
+                        tempDecFile.delete()
+                        Timber.w(servedRawEx, "Raw served-secret attachment decryption failed")
+                    }
+                }
+
                 if (decryptedOk) {
                     // Atomic publish: rename validated temporary file to final target
                     if (cachedFile.exists()) cachedFile.delete()
                     if (tempDecFile.renameTo(cachedFile)) {
                         cachedFile.absolutePath
                     } else {
-                        // Fallback copy if rename across mount fails
-                        tempDecFile.copyTo(cachedFile, overwrite = true)
-                        tempDecFile.delete()
+                        // Fallback publish ALSO through a temp file: a crash mid-copy
+                        // must never leave a truncated dec_* file that later reads
+                        // as a cache hit (regression review #3, 2026-11-15).
+                        val publishTmp = File(accountCacheDir, "pub_${safeName}.$safeExt")
+                        tempDecFile.copyTo(publishTmp, overwrite = true)
+                        if (!publishTmp.renameTo(cachedFile)) {
+                            publishTmp.copyTo(cachedFile, overwrite = true)
+                            publishTmp.delete()
+                        }
                         cachedFile.absolutePath
                     }
                 } else {
-                    DownloadDiagnostics.set("DECRYPT")
+                    // Rich diagnostics: the fingerprint tails are comparable against
+                    // the server-stored keys, so one screenshot pins the mismatch.
+                    DownloadDiagnostics.set(
+                        "DECRYPT s=${senderId.take(8)} " +
+                            "p=${(trustedSender.pinnedKey ?: trustedSender.key)?.let { keyFp(it) } ?: "null"} " +
+                            "v=${trustedSender.key?.let { keyFp(it) } ?: "null"} " +
+                            "k=${idempotencyKey.take(8)}"
+                    )
                     null
                 }
             } finally {
@@ -517,6 +559,7 @@ class AttachmentRepository(
             File(path).readBytes()
         } catch (e: Exception) {
             Timber.e(e, "Failed to read downloaded attachment bytes")
+            DownloadDiagnostics.set("IO_READ")
             null
         }
     }
