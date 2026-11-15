@@ -182,6 +182,7 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
             val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
             val searchResults by viewModel.searchResults.collectAsStateWithLifecycle()
             val isSending by viewModel.isSending.collectAsStateWithLifecycle()
+            val mediaUploading by viewModel.mediaUploads.collectAsStateWithLifecycle()
             val typingChatId by viewModel.typingChatId.collectAsStateWithLifecycle()
             val selectedAiModel by viewModel.selectedAiModel.collectAsStateWithLifecycle()
             val aiErrorState by viewModel.aiErrorState.collectAsStateWithLifecycle()
@@ -232,6 +233,7 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
                                         chat = activeChat,
                                         messages = messages,
                                         isSending = isSending,
+                                        mediaUploading = mediaUploading,
                                         isTyping = typingChatId == selectedId,
                                         isDark = isDark,
                                         showBackButton = false,
@@ -317,6 +319,7 @@ fun HexShardApp(viewModel: ChatViewModel, onNavigateToSettings: () -> Unit = {})
                                 chat = activeChat,
                                 messages = messages,
                                 isSending = isSending,
+                                mediaUploading = mediaUploading,
                                 isTyping = typingChatId == currentId,
                                 isDark = isDark,
                                 showBackButton = true,
@@ -1199,6 +1202,7 @@ fun ChatArea(
     chat: ChatEntity,
     messages: List<MessageEntity>,
     isSending: Boolean,
+    mediaUploading: Int = 0,
     isTyping: Boolean,
     isDark: Boolean,
     showBackButton: Boolean,
@@ -1862,6 +1866,7 @@ fun ChatArea(
         InputBarLayout(
             modifier = bottomBarModifier,
             isSending = isSending,
+            mediaUploading = mediaUploading,
             isDark = isDark,
             chatId = chat.id,
             onSend = { sentText ->
@@ -2493,6 +2498,7 @@ fun LocationMessagePayload(
 fun InputBarLayout(
     modifier: Modifier = Modifier,
     isSending: Boolean,
+    mediaUploading: Int = 0,
     isDark: Boolean,
     chatId: Int,
     onSend: (String) -> Unit,
@@ -2611,6 +2617,28 @@ fun InputBarLayout(
             },
         color = bg
     ) {
+        // Media uploads stream in the background — show a non-blocking chip so the
+        // owner knows the file is on its way while typing stays fully available.
+        if (mediaUploading > 0) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 6.dp, start = 12.dp, end = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                androidx.compose.material3.CircularProgressIndicator(
+                    modifier = Modifier.size(14.dp),
+                    strokeWidth = 2.dp,
+                    color = SpotifyGreen
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = strings.mediaUploading,
+                    color = txtSec,
+                    fontSize = 12.sp
+                )
+            }
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()

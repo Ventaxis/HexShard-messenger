@@ -74,6 +74,12 @@ class ChatViewModel @Inject constructor(
     private val _isSending = MutableStateFlow(false)
     val isSending: StateFlow<Boolean> = _isSending.asStateFlow()
 
+    // Media/voice uploads run in the BACKGROUND: the text input must never be
+    // frozen while a large video streams to the server (owner report 2026-11-15:
+    // a stuck video upload locked typing in every chat).
+    private val _mediaUploads = MutableStateFlow(0)
+    val mediaUploads: StateFlow<Int> = _mediaUploads.asStateFlow()
+
     private val _typingChatId = MutableStateFlow<Int?>(null)
     val typingChatId: StateFlow<Int?> = _typingChatId.asStateFlow()
 
@@ -406,15 +412,15 @@ class ChatViewModel @Inject constructor(
         
         // SECURITY: Check throttle atomically
         if (!shouldAllowSend()) {
+            showThrottleToast()
             timber.log.Timber.w("Media send throttled")
             return
         }
 
-        if (!_isSending.compareAndSet(expect = false, update = true)) {
-            timber.log.Timber.w("Already sending media")
-            return
-        }
-
+        // Media uploads run in the background: a large video must NEVER disable
+        // the text input (it used to gate the shared _isSending flag, freezing
+        // typing in EVERY chat until the upload finished or failed).
+        _mediaUploads.value += 1
         viewModelScope.launch {
             try {
                 // Repository lookup, NOT the search-filtered `chats` flow:
@@ -436,7 +442,6 @@ class ChatViewModel @Inject constructor(
                             "Не удалось обработать изображение для AI."
                         else "Failed to process the image for AI."
                     )
-                    _isSending.value = false
                     return@launch
                 }
 
@@ -451,7 +456,6 @@ class ChatViewModel @Inject constructor(
                             "Не удалось отправить файл. Проверьте подключение и попробуйте ещё раз."
                         else "Could not send the attachment. Check your connection and try again."
                     )
-                    _isSending.value = false
                     return@launch
                 }
 
@@ -475,8 +479,7 @@ class ChatViewModel @Inject constructor(
                     recipientId = cryptoPeerUid(chat),
                     idempotencyKey = idempotencyKey
                 )
-                
-                _isSending.value = false
+
                 if (msgId != -1L) {
                     if (isSelfChat || isAiChat) {
                         repository.updateMessageStatus(msgId.toInt(), "delivered")
@@ -494,7 +497,7 @@ class ChatViewModel @Inject constructor(
             } catch (e: Exception) {
                 timber.log.Timber.e(e, "Failed to send media message")
             } finally {
-                _isSending.value = false
+                _mediaUploads.value -= 1
             }
         }
     }
@@ -503,15 +506,13 @@ class ChatViewModel @Inject constructor(
         val cid = _selectedChatId.value ?: return
         
         if (!shouldAllowSend()) {
+            showThrottleToast()
             timber.log.Timber.w("Voice send throttled")
             return
         }
 
-        if (!_isSending.compareAndSet(expect = false, update = true)) {
-            timber.log.Timber.w("Already sending voice")
-            return
-        }
-
+        // Voice uploads are background work too — never freeze the text input.
+        _mediaUploads.value += 1
         viewModelScope.launch {
             try {
                 // Repository lookup, NOT the search-filtered `chats` flow
@@ -521,9 +522,8 @@ class ChatViewModel @Inject constructor(
 
                 val audioUrl = repository.uploadVoiceMessage(file, cid, idempotencyKey, cryptoPeerUid(chat))
                 file.delete()
-                
+
                 if (audioUrl == null) {
-                    _isSending.value = false
                     return@launch
                 }
 
@@ -544,8 +544,7 @@ class ChatViewModel @Inject constructor(
                     recipientId = cryptoPeerUid(chat),
                     idempotencyKey = idempotencyKey
                 )
-                
-                _isSending.value = false
+
                 if (msgId != -1L) {
                     if (isSelfChat || isAiChat) {
                         repository.updateMessageStatus(msgId.toInt(), "delivered")
@@ -555,15 +554,17 @@ class ChatViewModel @Inject constructor(
                 timber.log.Timber.e(e, "Failed to send voice message")
                 file.delete()
             } finally {
-                _isSending.value = false
+                _mediaUploads.value -= 1
             }
         }
     }
 
     fun sendLocationMessage(context: android.content.Context) {
         val cid = _selectedChatId.value ?: return
-        if (!shouldAllowSend()) return
-        if (!_isSending.compareAndSet(expect = false, update = true)) return
+        if (!shouldAllowSend()) {
+            showThrottleToast()
+            return
+        }
 
         viewModelScope.launch {
             try {
@@ -595,8 +596,6 @@ class ChatViewModel @Inject constructor(
                 }
             } catch (e: Exception) {
                 timber.log.Timber.e(e, "Failed to send location message")
-            } finally {
-                _isSending.value = false
             }
         }
     }
@@ -604,6 +603,20 @@ class ChatViewModel @Inject constructor(
     private fun applicationContext(): android.content.Context {
         // ChatRepository carries the application context (Hilt-less VM wiring).
         return repository.context ?: throw IllegalStateException("ChatRepository context is null")
+    }
+
+    /** Silent throttle rejections confused the owner — make them visible. */
+    private fun showThrottleToast() {
+        try {
+            val isRu = LocalizationManager.currentLanguage.value == AppLanguage.RUSSIAN
+            android.widget.Toast.makeText(
+                applicationContext(),
+                if (isRu) "Слишком быстро — подожди секунду" else "Too fast — wait a second",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
+        } catch (e: Exception) {
+            timber.log.Timber.w(e, "Throttle toast failed")
+        }
     }
 
     fun uploadPushToken(appContext: android.content.Context) {
@@ -629,6 +642,7 @@ class ChatViewModel @Inject constructor(
 
         // SECURITY: Check throttle BEFORE anything else
         if (!shouldAllowSend()) {
+            showThrottleToast()
             timber.log.Timber.w("Message send throttled")
             return
         }

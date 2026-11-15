@@ -33,12 +33,15 @@ class AttachmentRepository(
     private val context: Context?,
     private val userRepository: UserRepository
 ) {
-    // Deliberately longer timeouts than SupabaseHttp.client: large media upload/download streams
+    // Deliberately longer timeouts than SupabaseHttp.client: large media upload/download streams.
+    // callTimeout is the total-call safety net — a trickling stalled connection must
+    // never hang a transfer (or the UI waiting on it) indefinitely.
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
             .writeTimeout(60, TimeUnit.SECONDS)
+            .callTimeout(5, TimeUnit.MINUTES)
             .build()
     }
 

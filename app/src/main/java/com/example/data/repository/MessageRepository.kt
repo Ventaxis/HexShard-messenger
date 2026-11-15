@@ -390,119 +390,18 @@ class MessageRepository(
                 text
             }
 
-            // Cryptographic envelope
-            val encryptedPayload = try {
-                cryptoRepository.encryptOutboundMessage(
-                    currentUserId = currentUserId,
-                    recipientId = if (isSelfChat) currentUserId else cryptoRecipientId,
-                    conversationId = conversationId,
-                    idempotencyKey = idempotencyKey,
-                    plainText = payloadToEncrypt,
-                    isSelfOrAi = isSelfChat || isAiChat
-                )
-            } catch (peerKeyEx: PeerKeyUnavailableException) {
-                // Requirement 6: Durable Outbox entry with status WAITING_FOR_PEER_KEY
-                // Plaintext is kept local in SQLCipher vault; no encryption or sending occurs until peer key is verified
-                val message = buildOutgoingMessage(
-                    accountId = currentUserId,
-                    chatId = chatId,
-                    sender = sender,
-                    isMe = isMe,
-                    text = text,
-                    timeStr = timeStr,
-                    isAttachment = isAttachment,
-                    type = type,
-                    audioUrl = audioUrl,
-                    duration = duration,
-                    idempotencyKey = idempotencyKey,
-                    conversationId = conversationId,
-                    personaId = resolvedPersona,
-                    status = "waiting_key",
-                    iv = "",
-                    encryptionVersion = 2,
-                    serverMessageId = idempotencyKey
-                )
-                val messageId: Long
-                val outboxRowId: Long
-                if (isMe && idempotencyKey.isNotEmpty()) {
-                    val outboxEntry = OutboxEntity(
-                        accountId = currentUserId,
-                        localMessageId = 0,
-                        chatId = chatId,
-                        conversationId = conversationId,
-                        idempotencyKey = idempotencyKey,
-                        senderId = currentUserId,
-                        recipientId = if (isSelfChat) currentUserId else cryptoRecipientId,
-                        payload = "", // Plaintext withheld until peer key is retrieved & verified
-                        signature = "",
-                        type = type,
-                        timeStr = timeStr,
-                        attempts = 0,
-                        status = "WAITING_FOR_PEER_KEY",
-                        createdAt = System.currentTimeMillis()
-                    )
-                    val pair = chatDao.insertMessageAndOutbox(message, outboxEntry)
-                    messageId = pair.first
-                    outboxRowId = pair.second
-                } else {
-                    messageId = chatDao.insertMessage(message)
-                    outboxRowId = 0L
-                }
-                conversationRepository.updateChatPreview(chatId, com.example.util.TextSanitizer.stripMarkdown(text), timeStr, message.timestamp)
-
-                if (isMe && idempotencyKey.isNotEmpty()) {
-                    backgroundScope.launch {
-                        try {
-                            val pubKey = cryptoRepository.userRepository.getOrFetchUserPublicKey(cryptoRecipientId)
-                            if (pubKey != null) {
-                                val enc = cryptoRepository.encryptOutboundMessage(
-                                    currentUserId = currentUserId,
-                                    recipientId = cryptoRecipientId,
-                                    conversationId = conversationId,
-                                    idempotencyKey = idempotencyKey,
-                                    plainText = payloadToEncrypt,
-                                    isSelfOrAi = false
-                                )
-                                chatDao.updateOutboxPayload(outboxRowId, enc.base64Payload, enc.base64Signature, currentUserId)
-                                chatDao.updateMessageStatus(messageId.toInt(), "sending", currentUserId)
-                                val sentRes = sendRemoteMessage(
-                                    idempotencyKey = idempotencyKey,
-                                    conversationId = conversationId,
-                                    senderId = currentUserId,
-                                    recipientId = cryptoRecipientId,
-                                    payloadBase64 = enc.base64Payload,
-                                    signatureBase64 = enc.base64Signature,
-                                    type = type,
-                                    timeStr = timeStr,
-                                    personaId = resolvedPersona
-                                )
-                                applySendResult(
-                                    sentRes,
-                                    idempotencyKey,
-                                    messageId.toInt(),
-                                    currentUserId,
-                                    outboxRowId,
-                                    outboxFailureStatus = "failed"
-                                )
-                            }
-                        } catch (resEx: Exception) {
-                            Timber.d("Peer key deferred resolution: ${resEx.message}")
-                        }
-                    }
-                }
-                return@withContext messageId
-            }
-
+            // INSTANT LOCAL ECHO: the row must land in the chat BEFORE any crypto or
+            // network work — the peer-key RPC inside encryptOutboundMessage can take
+            // seconds on a slow network, and the old order left the chat empty until
+            // it finished. Encryption, outbox and delivery continue in background.
             val token = context?.let { SecurePrefsManager.getSupabaseAccessToken(it) }?.takeIf { it.isNotBlank() }
             val isRemoteAuthed = currentUserId.isNotBlank() && token != null
             // AI messages don't travel through sendRemoteMessage — their transcript is
             // persisted by the dedicated AI flow, so they must never sit in "sending".
             val initialStatus = when {
-                !isRemoteAuthed -> "pending"
-                isAiChat -> "delivered"
-                else -> "sending"
+                isAiChat && isRemoteAuthed -> "delivered"
+                else -> "pending"
             }
-
             val message = buildOutgoingMessage(
                 accountId = currentUserId,
                 chatId = chatId,
@@ -518,73 +417,99 @@ class MessageRepository(
                 conversationId = conversationId,
                 personaId = resolvedPersona,
                 status = initialStatus,
-                iv = encryptedPayload.iv,
+                iv = "",
                 encryptionVersion = 3,
                 // Server message id stays blank until the server confirms; callers fall
                 // back to idempotencyKey where a client key is acceptable.
                 serverMessageId = ""
             )
-            val messageId: Long
-            val outboxRowId: Long
+            val messageId = chatDao.insertMessage(message)
+            conversationRepository.updateChatPreview(chatId, com.example.util.TextSanitizer.stripMarkdown(text), timeStr, message.timestamp)
+
             // AI prompts are persisted server-side by sendAiTranscript's dedicated flow —
             // a generic outbox entry would be flushed later WITHOUT personaId and
             // corrupt the AI conversation. AI chats never enter the generic outbox.
             val needsGenericOutbox = isMe && idempotencyKey.isNotEmpty() && !isAiChat
-            if (needsGenericOutbox) {
-                val outboxEntry = OutboxEntity(
-                    accountId = currentUserId,
-                    localMessageId = 0,
-                    chatId = chatId,
-                    conversationId = conversationId,
-                    idempotencyKey = idempotencyKey,
-                    senderId = currentUserId,
-                    recipientId = if (isSelfChat) currentUserId else recipientId,
-                    payload = encryptedPayload.base64Payload,
-                    signature = encryptedPayload.base64Signature,
-                    type = type,
-                    timeStr = timeStr,
-                    attempts = 0,
-                    status = "sending",
-                    createdAt = System.currentTimeMillis()
-                )
-                val pair = chatDao.insertMessageAndOutbox(message, outboxEntry)
-                messageId = pair.first
-                outboxRowId = pair.second
-            } else {
-                messageId = chatDao.insertMessage(message)
-                outboxRowId = 0L
-            }
-            conversationRepository.updateChatPreview(chatId, com.example.util.TextSanitizer.stripMarkdown(text), timeStr, message.timestamp)
+            if (!needsGenericOutbox) return@withContext messageId
 
-            // ALL user-initiated messages are enqueued into durable outbox (direct, saved, and AI user prompts)
-            if (isMe && idempotencyKey.isNotEmpty()) {
-                if (isRemoteAuthed && !isAiChat) {
-                    backgroundScope.launch {
-                        try {
-                            val sendResult = sendRemoteMessage(
-                                idempotencyKey = idempotencyKey,
+            backgroundScope.launch {
+                var outboxRowId = 0L
+                try {
+                    val encryptedPayload = try {
+                        cryptoRepository.encryptOutboundMessage(
+                            currentUserId = currentUserId,
+                            recipientId = if (isSelfChat) currentUserId else cryptoRecipientId,
+                            conversationId = conversationId,
+                            idempotencyKey = idempotencyKey,
+                            plainText = payloadToEncrypt,
+                            isSelfOrAi = isSelfChat
+                        )
+                    } catch (peerKeyEx: PeerKeyUnavailableException) {
+                        // Requirement 6: durable outbox entry with a blank payload —
+                        // plaintext withheld until the peer key is fetched and verified.
+                        // The 60s flush loop (resolveWaitingKeyOutboxEntries) encrypts
+                        // the plaintext and delivers the entry once the key resolves.
+                        chatDao.insertOutbox(
+                            OutboxEntity(
+                                accountId = currentUserId,
+                                localMessageId = 0,
+                                chatId = chatId,
                                 conversationId = conversationId,
-                    senderId = currentUserId,
-                    recipientId = if (isSelfChat) currentUserId else cryptoRecipientId,
-                    payloadBase64 = encryptedPayload.base64Payload,
-                                signatureBase64 = encryptedPayload.base64Signature,
+                                idempotencyKey = idempotencyKey,
+                                senderId = currentUserId,
+                                recipientId = cryptoRecipientId,
+                                payload = "",
+                                signature = "",
                                 type = type,
                                 timeStr = timeStr,
-                                personaId = resolvedPersona
+                                attempts = 0,
+                                status = "WAITING_FOR_PEER_KEY",
+                                createdAt = System.currentTimeMillis()
                             )
-                            applySendResult(
-                                sendResult,
-                                idempotencyKey,
-                                messageId.toInt(),
-                                currentUserId,
-                                outboxRowId
-                            )
-                        } catch (netEx: Exception) {
-                            Timber.e(netEx, "Supabase message send network failure, will retry via outbox")
-                            chatDao.updateOutboxAttempt(outboxRowId, "pending", System.currentTimeMillis(), netEx.message ?: "Network error", currentUserId)
-                            updateMessageStatus(messageId.toInt(), "pending", currentUserId)
-                        }
+                        )
+                        return@launch
                     }
+                    outboxRowId = chatDao.insertOutbox(
+                        OutboxEntity(
+                            accountId = currentUserId,
+                            localMessageId = 0,
+                            chatId = chatId,
+                            conversationId = conversationId,
+                            idempotencyKey = idempotencyKey,
+                            senderId = currentUserId,
+                            recipientId = if (isSelfChat) currentUserId else cryptoRecipientId,
+                            payload = encryptedPayload.base64Payload,
+                            signature = encryptedPayload.base64Signature,
+                            type = type,
+                            timeStr = timeStr,
+                            attempts = 0,
+                            status = "sending",
+                            createdAt = System.currentTimeMillis()
+                        )
+                    )
+                    chatDao.updateMessageStatus(messageId.toInt(), "sending", currentUserId)
+                    // Offline: leave the encrypted payload queued for the flush loop —
+                    // a NOT_AUTHENTICATED failure would terminally mark it "error".
+                    if (isRemoteAuthed) {
+                        val sendResult = sendRemoteMessage(
+                            idempotencyKey = idempotencyKey,
+                            conversationId = conversationId,
+                            senderId = currentUserId,
+                            recipientId = if (isSelfChat) currentUserId else cryptoRecipientId,
+                            payloadBase64 = encryptedPayload.base64Payload,
+                            signatureBase64 = encryptedPayload.base64Signature,
+                            type = type,
+                            timeStr = timeStr,
+                            personaId = resolvedPersona
+                        )
+                        applySendResult(sendResult, idempotencyKey, messageId.toInt(), currentUserId, outboxRowId)
+                    }
+                } catch (netEx: Exception) {
+                    Timber.e(netEx, "Background message send failed, will retry via outbox")
+                    if (outboxRowId > 0) {
+                        chatDao.updateOutboxAttempt(outboxRowId, "pending", System.currentTimeMillis(), netEx.message ?: "Network error", currentUserId)
+                    }
+                    chatDao.updateMessageStatus(messageId.toInt(), "pending", currentUserId)
                 }
             }
 
