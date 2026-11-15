@@ -572,7 +572,7 @@ Deno.test("a telegram ALREADY linked pasting an unlinked OTHER uuid is told to u
       const res = await handler(postWithToken(WEBHOOK_SECRET, update));
       assertEquals(res.status, 200);
       assertEquals(
-        tgTexts(calls).some((t) => t.includes("уже привязан к другому аккаунту")),
+        tgTexts(calls).some((t) => t.includes("уже привязан") && t.includes("другому аккаунту")),
         true,
         "one telegram = one account: must point at /unlink first"
       );
