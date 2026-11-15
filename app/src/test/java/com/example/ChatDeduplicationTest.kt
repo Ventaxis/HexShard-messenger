@@ -35,6 +35,7 @@ class FakeChatDao : ChatDao {
     override suspend fun insertMessages(messages: List<MessageEntity>) {}
     override suspend fun toggleChatPin(chatId: Int, accountId: String) {}
     override suspend fun updateChatPreview(chatId: Int, preview: String, time: String, timestamp: Long, accountId: String) {}
+    override suspend fun updateChatRecipientId(chatId: Int, recipientId: String, accountId: String) {}
     override fun getMessagesForChatForAccount(chatId: Int, accountId: String): Flow<List<MessageEntity>> = flowOf(emptyList())
     override fun getMessagesForAiPersona(chatId: Int, accountId: String, personaId: String): Flow<List<MessageEntity>> = flowOf(emptyList())
     override suspend fun getAllAiMessagesForAccount(accountId: String): List<MessageEntity> = emptyList()
