@@ -21,6 +21,10 @@ async function sha256Hex(text: string): Promise<string> {
     .join("");
 }
 
+function isUuidTest(value: string): boolean {
+  return /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value);
+}
+
 // Challenge minting rate limit per Telegram chat: /start <account uuid> mints a challenge
 // for any existing profile, so without a cap one chat could spam rows for every known UUID.
 const CHALLENGE_MINT_WINDOW_MS = 5 * 60 * 1000;
@@ -84,17 +88,21 @@ export async function handler(req: Request): Promise<Response> {
   }
 
   const updateId = body?.update_id;
+  const callbackQuery = body?.callback_query;
   const message = body?.message || body?.edited_message;
-  if (!message || !message.text) {
+  if (!message && !callbackQuery) {
     // Non-text message or update type (e.g. inline query, reaction); acknowledge with 200
     return new Response("OK", { status: 200 });
   }
 
-  const chatType = message.chat?.type;
-  const rawText: string = message.text.trim();
-  const chatId = message.chat?.id;
-  const telegramUserId = message.from?.id;
-  const telegramUsername = message.from?.username ?? "";
+  // Inline-keyboard presses arrive as callback_query updates: the action rides in
+  // .data, the target chat in callback_query.message.chat.
+  const isCallback = Boolean(callbackQuery);
+  const chatType: string | undefined = isCallback ? callbackQuery.message?.chat?.type : message.chat?.type;
+  const rawText: string = isCallback ? String(callbackQuery.data ?? "").trim() : String(message.text ?? "").trim();
+  const chatId = isCallback ? callbackQuery.message?.chat?.id : message.chat?.id;
+  const telegramUserId = isCallback ? callbackQuery.from?.id : message.from?.id;
+  const telegramUsername = message?.from?.username ?? "";
 
   if (!chatId || !telegramUserId) {
     return new Response("OK", { status: 200 });
@@ -103,23 +111,26 @@ export async function handler(req: Request): Promise<Response> {
   // F009: Strict check - only process verifications in private direct messages with the bot
   if (chatType && chatType !== "private") {
     // Avoid sending verification codes into groups or channels
-    try {
-      await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: "⚠️ <b>HexShard Messenger:</b> Пожалуйста, откройте личные сообщения с ботом (@HexShardBot) для подтверждения аккаунта.",
-          parse_mode: "HTML",
-        }),
-      });
-    } catch (_e) {}
+    if (!isCallback) {
+      try {
+        await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: "⚠️ <b>HexShard Messenger:</b> Пожалуйста, откройте личные сообщения с ботом (@HexShardBot) для подтверждения аккаунта.",
+            parse_mode: "HTML",
+          }),
+        });
+      } catch (_e) {}
+    }
     return new Response("OK", { status: 200 });
   }
 
   const supabase = getServiceClient();
 
-  // F008: Deduplicate incoming updates using telegram_processed_updates
+  // F008: Deduplicate incoming updates using telegram_processed_updates —
+  // covers BOTH text messages and inline-button presses.
   if (updateId != null) {
     const { error: insErr } = await supabase
       .from("telegram_processed_updates")
@@ -130,7 +141,7 @@ export async function handler(req: Request): Promise<Response> {
     }
   }
 
-  const sendTgMessage = async (msg: string) => {
+  const sendTgMessage = async (msg: string, replyMarkup?: unknown) => {
     try {
       const resp = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
         method: "POST",
@@ -139,6 +150,7 @@ export async function handler(req: Request): Promise<Response> {
           chat_id: chatId,
           text: msg,
           parse_mode: "HTML",
+          ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
         }),
       });
       if (!resp.ok) {
@@ -149,6 +161,123 @@ export async function handler(req: Request): Promise<Response> {
       console.error("Network error when calling Telegram Bot API:", e);
     }
   };
+
+  const answerCallback = async (callbackQueryId: string) => {
+    try {
+      await fetch(`https://api.telegram.org/bot${botToken}/answerCallbackQuery`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ callback_query_id: callbackQueryId }),
+      });
+    } catch (_e) {}
+  };
+
+  const fetchVerifiedLink = async () => {
+    const { data } = await supabase
+      .from("telegram_links")
+      .select("*")
+      .eq("telegram_user_id", telegramUserId)
+      .eq("verified", true)
+      .maybeSingle();
+    return data ?? null;
+  };
+
+  const mainMenuKeyboard = {
+    inline_keyboard: [
+      [
+        { text: "📋 Статус привязки", callback_data: "menu:status" },
+        { text: "🆘 Восстановить вход", callback_data: "menu:recover" },
+      ],
+      [
+        { text: "🔓 Отвязать Telegram", callback_data: "menu:unlink" },
+      ],
+    ],
+  };
+
+  const sendLinkStatus = async () => {
+    const link = await fetchVerifiedLink();
+    if (!link) {
+      await sendTgMessage(
+        "📋 <b>Статус:</b> Telegram <b>не привязан</b> к аккаунту HexShard.\n\n" +
+        "Чтобы привязать: открой HexShard → Настройки → «Открыть @HexShardBot» и следуй шагам.\n\n" +
+        "<i>Not linked to any HexShard account yet.</i>",
+        mainMenuKeyboard
+      );
+      return;
+    }
+    let username = "";
+    try {
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("username")
+        .eq("id", link.account_id)
+        .maybeSingle();
+      username = profile?.username ?? "";
+    } catch (_e) {}
+    await sendTgMessage(
+      "📋 <b>Статус привязки</b>\n\n" +
+      `✅ Telegram <b>привязан</b> к аккаунту HexShard${username ? `: <b>@${username}</b>` : ""}\n` +
+      `🆔 Telegram ID: <code>${telegramUserId}</code>\n\n` +
+      "Коды приходят <b>только</b> при привязке аккаунта — повторная отправка ID новый код не выдаст.\n\n" +
+      "<i>Linked and verified. Codes are only sent during linking.</i>",
+      mainMenuKeyboard
+    );
+  };
+
+  const sendUnlinkConfirm = async () => {
+    const link = await fetchVerifiedLink();
+    if (!link) {
+      await sendTgMessage("Нечего отвязывать: Telegram <b>не привязан</b> к аккаунту HexShard.");
+      return;
+    }
+    await sendTgMessage(
+      "⚠️ <b>Отвязать Telegram от аккаунта HexShard?</b>\n\n" +
+      "После отвязки восстановление входа через бота (/recover) работать <b>не будет</b>, пока ты не привяжешь аккаунт заново.",
+      {
+        inline_keyboard: [
+          [
+            { text: "🔓 Да, отвязать", callback_data: "unlink:yes" },
+            { text: "❌ Отмена", callback_data: "unlink:no" },
+          ],
+        ],
+      }
+    );
+  };
+
+  // ---- Inline keyboard callbacks ----
+  if (isCallback) {
+    const action = rawText;
+    if (action === "menu:status" || action === "menu:id") {
+      await sendLinkStatus();
+    } else if (action === "menu:recover") {
+      await sendTgMessage(
+        "🆘 <b>Восстановление входа</b>\n\n" +
+        "Отправь команду <code>/recover</code> — бот выдаст одноразовый код на 10 минут.\n" +
+        "Введи его в HexShard на экране входа."
+      );
+    } else if (action === "menu:unlink") {
+      await sendUnlinkConfirm();
+    } else if (action === "unlink:yes") {
+      const link = await fetchVerifiedLink();
+      if (link) {
+        await supabase
+          .from("telegram_links")
+          .delete()
+          .eq("telegram_user_id", telegramUserId)
+          .eq("verified", true);
+        await sendTgMessage(
+          "🔓 <b>Telegram отвязан</b> от аккаунта HexShard.\n\n" +
+          "Восстановление через бота больше не работает. Привязать заново: HexShard → Настройки → «Открыть @HexShardBot»."
+        );
+      } else {
+        await sendTgMessage("Нечего отвязывать: Telegram <b>не привязан</b>.");
+      }
+    } else if (action === "unlink:no") {
+      await sendTgMessage("👌 <b>Отменено</b> — ничего не изменилось.");
+    }
+    await answerCallback(callbackQuery.id);
+    return new Response("OK", { status: 200 });
+  }
 
   // Account recovery (S-7): a user who still has a verified Telegram link but lost app
   // access requests a one-time recovery ticket from the bot. The ticket is a 24-byte
@@ -217,6 +346,33 @@ export async function handler(req: Request): Promise<Response> {
     return new Response("OK", { status: 200 });
   }
 
+  // ---- Simple commands: discoverable UI for everything the bot can do ----
+  if (rawText === "/help") {
+    await sendTgMessage(
+      "🤖 <b>HexShard Auth Bot</b> — привязка аккаунта и восстановление входа.\n\n" +
+      "<b>Команды:</b>\n" +
+      "/status — привязан ли Telegram и к кому\n" +
+      "/id — мой Telegram ID и статус привязки\n" +
+      "/recover — одноразовый код для входа в HexShard\n" +
+      "/unlink — отвязать Telegram от аккаунта\n" +
+      "/help — это меню\n\n" +
+      "<b>Как привязать аккаунт:</b> HexShard → Настройки → «Открыть @HexShardBot» → жми «Запустить».\n\n" +
+      "Коды приходят <b>только при привязке</b>. Просто присланный ID уже привязанного аккаунта код не выдаёт.",
+      mainMenuKeyboard
+    );
+    return new Response("OK", { status: 200 });
+  }
+
+  if (rawText === "/id" || rawText === "/status") {
+    await sendLinkStatus();
+    return new Response("OK", { status: 200 });
+  }
+
+  if (rawText === "/unlink") {
+    await sendUnlinkConfirm();
+    return new Response("OK", { status: 200 });
+  }
+
   // 4. Extract token / challenge ID
   let tokenParam = "";
   if (rawText.startsWith("/start")) {
@@ -230,14 +386,55 @@ export async function handler(req: Request): Promise<Response> {
     tokenParam = rawText;
   }
 
+  // Owner fix 2026-11-15: sending the account ID of an ALREADY linked account used
+  // to mint a fresh code every time, so «коды приходят постоянно» and the user could
+  // never tell whether linking succeeded. The verified link is authoritative.
+  if (isUuidTest(tokenParam)) {
+    const { data: linkByAccount } = await supabase
+      .from("telegram_links")
+      .select("*")
+      .eq("account_id", tokenParam)
+      .eq("verified", true)
+      .maybeSingle();
+    if (linkByAccount) {
+      if (String(linkByAccount.telegram_user_id) === String(telegramUserId)) {
+        await sendTgMessage(
+          "✅ Этот аккаунт HexShard <b>уже привязан</b> именно к этому Telegram.\n\n" +
+          "Новый код не нужен — всё работает. Проверить: /status",
+          mainMenuKeyboard
+        );
+      } else {
+        await sendTgMessage(
+          "⛔️ Этот аккаунт HexShard уже привязан к <b>другому Telegram</b>.\n\n" +
+          "Если это твой аккаунт — отвяжи его в том Telegram (/unlink) и попробуй снова."
+        );
+      }
+      return new Response("OK", { status: 200 });
+    }
+    const { data: linkByTelegram } = await supabase
+      .from("telegram_links")
+      .select("*")
+      .eq("telegram_user_id", telegramUserId)
+      .eq("verified", true)
+      .maybeSingle();
+    if (linkByTelegram) {
+      await sendTgMessage(
+        "ℹ️ Этот Telegram <b>уже привязан</b> к другому аккаунту HexShard.\n\n" +
+        "Один Telegram = один аккаунт. Чтобы привязать другой аккаунт — сначала /unlink.",
+        mainMenuKeyboard
+      );
+      return new Response("OK", { status: 200 });
+    }
+  }
+
   if (!tokenParam) {
     await sendTgMessage(
-      "👋 <b>HexShard Messenger Verification Bot (@HexShardBot)</b>\n\n" +
-      "Для подтверждения и привязки вашего аккаунта Telegram к HexShard Messenger:\n" +
-      "1. Откройте приложение <b>HexShard Messenger</b>.\n" +
-      "2. На шаге подтверждения или в Настройках нажмите <b>«Открыть @HexShardBot»</b>.\n" +
-      "3. Нажмите <b>«Запустить» (Start)</b> для получения 6-значного кода.\n\n" +
-      "<i>To link your Telegram account, please use the verification button inside HexShard Messenger.</i>"
+      "👋 <b>HexShard Auth Bot (@HexShardBot)</b>\n\n" +
+      "Этот бот привязывает Telegram к аккаунту HexShard и помогает восстановить вход.\n\n" +
+      "Для привязки: открой <b>HexShard Messenger</b> → Настройки → <b>«Открыть @HexShardBot»</b> → жми «Запустить».\n\n" +
+      "Команды: /status, /id, /recover, /unlink, /help\n\n" +
+      "<i>Verification codes are only sent during account linking.</i>",
+      mainMenuKeyboard
     );
     return new Response("OK", { status: 200 });
   }

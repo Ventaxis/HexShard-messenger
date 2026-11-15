@@ -159,6 +159,31 @@ serve(async (req: Request) => {
       );
     }
 
+    // Owner report 2026-11-15: the user could never tell whether the code they
+    // typed actually linked the account. Fire-and-forget bot confirmation.
+    try {
+      const botToken = (
+        Deno.env.get("TELEGRAM_BOT_TOKEN") ||
+        Deno.env.get("BOT_TOKEN") ||
+        Deno.env.get("HEXSHARD_TELEGRAM_BOT_TOKEN")
+      )?.trim();
+      const tgUserId = rpcResult.telegram_user_id;
+      if (botToken && tgUserId) {
+        const tgName = rpcResult.telegram_username ? ` (@${rpcResult.telegram_username})` : "";
+        await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: tgUserId,
+            text: `✅ <b>Аккаунт HexShard привязан${tgName}!</b>\n\nТеперь восстановление входа доступно командой <code>/recover</code>. Проверить статус: /status`,
+            parse_mode: "HTML",
+          }),
+        });
+      }
+    } catch (_notifyErr) {
+      // Never fail the verification because the bot notification hiccupped.
+    }
+
     return new Response(
       JSON.stringify({
         verified: true,

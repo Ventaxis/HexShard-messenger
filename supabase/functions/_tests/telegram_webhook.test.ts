@@ -249,3 +249,293 @@ Deno.test("/recover without a verified link explains and mints nothing", async (
     clearSecretEnv();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Owner round 2026-11-15: «привязал я или нет, почему коды приходят постоянно?»
+// The bot must know about existing verified links: no endless code minting,
+// visible status, buttons and an unlink flow.
+
+interface CapturedTgCall { endpoint: string; body: any }
+
+function tgTexts(calls: CapturedTgCall[]): string[] {
+  return calls.filter((c) => c.endpoint.includes("sendMessage")).map((c) => String(c.body.text ?? ""));
+}
+
+function challengeMints(calls: CapturedTgCall[]): any[] {
+  // Supabase REST POSTs to telegram_challenges are mint inserts.
+  return calls.filter((c) => c.endpoint.includes("/rest/v1/telegram_challenges") && String((c.body as any)?.account_id ?? "").length > 0);
+}
+
+function stubFetch(
+  calls: CapturedTgCall[],
+  routes: (url: string, method: string) => Response | undefined,
+  processed?: Set<number>
+): typeof fetch {
+  return ((input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (url.includes("api.telegram.org")) {
+      calls.push({ endpoint: url, body: init?.body ? JSON.parse(String(init.body)) : {} });
+      return Promise.resolve(json({ ok: true }));
+    }
+    if (url.includes("/rest/v1/telegram_processed_updates")) {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { update_id?: number };
+      if (processed) {
+        if (processed.has(body.update_id ?? -1)) return Promise.resolve(json({ code: "23505" }, 409));
+        processed.add(body.update_id ?? -1);
+      }
+      return Promise.resolve(json({}, 201));
+    }
+    const routed = routes(url, method);
+    if (routed) return Promise.resolve(routed);
+    return Promise.resolve(json({ message: "stub" }, 500));
+  }) as typeof fetch;
+}
+
+Deno.test("a UUID already linked to THIS telegram explains instead of minting another code", async () => {
+  clearSecretEnv();
+  Deno.env.set("TELEGRAM_WEBHOOK_SECRET", WEBHOOK_SECRET);
+  Deno.env.set("TELEGRAM_BOT_TOKEN", "stub-bot-token");
+  try {
+    const CHAT_ID = 4242001;
+    const UUID = "a1000000-0000-4000-8000-000000000001";
+    const calls: CapturedTgCall[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = stubFetch(calls, (url) => {
+      if (url.includes("/rest/v1/telegram_links") && url.includes(`account_id=eq.${UUID}`)) {
+        return json({ account_id: UUID, telegram_user_id: CHAT_ID, verified: true });
+      }
+      return undefined;
+    });
+    try {
+      const update = {
+        update_id: 6100,
+        message: { message_id: 6100, chat: { id: CHAT_ID, type: "private" }, from: { id: CHAT_ID }, text: UUID }
+      };
+      const res = await handler(postWithToken(WEBHOOK_SECRET, update));
+      assertEquals(res.status, 200);
+      assertEquals(
+        tgTexts(calls).some((t) => t.includes("уже привязан")),
+        true,
+        "the bot must say the account is already linked to this Telegram"
+      );
+      assertEquals(challengeMints(calls).length, 0, "no new code must be minted for an already-linked account");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  } finally {
+    clearSecretEnv();
+  }
+});
+
+Deno.test("a UUID linked to ANOTHER telegram identity is refused without minting", async () => {
+  clearSecretEnv();
+  Deno.env.set("TELEGRAM_WEBHOOK_SECRET", WEBHOOK_SECRET);
+  Deno.env.set("TELEGRAM_BOT_TOKEN", "stub-bot-token");
+  try {
+    const CHAT_ID = 4242002;
+    const UUID = "a1000000-0000-4000-8000-000000000002";
+    const calls: CapturedTgCall[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = stubFetch(calls, (url) => {
+      if (url.includes("/rest/v1/telegram_links") && url.includes(`account_id=eq.${UUID}`)) {
+        return json({ account_id: UUID, telegram_user_id: 999999, verified: true });
+      }
+      return undefined;
+    });
+    try {
+      const update = {
+        update_id: 6101,
+        message: { message_id: 6101, chat: { id: CHAT_ID, type: "private" }, from: { id: CHAT_ID }, text: UUID }
+      };
+      const res = await handler(postWithToken(WEBHOOK_SECRET, update));
+      assertEquals(res.status, 200);
+      assertEquals(
+        tgTexts(calls).some((t) => t.includes("другому Telegram")),
+        true,
+        "the bot must refuse a foreign linked account"
+      );
+      assertEquals(challengeMints(calls).length, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  } finally {
+    clearSecretEnv();
+  }
+});
+
+Deno.test("/help lists commands and carries an inline keyboard", async () => {
+  clearSecretEnv();
+  Deno.env.set("TELEGRAM_WEBHOOK_SECRET", WEBHOOK_SECRET);
+  Deno.env.set("TELEGRAM_BOT_TOKEN", "stub-bot-token");
+  try {
+    const CHAT_ID = 4242003;
+    const calls: CapturedTgCall[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = stubFetch(calls, () => undefined);
+    try {
+      const update = {
+        update_id: 6102,
+        message: { message_id: 6102, chat: { id: CHAT_ID, type: "private" }, from: { id: CHAT_ID }, text: "/help" }
+      };
+      const res = await handler(postWithToken(WEBHOOK_SECRET, update));
+      assertEquals(res.status, 200);
+      const texts = tgTexts(calls);
+      assertEquals(texts.some((t) => t.includes("/recover")), true, "/help must list /recover");
+      assertEquals(texts.some((t) => t.includes("/status")), true, "/help must list /status");
+      const keyboard = calls.find((c) => c.endpoint.includes("sendMessage") && c.body.reply_markup);
+      assertEquals(!!keyboard, true, "/help must carry an inline keyboard");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  } finally {
+    clearSecretEnv();
+  }
+});
+
+Deno.test("/status reports the linked account username for a linked telegram", async () => {
+  clearSecretEnv();
+  Deno.env.set("TELEGRAM_WEBHOOK_SECRET", WEBHOOK_SECRET);
+  Deno.env.set("TELEGRAM_BOT_TOKEN", "stub-bot-token");
+  try {
+    const CHAT_ID = 4242004;
+    const calls: CapturedTgCall[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = stubFetch(calls, (url) => {
+      if (url.includes("/rest/v1/telegram_links")) {
+        return json({ account_id: "acc-1", telegram_user_id: CHAT_ID, verified: true });
+      }
+      if (url.includes("/rest/v1/profiles")) return json({ username: "ventaxis" });
+      return undefined;
+    });
+    try {
+      const update = {
+        update_id: 6103,
+        message: { message_id: 6103, chat: { id: CHAT_ID, type: "private" }, from: { id: CHAT_ID }, text: "/status" }
+      };
+      const res = await handler(postWithToken(WEBHOOK_SECRET, update));
+      assertEquals(res.status, 200);
+      const texts = tgTexts(calls).join("\n");
+      assertEquals(texts.includes("ventaxis"), true, "status must show the linked HexShard username");
+      assertEquals(texts.includes("привязан"), true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  } finally {
+    clearSecretEnv();
+  }
+});
+
+Deno.test("/status explains when nothing is linked", async () => {
+  clearSecretEnv();
+  Deno.env.set("TELEGRAM_WEBHOOK_SECRET", WEBHOOK_SECRET);
+  Deno.env.set("TELEGRAM_BOT_TOKEN", "stub-bot-token");
+  try {
+    const CHAT_ID = 4242005;
+    const calls: CapturedTgCall[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = stubFetch(calls, (url) => {
+      if (url.includes("/rest/v1/telegram_links")) return json(null);
+      return undefined;
+    });
+    try {
+      const update = {
+        update_id: 6104,
+        message: { message_id: 6104, chat: { id: CHAT_ID, type: "private" }, from: { id: CHAT_ID }, text: "/status" }
+      };
+      const res = await handler(postWithToken(WEBHOOK_SECRET, update));
+      assertEquals(res.status, 200);
+      assertEquals(tgTexts(calls).some((t) => t.includes("не привязан")), true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  } finally {
+    clearSecretEnv();
+  }
+});
+
+Deno.test("/unlink asks confirmation with an inline button; callback confirms unlink", async () => {
+  clearSecretEnv();
+  Deno.env.set("TELEGRAM_WEBHOOK_SECRET", WEBHOOK_SECRET);
+  Deno.env.set("TELEGRAM_BOT_TOKEN", "stub-bot-token");
+  try {
+    const CHAT_ID = 4242006;
+    const calls: CapturedTgCall[] = [];
+    let deletes = 0;
+    const processed = new Set<number>();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = stubFetch(calls, (url, method) => {
+      if (url.includes("/rest/v1/telegram_links")) {
+        if (method === "DELETE") { deletes++; return new Response(null, { status: 204 }); }
+        return json({ account_id: "acc-9", telegram_user_id: CHAT_ID, verified: true });
+      }
+      return undefined;
+    }, processed);
+    try {
+      const askUpdate = {
+        update_id: 6105,
+        message: { message_id: 6105, chat: { id: CHAT_ID, type: "private" }, from: { id: CHAT_ID }, text: "/unlink" }
+      };
+      const askRes = await handler(postWithToken(WEBHOOK_SECRET, askUpdate));
+      assertEquals(askRes.status, 200);
+      const ask = calls.find((c) => c.endpoint.includes("sendMessage") && c.body.reply_markup);
+      assertEquals(!!ask, true, "/unlink must ask via inline keyboard");
+      assertEquals(
+        JSON.stringify(ask?.body.reply_markup).includes("unlink:yes"),
+        true,
+        "confirmation must go through the unlink:yes callback"
+      );
+
+      const yesUpdate = {
+        update_id: 6106,
+        callback_query: { id: "cbq1", data: "unlink:yes", from: { id: CHAT_ID }, message: { chat: { id: CHAT_ID, type: "private" } } }
+      };
+      const yesRes = await handler(postWithToken(WEBHOOK_SECRET, yesUpdate));
+      assertEquals(yesRes.status, 200);
+      assertEquals(deletes, 1, "confirmed unlink must delete the verified link exactly once");
+      assertEquals(
+        calls.some((c) => c.endpoint.includes("answerCallbackQuery")),
+        true,
+        "callbacks must be answered so the button stops spinning"
+      );
+      assertEquals(tgTexts(calls).some((t) => t.includes("отвязан")), true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  } finally {
+    clearSecretEnv();
+  }
+});
+
+Deno.test("callback_query updates are deduplicated by update_id like messages", async () => {
+  clearSecretEnv();
+  Deno.env.set("TELEGRAM_WEBHOOK_SECRET", WEBHOOK_SECRET);
+  Deno.env.set("TELEGRAM_BOT_TOKEN", "stub-bot-token");
+  try {
+    const CHAT_ID = 4242007;
+    const calls: CapturedTgCall[] = [];
+    let deletes = 0;
+    const processed = new Set<number>();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = stubFetch(calls, (url, method) => {
+      if (url.includes("/rest/v1/telegram_links")) {
+        if (method === "DELETE") { deletes++; return new Response(null, { status: 204 }); }
+        return json({ account_id: "acc-9", telegram_user_id: CHAT_ID, verified: true });
+      }
+      return undefined;
+    }, processed);
+    try {
+      const cbUpdate = (uid: number) => ({
+        update_id: uid,
+        callback_query: { id: `cbq${uid}`, data: "unlink:yes", from: { id: CHAT_ID }, message: { chat: { id: CHAT_ID, type: "private" } } }
+      });
+      await handler(postWithToken(WEBHOOK_SECRET, cbUpdate(6107)));
+      await handler(postWithToken(WEBHOOK_SECRET, cbUpdate(6107)));
+      assertEquals(deletes, 1, "the duplicate callback must be skipped");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  } finally {
+    clearSecretEnv();
+  }
+});
