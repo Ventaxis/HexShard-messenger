@@ -3212,6 +3212,7 @@ fun VoiceMessagePayload(
     val isPlaying by playerHelper.isPlaying.collectAsStateWithLifecycle()
     val currentPosition by playerHelper.currentPosition.collectAsStateWithLifecycle()
     val coroutineScope = rememberCoroutineScope()
+    val strings = LocalStrings.current
     
     var isLoading by remember { mutableStateOf(false) }
 
@@ -3252,7 +3253,6 @@ fun VoiceMessagePayload(
                                     // Complete
                                 }
                             } else {
-                                val strings = LocalStrings.current
                                 val reason = com.example.data.repository.AttachmentRepository.DownloadDiagnostics.lastReason
                                 android.widget.Toast.makeText(
                                     context,
