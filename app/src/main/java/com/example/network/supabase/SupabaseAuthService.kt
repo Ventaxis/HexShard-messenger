@@ -365,6 +365,18 @@ object SupabaseAuthService {
             }
             deviceRegistration.await()
 
+            // Post-registration backstop: if the Keystore read failed above, the
+            // profile row was created with blank public keys and every peer's sends
+            // to this account would wait for a key forever. Retry generation and
+            // publish while the served row is still blank (never clobber existing).
+            if (identityPubKey.isBlank() || signingPubKey.isBlank()) {
+                try {
+                    com.example.data.repository.UserRepository(context).ensureMyKeysPublished(accountId)
+                } catch (e: Exception) {
+                    Timber.w(e, "Post-signup identity key heal deferred")
+                }
+            }
+
             SignUpResult.Success(
                 accountId = accountId,
                 username = cleanUsername,
@@ -562,6 +574,14 @@ object SupabaseAuthService {
                         }
                 } catch (e: Exception) {
                     Timber.w(e, "Profile public-key repair deferred")
+                }
+            } else {
+                // Keystore read failed in this session: retry generation and publish
+                // while the served row is still blank, so the account is not keyless.
+                try {
+                    com.example.data.repository.UserRepository(context).ensureMyKeysPublished(accountId)
+                } catch (e: Exception) {
+                    Timber.w(e, "Sign-in identity key heal deferred")
                 }
             }
 

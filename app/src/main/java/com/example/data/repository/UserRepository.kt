@@ -589,6 +589,71 @@ class UserRepository(
         signingKeyCache.clear()
     }
 
+    /**
+     * Publish-decision for [ensureMyKeysPublished]: an account may publish its
+     * identity keys ONLY while the served profile row is still blank. An
+     * existing key is never clobbered — peers pinned it (TOFU), and a device
+     * overwriting it would silently break every peer's ECDH derivation.
+     */
+    fun shouldPublishIdentityKeys(servedPub: String, servedSign: String): Boolean =
+        servedPub.isBlank() || servedSign.isBlank()
+
+    /**
+     * Self-heal for keyless accounts. Registration can complete with blank
+     * public keys when the Keystore read throws during signUp (the exception
+     * is swallowed and the profile row is created with public_key = '') — from
+     * then on every peer's sends to that account land in WAITING_FOR_PEER_KEY
+     * forever. Publishes the device's identity keys only while the served row
+     * is blank; returns true when the server ends up holding both keys.
+     */
+    suspend fun ensureMyKeysPublished(accountId: String): Boolean = withContext(Dispatchers.IO) {
+        if (accountId.isBlank()) return@withContext false
+        try {
+            E2ECryptoManager.generateKeyPairIfNeeded(accountId)
+        } catch (e: Exception) {
+            Timber.w(e, "ensureMyKeysPublished: key generation deferred")
+        }
+        val pub = try { E2ECryptoManager.getMyPublicKey(accountId) } catch (_: Exception) { null }
+            ?: return@withContext false
+        val sign = try { E2ECryptoManager.getMySigningPublicKey(accountId) } catch (_: Exception) { null }
+            ?: return@withContext false
+        val served = fetchProfileKeysDirect(accountId)
+        if (!shouldPublishIdentityKeys(served.first, served.second)) {
+            // Server already holds keys for this account — never clobber them.
+            return@withContext true
+        }
+        Timber.i("ensureMyKeysPublished: served profile keys blank, publishing device identity keys")
+        uploadMyPublicKeys(accountId)
+    }
+
+    /**
+     * Direct profile-row key fetch for the self-heal check. getOrFetchUserPublicKey
+     * cannot be reused here: it short-circuits to the LOCAL keystore key when asked
+     * for the current user, which would always look "published".
+     */
+    private suspend fun fetchProfileKeysDirect(accountId: String): Pair<String, String> =
+        withContext(Dispatchers.IO) {
+            try {
+                val baseUrl = SupabaseConfig.getBaseUrl()
+                val anonKey = SupabaseConfig.getAnonKey(context)
+                if (anonKey.isBlank()) return@withContext "" to ""
+                val token = context?.let { SecurePrefsManager.getSupabaseAccessToken(it) } ?: ""
+                val url = "$baseUrl/rest/v1/profiles?id=eq.${encodeFilterValue(accountId)}&select=public_key,signing_key"
+                val req = SupabaseHttp.request(url, token.takeIf { it.isNotBlank() }, anonKey).get().build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@withContext "" to ""
+                    val body = resp.body?.string() ?: return@withContext "" to ""
+                    val arr = JSONArray(body)
+                    if (arr.length() == 0) return@withContext "" to ""
+                    val obj = arr.getJSONObject(0)
+                    obj.optString("public_key", "") to obj.optString("signing_key", "")
+                }
+            } catch (e: Exception) {
+                Timber.w(e, "fetchProfileKeysDirect failed for ${accountId.take(8)}")
+                "" to ""
+            }
+        }
+
     suspend fun uploadMyPublicKeys(userId: String): Boolean = withContext(Dispatchers.IO) {
         val baseUrl = SupabaseConfig.getBaseUrl()
         val anonKey = SupabaseConfig.getAnonKey(context)

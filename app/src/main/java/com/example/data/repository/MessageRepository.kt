@@ -384,11 +384,9 @@ class MessageRepository(
             // from the decrypted JSON (SyncManager.resolveMessageContent). Media and
             // voice senders pass isAttachment=false, so the old isAttachment gate
             // dropped the URL entirely and the peer rendered a broken attachment card.
-            val payloadToEncrypt = if (audioUrl != null) {
-                com.example.util.MediaMessagePayload.encode(text, audioUrl, type, duration)
-            } else {
-                text
-            }
+            val payloadToEncrypt = com.example.util.MediaMessagePayload.plaintextForOutgoing(
+                text = text, audioUrl = audioUrl, type = type, duration = duration
+            )
 
             // INSTANT LOCAL ECHO: the row must land in the chat BEFORE any crypto or
             // network work — the peer-key RPC inside encryptOutboundMessage can take
@@ -444,11 +442,14 @@ class MessageRepository(
                             plainText = payloadToEncrypt,
                             isSelfOrAi = isSelfChat
                         )
-                    } catch (peerKeyEx: PeerKeyUnavailableException) {
-                        // Requirement 6: durable outbox entry with a blank payload —
-                        // plaintext withheld until the peer key is fetched and verified.
-                        // The 60s flush loop (resolveWaitingKeyOutboxEntries) encrypts
-                        // the plaintext and delivers the entry once the key resolves.
+                    } catch (encEx: Exception) {
+                        if (encEx is kotlinx.coroutines.CancellationException) throw encEx
+                        // PeerKeyUnavailable OR any other encryption failure (Keystore
+                        // glitch, key-directory RPC outage): the local message row
+                        // already exists but has no retry vehicle yet. Insert a durable
+                        // blank-payload entry the 60s flush loop re-encrypts later —
+                        // otherwise the row is stranded "pending" forever with no
+                        // outbox record and no way to recover it.
                         chatDao.insertOutbox(
                             OutboxEntity(
                                 accountId = currentUserId,

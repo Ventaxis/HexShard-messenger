@@ -41,6 +41,12 @@ class SyncManager(
     @Volatile
     private var realtimeStarted = false
 
+    // Identity-key self-heal runs once per SyncManager session: it covers
+    // accounts registered with blank published keys (Keystore glitch during
+    // signUp) that would otherwise strand every peer send in WAITING_FOR_PEER_KEY.
+    @Volatile
+    private var keyHealAttempted = false
+
     // Server-derived ids are interpolated into PostgREST filter URLs; anything outside
     // this shape must never reach the query string (filter-injection guard).
     private val SAFE_ID_REGEX = Regex("^[A-Za-z0-9_-]{1,128}$")
@@ -69,6 +75,16 @@ class SyncManager(
                 }
             } catch (e: Exception) {
                 Timber.w("Failed to recover stale outbox: ${e.message}")
+            }
+            // 1b. Publish identity keys if the served profile row is still blank
+            // (keyless accounts make every peer's sends wait for a key forever).
+            if (!keyHealAttempted) {
+                keyHealAttempted = true
+                try {
+                    cryptoRepository.userRepository.ensureMyKeysPublished(currentUserId)
+                } catch (e: Exception) {
+                    Timber.w("Identity key heal deferred: ${e.message}")
+                }
             }
             // 2. Perform initial catch-up sync once upon startup
             performCatchUpSync(currentUserId)
@@ -806,18 +822,30 @@ class SyncManager(
                 val pubKey = cryptoRepository.userRepository.getOrFetchUserPublicKey(peerId)
                 if (pubKey != null) {
                     val localMsg = chatDao.getMessageByIdempotencyKey(entry.idempotencyKey, currentUserId)
-                    if (localMsg != null && localMsg.text.isNotBlank()) {
-                        val enc = cryptoRepository.encryptOutboundMessage(
-                            currentUserId = currentUserId,
-                            recipientId = peerId,
-                            conversationId = entry.conversationId,
-                            idempotencyKey = entry.idempotencyKey,
-                            plainText = localMsg.text,
-                            isSelfOrAi = false
+                    if (localMsg != null) {
+                        // Media rows must re-encrypt the SAME payload the immediate
+                        // path would build — URL inside the JSON, not just the caption.
+                        val plainText = com.example.util.MediaMessagePayload.plaintextForOutgoing(
+                            text = localMsg.text,
+                            audioUrl = localMsg.audioUrl,
+                            type = localMsg.type,
+                            duration = localMsg.duration
                         )
-                        chatDao.updateOutboxPayload(entry.id, enc.base64Payload, enc.base64Signature, currentUserId)
-                        chatDao.updateMessageStatus(localMsg.id, "sending", currentUserId)
-                        Timber.i("Resolved peer key for waiting outbox entry ${entry.idempotencyKey}")
+                        if (com.example.util.MediaMessagePayload.hasEncodableContent(localMsg.text, localMsg.audioUrl)) {
+                            val enc = cryptoRepository.encryptOutboundMessage(
+                                currentUserId = currentUserId,
+                                recipientId = peerId,
+                                conversationId = entry.conversationId,
+                                idempotencyKey = entry.idempotencyKey,
+                                plainText = plainText,
+                                isSelfOrAi = false
+                            )
+                            chatDao.updateOutboxPayload(entry.id, enc.base64Payload, enc.base64Signature, currentUserId)
+                            chatDao.updateMessageStatus(localMsg.id, "sending", currentUserId)
+                            Timber.i("Resolved peer key for waiting outbox entry ${entry.idempotencyKey}")
+                        } else {
+                            Timber.w("Waiting outbox entry ${entry.idempotencyKey} has no encodable content; skipping")
+                        }
                     }
                 }
             } catch (e: Exception) {
