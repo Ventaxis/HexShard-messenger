@@ -96,7 +96,8 @@ Speak like this:
 - Never open with generic assistant phrases ("Как ИИ-ассистент…", "Я всего лишь модель…", "Чем я могу помочь…"). Start with the substance.
 - If you don't know something, say what you would check instead of inventing facts.
 - Messages starting with "/" are plain text from the user: you have no executable commands, never pretend you ran one.
-- If web search context is provided, ground your answer in it and mention what you used.
+- If web search context is provided, ground your answer in it, prefer it over training data for anything time-sensitive, and mention what you used.
+- Think through hard questions silently, step by step; the user sees ONLY the final answer — never show your reasoning process.
 
 Example of your voice (copy the tone, not the content):
 User: почему VPN иногда режет скорость?
@@ -116,7 +117,8 @@ Character:
 - Confident, a bit cocky, never rude. At most one emoji, and only if it adds meaning.
 - Respond in the user's language (Russian or English). Never mix languages in one sentence.
 - Messages starting with "/" are plain text: you have no executable commands, never pretend you ran one.
-- If web search context is provided, ground your answer in it.` + VENTAXIS_FACTS;
+- If web search context is provided, ground your answer in it and prefer it over training data for anything time-sensitive.
+- Think silently, answer only with the final result — never show your reasoning process.` + VENTAXIS_FACTS;
 
 // Model routing: per-persona parameters with fallback chain (primary first).
 // Temperature 2.0 previously flattened both personas into a bland average AND
@@ -130,7 +132,9 @@ interface ModelSpec {
 }
 const MODEL_CHAINS: Record<string, ModelSpec[]> = {
   ventaxis: [
-    { model: "openai/gpt-oss-120b", temperature: 0.7, max_completion_tokens: 8192, top_p: 0.9, reasoning_effort: "medium" },
+    // «поиск с размышлением»: the deep persona reasons at HIGH effort — slower
+    // but materially smarter on technical and analytical questions.
+    { model: "openai/gpt-oss-120b", temperature: 0.7, max_completion_tokens: 8192, top_p: 0.9, reasoning_effort: "high" },
     { model: "qwen/qwen3.8-27b", temperature: 0.8, max_completion_tokens: 4096, top_p: 0.95, reasoning_effort: "low" },
   ],
   hexagon: [
@@ -150,6 +154,29 @@ const SEARCH_TRIGGER_RE = new RegExp(
   "i"
 );
 
+/**
+ * Search decision for «поиск с размышлением»: explicit search intents always
+ * search; any informational question (question-shaped, ≥4 words) searches too
+ * so the answer is grounded instead of guessed. Small talk never costs a
+ * search round-trip.
+ */
+export function shouldSearch(text: string): boolean {
+  const t = text.trim();
+  if (t.length < 8) return false;
+  const words = t.split(/\s+/);
+  if (words.length < 3) return false;
+  if (SEARCH_TRIGGER_RE.test(t)) return true;
+  return /\?$/.test(t) && words.length >= 4;
+}
+
+/**
+ * Reasoning models (gpt-oss / qwen3) may emit their thinking process inline as
+ * <think>…</think>. The chat is for humans — strip every block and trim.
+ */
+export function stripThink(text: string): string {
+  return text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+}
+
 async function tavilySearch(query: string): Promise<string | null> {
   if (!TAVILY_API_KEY) return null;
   try {
@@ -161,11 +188,11 @@ async function tavilySearch(query: string): Promise<string | null> {
       },
       body: JSON.stringify({
         query: query.slice(0, 400),
-        max_results: 3,
-        search_depth: "basic",
+        max_results: 5,
+        search_depth: "advanced",
         include_answer: false,
       }),
-      signal: AbortSignal.timeout(6000),
+      signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) return null;
     const data = await res.json();
@@ -378,7 +405,7 @@ export async function handler(req: Request): Promise<Response> {
     // Web search (Tavily) for search-like user questions; skipped for image turns
     let webContext: string | null = null;
     const lastUserText = latestUserText(contextBudget);
-    if (TAVILY_API_KEY && !hasImage && lastUserText.length > 2 && SEARCH_TRIGGER_RE.test(lastUserText)) {
+    if (TAVILY_API_KEY && !hasImage && shouldSearch(lastUserText)) {
       webContext = await tavilySearch(lastUserText);
     }
 
@@ -423,7 +450,7 @@ export async function handler(req: Request): Promise<Response> {
         const data = await res.json();
         let candidate = data?.choices?.[0]?.message?.content;
         if (candidate && typeof candidate === "string" && candidate.trim().length > 0) {
-          reply = candidate.trim() + (hasImage && spec.model.startsWith("qwen/") ? visionFallbackNotice : "");
+          reply = stripThink(candidate) + (hasImage && spec.model.startsWith("qwen/") ? visionFallbackNotice : "");
           usedModel = spec.model;
           break;
         }
@@ -470,7 +497,7 @@ export async function handler(req: Request): Promise<Response> {
           const data = await res.json();
           const candidate = data?.choices?.[0]?.message?.content;
           if (candidate && typeof candidate === "string" && candidate.trim().length > 0) {
-            reply = candidate.trim() + visionFallbackNotice;
+            reply = stripThink(candidate) + visionFallbackNotice;
             usedModel = `${spec.model} (text-only fallback)`;
           }
         } else {

@@ -11,7 +11,7 @@ Deno.env.set("SUPABASE_URL", "https://stub.supabase.co");
 Deno.env.set("SUPABASE_ANON_KEY", "stub-anon-key");
 Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "stub-service-key");
 
-const { handler } = await import("../gemini-assistant/index.ts");
+const { handler, stripThink, shouldSearch } = await import("../gemini-assistant/index.ts");
 
 const groqCalls: string[] = [];
 const groqBodies: Record<string, unknown>[] = [];
@@ -268,6 +268,86 @@ Deno.test("error responses carry meta (region, model_attempted) for diagnostics"
     assertEquals(json.code, "UNKNOWN_PERSONA");
     assertEquals(json.meta !== undefined, true, "diagnostic meta block is required");
     assertEquals(typeof json.meta.region, "string");
+  } finally {
+    restoreFetch();
+  }
+});
+
+// --- Search + reasoning upgrade (owner: «им нужен поиск с размышлением») ---
+
+Deno.test("stripThink removes hidden reasoning blocks and trims the answer", () => {
+  assertEquals(stripThink("<think>step1 step2</think>Готовый ответ"), "Готовый ответ");
+  assertEquals(stripThink("<think>\nмного\nстрок\n</think>\n\nОтвет после"), "Ответ после");
+  assertEquals(stripThink("Ответ без размышлений"), "Ответ без размышлений");
+  assertEquals(stripThink("До <think>x</think> После"), "До  После");
+});
+
+Deno.test("shouldSearch triggers on explicit search intents", () => {
+  assertEquals(shouldSearch("Что такое квантовый компьютер?"), true);
+  assertEquals(shouldSearch("найди новости про крипту"), true);
+  assertEquals(shouldSearch("погугли курс биткоина"), true);
+  assertEquals(shouldSearch("who is the president of France"), true);
+});
+
+Deno.test("shouldSearch triggers on informational questions, skips small talk", () => {
+  assertEquals(shouldSearch("Почему VPN иногда режет скорость сильно?"), true);
+  assertEquals(shouldSearch("как дела?"), false, "small talk must never cost a search round-trip");
+  assertEquals(shouldSearch("привет"), false);
+  assertEquals(shouldSearch("спс"), false);
+});
+
+Deno.test("tavily search runs at advanced depth with 5 results", async () => {
+  let tavilyBody: Record<string, unknown> = {};
+  installFetchStub();
+  try {
+    globalThis.fetch = ((input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes("api.tavily.com")) {
+        tavilyBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ results: [{ title: "t", content: "c", url: "https://example.com" }] }),
+            { status: 200 }
+          )
+        );
+      }
+      if (url.includes("api.groq.com")) {
+        groqCalls.push(url);
+        return Promise.resolve(
+          new Response(JSON.stringify({ choices: [{ message: { content: "Ответ" } }] }), { status: 200 })
+        );
+      }
+      if (url.includes("/auth/v1/user")) {
+        return Promise.resolve(new Response(JSON.stringify({ id: "user-tavily-depth", aud: "authenticated" }), { status: 200 }));
+      }
+      return Promise.resolve(new Response("stub", { status: 500 }));
+    }) as typeof fetch;
+    const req = new Request("https://project.functions.supabase.co/gemini-assistant", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer tok-tavily-depth" },
+      body: JSON.stringify({
+        persona_id: "ventaxis",
+        messages: [{ role: "user", text: "Что такое квантовый компьютер?" }]
+      })
+    });
+    const res = await handler(req);
+    assertEquals(res.status, 200);
+    assertEquals(tavilyBody.search_depth, "advanced", "deep persona deserves advanced search");
+    assertEquals(tavilyBody.max_results, 5, "5 results for grounded answers");
+  } finally {
+    restoreFetch();
+  }
+});
+
+Deno.test("reasoning model output with <think> block is stripped before the user sees it", async () => {
+  installFetchStub({
+    groqBody: { choices: [{ message: { content: "<think>Сначала разберём вопрос… потом ответим…</think>Коротко: да." } }] }
+  });
+  try {
+    const res = await handler(aiRequest("ventaxis", "tok-think"));
+    assertEquals(res.status, 200);
+    const json = await res.json();
+    assertEquals(json.reply, "Коротко: да.", "raw reasoning must never leak into the chat");
   } finally {
     restoreFetch();
   }
