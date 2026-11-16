@@ -175,6 +175,15 @@ class UserRepository(
 
     companion object {
         private const val KEY_CACHE_TTL_MS = 24 * 60 * 60 * 1000L // 24 hours
+
+        /**
+         * Publish-decision for [ensureMyKeysPublished]: an account may publish its
+         * identity keys ONLY while the served profile row is still blank. An
+         * existing key is never clobbered — peers pinned it (TOFU), and a device
+         * overwriting it would silently break every peer's ECDH derivation.
+         */
+        fun shouldPublishIdentityKeys(servedPub: String, servedSign: String): Boolean =
+            servedPub.isBlank() || servedSign.isBlank()
         private val UUID_REGEX = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
         private val USERNAME_REGEX = Regex("^[A-Za-z0-9_]{1,32}$")
 
@@ -588,15 +597,6 @@ class UserRepository(
         publicKeyCache.clear()
         signingKeyCache.clear()
     }
-
-    /**
-     * Publish-decision for [ensureMyKeysPublished]: an account may publish its
-     * identity keys ONLY while the served profile row is still blank. An
-     * existing key is never clobbered — peers pinned it (TOFU), and a device
-     * overwriting it would silently break every peer's ECDH derivation.
-     */
-    fun shouldPublishIdentityKeys(servedPub: String, servedSign: String): Boolean =
-        servedPub.isBlank() || servedSign.isBlank()
 
     /**
      * Self-heal for keyless accounts. Registration can complete with blank
